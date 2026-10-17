@@ -1,0 +1,6 @@
+{
+  "server": "https://probe.example.com",
+  "nodeId": "n01",
+  "token": "在此填入服务端为该节点生成的 token",
+  "interval": 30
+}

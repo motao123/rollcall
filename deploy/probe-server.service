@@ -1,0 +1,23 @@
+[Unit]
+Description=Probe Server (fleet monitoring)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=probe
+Group=probe
+WorkingDirectory=/opt/probe
+ExecStart=/opt/probe/probe-server -addr :9080 -data /opt/probe/data
+Restart=always
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/probe/data
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

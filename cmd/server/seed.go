@@ -1,0 +1,174 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"time"
+
+	"github.com/motao/probe/internal/model"
+	"github.com/motao/probe/internal/store"
+)
+
+// seedDemo 生成一组贴近真实的演示数据，用于预览 UI 而不必先部署 Agent。
+// 仅在 -demo 参数下调用，生产环境不会执行。
+func seedDemo(st *store.Store) {
+	type spec struct {
+		name, provider, region, group, expire, os string
+		price                                     float64
+		cur                                       string
+		baseCPU, baseMem                          float64
+		disk                                      float64
+	}
+
+	specs := []spec{
+		{"腾讯云-sg", "腾讯云", "新加坡", "prod", "2030-03-07", "Debian 12", 0, "CNY", 22, 38, 58},
+		{"腾讯云-上海", "腾讯云", "上海", "prod", "2027-06-12", "Debian 13", 0, "CNY", 34, 55, 71},
+		{"阿里云-成都", "阿里云", "成都", "prod", "2027-01-20", "Ubuntu 22.04", 0, "CNY", 18, 44, 62},
+		{"华为云-香港", "华为云", "香港", "prod", "2026-12-01", "Ubuntu 22.04", 0, "CNY", 27, 41, 49},
+		{"netcup-1o", "netcup", "德国", "probe", "2027-03-15", "Debian 12", 6.5, "USD", 12, 31, 34},
+		{"netcup-RS1000", "netcup", "德国", "prod", "2027-08-02", "Debian 12", 14.0, "USD", 41, 63, 77},
+		{"racknerd-圣何塞", "racknerd", "美国", "probe", "2027-02-18", "Debian 12", 11.0, "USD", 8, 22, 28},
+		{"racknerd-纽约", "racknerd", "美国", "probe", "2026-11-09", "Debian 12", 11.0, "USD", 16, 37, 41},
+		{"racknerd-DC02", "racknerd", "美国", "test", "2026-10-28", "Debian 12", 9.5, "USD", 5, 19, 23},
+		{"DMIT-49.9", "DMIT", "美国", "prod", "2027-05-30", "Debian 12", 49.9, "USD", 33, 52, 66},
+		{"dmit-wee", "DMIT", "美国", "prod", "2027-04-11", "Debian 12", 36.9, "USD", 45, 58, 72},
+		{"棉花云-香港", "棉花云", "香港", "probe", "2026-12-25", "Debian 12", 0, "CNY", 9, 26, 31},
+		{"bestvm.cloud-tw", "bestvm", "台湾", "probe", "2027-07-19", "Debian 12", 18.0, "USD", 14, 29, 38},
+		{"hostyun-us", "hostyun", "美国", "test", "2026-11-30", "CentOS 7", 7.0, "USD", 3, 17, 21},
+		{"武汉-独服", "自建", "武汉", "prod", "2029-01-01", "Ubuntu 24.04", 0, "CNY", 52, 68, 88},
+	}
+
+	now := time.Now().Unix()
+	rnd := rand.New(rand.NewSource(20261017))
+
+	for i, sp := range specs {
+		id := fmt.Sprintf("n%02d", i+1)
+		st.UpsertNode(&model.Node{
+			ID: id, Name: sp.name, Provider: sp.provider, Region: sp.region,
+			Group: sp.group, ExpireAt: sp.expire, Price: sp.price,
+			Currency: sp.cur, Weight: i, Note: "", Token: "demo-" + id,
+		})
+
+		cores := 2
+		if sp.baseCPU > 30 {
+			cores = 4
+		}
+		st.AddMetrics(id, model.HostInfo{
+			Hostname: sp.name, OS: sp.os, Kernel: "6.1.0-53-amd64",
+			Arch: "x86_64", CPUModel: "Intel Xeon / AMD EPYC", Cores: cores, Virt: "KVM",
+		}, model.Metrics{TS: now - 86400})
+
+		// 24 小时历史，30s 间隔
+		var total uint64 = 26_000_000_000
+		for t := now - 86400; t <= now; t += 30 {
+			phase := float64(t%86400) / 86400 * 2 * math.Pi
+			// 日间高、夜间低的双峰曲线 + 抖动
+			wave := 0.55 + 0.35*math.Sin(phase-math.Pi/2)
+			noise := (rnd.Float64() - 0.5) * 8
+
+			cpu := clampF(sp.baseCPU*wave*1.15+noise, 0.4, 99)
+			mem := clampF(sp.baseMem+wave*9+noise*0.5, 5, 97)
+
+			// 制造两个正在发生的告警场景（最近 1 小时持续越界）
+			if sp.name == "武汉-独服" && t > now-3600 {
+				cpu = clampF(89+noise*0.6, 0, 99)
+			}
+			if sp.name == "netcup-RS1000" && t > now-3600 {
+				mem = clampF(91+noise*0.4, 0, 97)
+			}
+
+			diskUsed := uint64(float64(59*1024) * sp.disk / 100 * 1024 * 1024)
+			total += uint64(rnd.Intn(900_000))
+
+			st.AddMetrics(id, model.HostInfo{}, model.Metrics{
+				TS:       t,
+				CPUPct:   round2(cpu),
+				Load1:    round2(cpu / 100 * float64(cores) * 1.6),
+				Load5:    round2(cpu / 100 * float64(cores) * 1.3),
+				Load15:   round2(cpu / 100 * float64(cores) * 1.1),
+				MemUsed:  uint64(float64(4*1024) * mem / 100 * 1024 * 1024),
+				MemTotal: 4 * 1024 * 1024 * 1024,
+				SwapUsed: 0, SwapTotal: 2 * 1024 * 1024 * 1024,
+				DiskUsed:  diskUsed,
+				DiskTotal: 59 * 1024 * 1024 * 1024,
+				NetRx:     total,
+				NetTx:     total / 3,
+				TCPConn:   int(cpu*2.1) + rnd.Intn(40),
+				Uptime:    uint64(now-t) + 86400*13,
+				Procs:     120 + rnd.Intn(60),
+			})
+		}
+	}
+
+	// 离线节点：模拟 1 台失联
+	st.AddMetrics("n08", model.HostInfo{}, model.Metrics{TS: now - 900})
+
+	// 服务探测目标
+	svcs := []model.Service{
+		{ID: "s1", NodeID: "n01", Name: "主控面板", Type: "http", Target: "https://43.156.17.202:8008", Interval: 60, Enabled: true},
+		{ID: "s2", NodeID: "n01", Name: "imotao.com", Type: "http", Target: "https://imotao.com", Interval: 60, Enabled: true},
+		{ID: "s3", NodeID: "n02", Name: "kvm.cx", Type: "http", Target: "https://kvm.cx", Interval: 60, Enabled: true},
+		{ID: "s4", NodeID: "n03", Name: "冷行日记", Type: "http", Target: "https://imotao.com/blog", Interval: 120, Enabled: true},
+		{ID: "s5", NodeID: "n15", Name: "MySQL 3306", Type: "tcp", Target: "58.49.150.222:3306", Interval: 60, Enabled: true},
+		{ID: "s6", NodeID: "n15", Name: "nginx 443", Type: "tcp", Target: "58.49.150.222:443", Interval: 60, Enabled: true},
+		{ID: "s7", NodeID: "n06", Name: "CDN 回源", Type: "http", Target: "https://cdn.nat.tf", Interval: 120, Enabled: true},
+	}
+	for i := range svcs {
+		st.UpsertService(&svcs[i])
+	}
+
+	// 24 小时探测历史
+	cert := map[string]int{"s2": 42, "s3": 8, "s7": 15, "s4": 63}
+	for _, sv := range svcs {
+		cd := -1
+		if v, ok := cert[sv.ID]; ok {
+			cd = v
+		}
+		for t := now - 86400; t <= now; t += int64(sv.Interval) {
+			ok := true
+			lat := 30 + rnd.Intn(120)
+			if sv.ID == "s5" && t > now-7200 {
+				ok = false // 制造一个服务不可用场景
+				lat = 0
+			}
+			if rnd.Float64() < 0.004 {
+				ok = false
+			}
+			st.AddServiceResult(model.ServiceResult{
+				ServiceID: sv.ID, TS: t, OK: ok, LatencyMs: lat, CertDays: cd,
+			})
+		}
+	}
+
+	// 演示用告警规则：Duration 设为 0 以便启动后立即触发（真实规则见 alert.DefaultRules）
+	for _, r := range []*model.AlertRule{
+		{ID: "r_offline", Name: "节点失联", Metric: "offline", Op: "gt", Threshold: 1, Duration: 0, Severity: "critical", Enabled: true},
+		{ID: "r_cpu", Name: "CPU 持续高负载", Metric: "cpu", Op: "gt", Threshold: 85, Duration: 0, Severity: "warn", Enabled: true},
+		{ID: "r_mem", Name: "内存使用率过高", Metric: "mem", Op: "gt", Threshold: 88, Duration: 0, Severity: "warn", Enabled: true},
+		{ID: "r_disk", Name: "磁盘空间不足", Metric: "disk", Op: "gt", Threshold: 85, Duration: 0, Severity: "critical", Enabled: true},
+	} {
+		st.UpsertRule(r)
+	}
+
+	// 历史告警记录（用于展示已恢复的条目）
+	nowTS := now
+	st.OpenAlert(&model.Alert{
+		ID: "al_hist_1", RuleID: "r_net", RuleName: "服务不可用",
+		NodeID: "n15", NodeName: "武汉-独服", Severity: "warn",
+		Value: 0, Message: "MySQL 3306 探测失败：connection refused",
+		StartedAt: nowTS - 8600, ResolvedAt: nowTS - 6000,
+	})
+}
+
+func clampF(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func round2(f float64) float64 { return math.Round(f*100) / 100 }

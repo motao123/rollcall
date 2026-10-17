@@ -1,0 +1,30 @@
+[Unit]
+Description=Probe Agent (read-only metrics reporter)
+Documentation=https://github.com/motao/probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/probe-agent -config /etc/probe/agent.json
+Restart=always
+RestartSec=10s
+
+# ---- 最小权限加固：Agent 只需要读 /proc ----
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# /proc 读取是唯一需要的权限
+ReadOnlyPaths=/proc
+
+[Install]
+WantedBy=multi-user.target
