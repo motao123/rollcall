@@ -229,13 +229,19 @@ cd rollcall
 go build -o rollcall-server ./cmd/server
 
 # 2. 预览 UI（内置 15 台演示数据，不发起真实探测）
-./rollcall-server -addr :9080 -demo
+#    端口用 9188：本机 9080 常被其他进程占用
+./rollcall-server -addr 127.0.0.1:9188 -demo
 
-# 3. 生产运行
-./rollcall-server -addr :9080 -data /opt/rollcall/data
+# 3. 生产运行（默认只监听回环，对外经反向代理或改用 -auth）
+./rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data
 ```
 
-打开 `http://<host>:9080` 即可。
+打开 `http://127.0.0.1:9188`（预览）或 `http://127.0.0.1:19080`（生产）即可。
+
+> **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
+> 若要让面板对外访问，两种安全做法二选一：① 反向代理到 `127.0.0.1:19080`；
+> ② 改 `-addr 0.0.0.0:19080` 并**同时**加 `-auth user:password`。
+> ⚠ 只改 `-addr 0.0.0.0` 而不加 `-auth`，会把无认证的管理界面直接暴露公网。
 
 ### 接入一台节点
 
