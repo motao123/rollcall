@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,7 +80,7 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 	// 2xx/3xx 视为健康；401/403 说明服务在线但需授权，也计入在线
 	res.OK = resp.StatusCode < 400 || resp.StatusCode == 401 || resp.StatusCode == 403
 	if !res.OK {
-		res.Detail = "status " + itoa(resp.StatusCode)
+		res.Detail = "status " + strconv.Itoa(resp.StatusCode)
 	}
 
 	// TLS 证书剩余天数
@@ -103,28 +104,6 @@ func (r *Runner) doTCP(sv model.Service, res *model.ServiceResult) {
 	}
 	_ = conn.Close()
 	res.OK = true
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [8]byte
-	p := len(b)
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		p--
-		b[p] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		p--
-		b[p] = '-'
-	}
-	return string(b[p:])
 }
 
 // trimErr 压缩网络错误信息，避免把完整堆栈写进数据库。

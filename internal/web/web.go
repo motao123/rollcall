@@ -530,7 +530,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"site":        s.statusTitle(),
+		"site":        statusTitle,
 		"nodes":       out,
 		"services":    svcOut,
 		"online":      online,
@@ -540,13 +540,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// statusTitle 返回公开页标题，未配置时用默认文案。
-func (s *Server) statusTitle() string {
-	if t := s.st.GetSetting("status_title"); t != "" {
-		return t
-	}
-	return "服务状态"
-}
+// statusTitle 是公开页标题。
+//
+// 曾经这里读 GetSetting("status_title")，但全项目**没有任何写入该设置的入口**，
+// 于是它永远返回默认值 —— 属于误导性死代码，已移除。
+// 若要支持自定义标题，需同时补管理 API 的写入路径与前端表单项。
+const statusTitle = "服务状态"
 
 // handleStatusPage 渲染公开状态页 HTML（独立于管理界面，免登录）。
 func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
@@ -635,12 +634,18 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.ID == "" {
 			in.ID = store.NewID("n")
+			// 全新节点：服务端生成上报令牌，不接受客户端指定，避免弱令牌
+			in.Token = store.NewToken()
+		} else if old, ok := s.st.Node(in.ID); ok {
+			// 更新已存在节点：**保留原令牌**，否则会静默轮换导致该节点 Agent 立即 401。
+			// 需要轮换时应显式走独立流程，不应由一次普通的台账更新触发。
+			in.Token = old.Token
+		} else {
+			in.Token = store.NewToken()
 		}
 		if in.Currency == "" {
 			in.Currency = "USD"
 		}
-		// 服务端生成上报令牌，不接受客户端指定，避免弱令牌
-		in.Token = store.NewToken()
 		s.st.UpsertNode(&in)
 		writeJSON(w, 201, adminNodeView{Node: in, Token: in.Token})
 

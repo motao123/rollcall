@@ -37,12 +37,27 @@
 
 Agent 里不 import `os/exec`、不 `net.Listen`，攻击者即使拿到面板也无处下发命令 —— 攻击面从"任意 RCE"降到"只能伪造指标数据"。
 
-可用两条命令验证这个承诺：
+可用以下方式验证这个承诺：
 
 ```bash
-grep -r "os/exec"    ./internal/collect/   # 无输出
-grep -r "net.Listen" ./internal/collect/   # 无输出
+# ① 依赖表里没有 os/exec —— 最快最可靠的证明
+go list -deps ./cmd/agent | grep -x 'os/exec'      # 期望：无输出
+
+# ② 符号表检查（必须用未剥离的二进制，见下方警告）
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/agent-full ./cmd/agent
+go tool nm /tmp/agent-full | wc -l                              # 期望：数千
+go tool nm /tmp/agent-full | grep -cE 'os/exec\.|exec\.Cmd'     # 期望：0
+go tool nm /tmp/agent-full | grep -cE 'net\.Listen|TCPListener' # 期望：0
+
+# ③ 对照组：server 必须有 Listen，否则说明 grep 模式写错了
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/server-full ./cmd/server
+go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0（实测 9）
 ```
+
+> **⚠ 两个会让验证变成"假通过"的坑**（实测踩过）：
+>
+> 1. **不要 grep 源码**。`collect_linux.go` 的文档注释里本身就写着 `os/exec`、`net.Listen` 这些字样，直接 `grep -r "os/exec" ./internal/collect/` 必然命中注释，无法区分注释与真实调用。要看依赖表和符号表。
+> 2. **`go tool nm` 必须用未剥离的二进制**。`make linux` 带 `-ldflags "-s -w"` 会剥掉符号表，此时 nm 报 `no symbol section`，任何 grep 计数都恒为 0 —— 看起来"通过"，其实什么都没验证到。所以先用不带 ldflags 的 `go build` 单独构建一份。
 
 ---
 

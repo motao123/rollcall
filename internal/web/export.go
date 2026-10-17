@@ -42,6 +42,28 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// csvSafe 阻断 CSV 公式注入。
+//
+// Excel / WPS 会把以 = + - @ 开头的单元格当公式求值，
+// 以 Tab(0x09) / CR(0x0D) 开头则可能被当作 DDE 载荷
+// （如 =cmd|'/c calc'!A1）。这些字段并非全部可信：
+// 被攻破的 Agent 可以自报任意 host.os / host.hostname，
+// 经 assets.csv 直达管理员的 Excel —— 那就不再是"只能伪造指标"，
+// 而是能在管理员机器上执行命令。
+//
+// 处理方式是在前缀加单引号，Excel 会将其视为文本：
+// 不截断、不转义其余内容，正常数据零影响。
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
+}
+
 // csvWriter 设置下载响应头并返回带 BOM 的 csv.Writer。
 // BOM 是必需的：Excel 打开无 BOM 的 UTF-8 CSV 会乱码（中文场景高频踩坑）。
 func csvWriter(w http.ResponseWriter, filename string) *csv.Writer {
@@ -77,7 +99,8 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 			online = "是"
 		}
 		_ = cw.Write([]string{
-			v.Name, v.Provider, v.Region, v.Group, v.Host.OS, v.ExpireAt, itoa(days),
+			csvSafe(v.Name), csvSafe(v.Provider), csvSafe(v.Region), csvSafe(v.Group),
+			csvSafe(v.Host.OS), v.ExpireAt, itoa(days),
 			f2(v.Price), v.Currency, f2(mv), online,
 			f1(v.Latest.CPUPct),
 			f1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),
@@ -104,7 +127,7 @@ func (s *Server) exportAlerts(w http.ResponseWriter) {
 		}
 		_ = cw.Write([]string{
 			tsFmt(a.StartedAt), resolved, status, a.Severity,
-			a.RuleName, a.NodeName, f1(a.Value), a.Message,
+			csvSafe(a.RuleName), csvSafe(a.NodeName), f1(a.Value), csvSafe(a.Message),
 		})
 	}
 }
@@ -341,10 +364,19 @@ func tsFmt(ts int64) string {
 	return time.Unix(ts, 0).Format("2006-01-02 15:04:05")
 }
 
-// sanitize 去掉文件名不安全字符。
+// sanitize 清理用于 Content-Disposition 文件名的字符串。
+// 除文件系统非法字符外，必须一并去掉 CR/LF 与控制字符，
+// 否则节点名可被用来注入响应头（node.Name 经管理 API 可控）。
 func sanitize(s string) string {
-	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-", " ", "-")
-	return r.Replace(s)
+	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-", " ", "-", "\r", "", "\n", "", "\t", "-")
+	out := r.Replace(s)
+	// 去除其余控制字符（0x00–0x1F），避免任何头注入残留
+	return strings.Map(func(c rune) rune {
+		if c < 0x20 || c == 0x7f {
+			return -1
+		}
+		return c
+	}, out)
 }
 
 // q 转义 Prometheus 标签值。

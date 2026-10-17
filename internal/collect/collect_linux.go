@@ -9,10 +9,26 @@
 //	· 不 import net 的监听相关能力 —— 不开放任何端口
 //	· 不做任何持久化（除自身配置文件）
 //
-// 可用以下命令验证：
+// 验证方式（在项目根目录执行）：
 //
-//	grep -r "os/exec" ./internal/collect/   # 无输出
-//	grep -r "net.Listen" ./internal/collect/ # 无输出
+//	# ① 依赖表里不应出现 os/exec —— 最可靠、最快的证明
+//	go list -deps ./cmd/agent | grep -x 'os/exec'   # 期望：无输出
+//
+//	# ② 符号表检查：必须用**未剥离**的二进制！
+//	#    Makefile 的 -ldflags "-s -w" 会剥掉符号表，
+//	#    此时 go tool nm 报 "no symbol section" 且 grep 计数恒为 0，
+//	#    看起来"通过"其实是假通过。
+//	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/agent-full ./cmd/agent
+//	go tool nm /tmp/agent-full | wc -l                                  # 期望：数千（证明符号表在）
+//	go tool nm /tmp/agent-full | grep -cE 'os/exec\.|exec\.Cmd'         # 期望：0
+//	go tool nm /tmp/agent-full | grep -cE 'net\.Listen|TCPListener'     # 期望：0
+//
+//	# ③ 对照组：server 二进制必须有 Listen，否则说明 grep 模式写错了
+//	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/server-full ./cmd/server
+//	go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener'    # 期望：>0
+//
+// ⚠ 不要用 grep 扫源码来"验证"：本注释自身就含有这些字符串，
+// 直接 grep 必然命中，无法区分注释与真实调用。
 package collect
 
 import (

@@ -1,10 +1,14 @@
 // Command agent 是只读监控代理。
 //
-// ★ 安全承诺（可用 grep 验证）★
+// ★ 安全承诺 ★
 //   - 不 import os/exec        → 无法执行任何命令
 //   - 不监听任何端口            → 无入站攻击面
 //   - 不接收服务端指令          → 协议为单向上报
 //   - 只读 /proc 与 statfs      → 不触碰用户数据
+//
+// 验证方式见 internal/collect/collect_linux.go 顶部注释与 README 第一节。
+// 要点：用 `go list -deps ./cmd/agent` 看依赖、用**未剥离**二进制的
+// `go tool nm` 看符号，不要 grep 源码（注释本身含这些字样，必然误命中）。
 package main
 
 import (
@@ -14,7 +18,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/motao/probe/internal/collect"
@@ -115,12 +118,4 @@ func pct(used, total uint64) float64 {
 		return 0
 	}
 	return float64(used) / float64(total) * 100
-}
-
-// 保证配置文件路径解析正确（相对路径 → 绝对路径仅用于日志）
-func abs(p string) string {
-	if a, err := filepath.Abs(p); err == nil {
-		return a
-	}
-	return p
 }

@@ -177,24 +177,54 @@ func (s *Store) load() {
 }
 
 // Save 将内存状态写入磁盘。
+//
+// ★ 必须在持锁期间完成**深拷贝**，再于锁外序列化。
+// 早期实现把 s.nodes / s.hosts 等 map 的引用直接塞进快照，
+// 解锁后才 json.Marshal —— 而 marshal 会迭代这些 map，
+// 与并发的 Agent 上报（AddMetrics 写 hosts）、管理 API（UpsertNode/
+// UpsertRule/SetSetting）撞车，触发 Go runtime 的
+// "fatal error: concurrent map iteration and map write"。
+// 该错误**不可 recover**，整个进程直接死亡；而 StartAutoSave 每 60 秒
+// 快照一次、40 节点每 30 秒上报一次，撞车是必然而非偶然。
 func (s *Store) Save() error {
 	s.mu.RLock()
 	snap := snapshot{
-		Nodes:    s.nodes,
-		Hosts:    s.hosts,
-		Services: s.services,
-		Rules:    s.rules,
-		Alerts:   s.alerts,
-		Series:   map[string][]model.Metrics{},
-		SvcRes:   map[string][]model.Metrics{},
-		Tokens:   map[string]string{},
-		Settings: s.settings,
+		Nodes:    make(map[string]*model.Node, len(s.nodes)),
+		Hosts:    make(map[string]model.HostInfo, len(s.hosts)),
+		Services: make(map[string]*model.Service, len(s.services)),
+		Rules:    make(map[string]*model.AlertRule, len(s.rules)),
+		Alerts:   make([]*model.Alert, 0, len(s.alerts)),
+		Series:   make(map[string][]model.Metrics, len(s.series)),
+		SvcRes:   make(map[string][]model.Metrics, len(s.svcRes)),
+		Tokens:   make(map[string]string, len(s.nodes)),
+		Settings: make(map[string]string, len(s.settings)),
 		SavedAt:  time.Now().Unix(),
 	}
+	// 以下均为值类型或纯值字段结构体，解引用即得到独立副本
 	for k, n := range s.nodes {
+		cp := *n
+		snap.Nodes[k] = &cp
 		if n.Token != "" {
 			snap.Tokens[k] = n.Token
 		}
+	}
+	for k, v := range s.hosts {
+		snap.Hosts[k] = v
+	}
+	for k, v := range s.services {
+		cp := *v
+		snap.Services[k] = &cp
+	}
+	for k, v := range s.rules {
+		cp := *v
+		snap.Rules[k] = &cp
+	}
+	for _, a := range s.alerts {
+		cp := *a
+		snap.Alerts = append(snap.Alerts, &cp)
+	}
+	for k, v := range s.settings {
+		snap.Settings[k] = v
 	}
 	for k, r := range s.series {
 		snap.Series[k] = r.Slice()
@@ -252,12 +282,22 @@ func (s *Store) UpsertNode(n *model.Node) {
 	s.nodes[n.ID] = n
 }
 
+// DeleteNode 删除节点及其监控数据，并关闭其所有未恢复的告警。
+//
+// 告警必须一并关闭：否则被删节点的活跃告警会永远挂在「进行中」，
+// 而且它已不在 Nodes() 里，Evaluate 的恢复分支永远走不到 —— 成为无法自愈的僵尸告警。
 func (s *Store) DeleteNode(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.nodes, id)
 	delete(s.series, id)
 	delete(s.hosts, id)
+	now := time.Now().Unix()
+	for _, a := range s.alerts {
+		if a.NodeID == id && a.ResolvedAt == 0 {
+			a.ResolvedAt = now
+		}
+	}
 }
 
 func (s *Store) Nodes() []*model.Node {
@@ -520,9 +560,6 @@ func (s *Store) ActiveAlertsByNode() map[string]int {
 	return m
 }
 
-// PruneSeries 清理超过保留窗口的点（环形缓冲本身会覆盖，此处为一致性保留）。
-func (s *Store) PruneSeries() {}
-
 // ---------- 服务删除 ----------
 
 // DeleteService 删除探测目标及其历史。
@@ -571,4 +608,21 @@ func (s *Store) DeleteRule(id string) bool {
 		}
 	}
 	return true
+}
+
+// ResolveRuleAlerts 关闭某规则名下所有未恢复的告警，返回关闭条数。
+// 规则被停用或删除时调用，避免遗留永远无法自愈的「进行中」告警：
+// 引擎只对启用中的规则跑恢复分支，停用规则的告警再没有别的关闭路径。
+func (s *Store) ResolveRuleAlerts(ruleID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().Unix()
+	n := 0
+	for _, a := range s.alerts {
+		if a.RuleID == ruleID && a.ResolvedAt == 0 {
+			a.ResolvedAt = now
+			n++
+		}
+	}
+	return n
 }

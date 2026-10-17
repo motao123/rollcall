@@ -5,6 +5,7 @@ package alert
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,7 +55,9 @@ func (e *Engine) SetLink(link string) {
 	e.link = link
 }
 
-// send 组装并投递通知（内部持锁，调用方不要持锁）。
+// send 组装并投递通知。
+// 取回调与 link 时短暂持锁，随即释放再调用 fn —— 投递可能耗时十余秒，
+// 绝不能持锁进行，否则评估循环会被阻塞。调用方同样不得持锁。
 func (e *Engine) send(a *model.Alert, resolved bool) {
 	e.mu.Lock()
 	fn, link := e.notify, e.link
@@ -98,12 +101,31 @@ func (e *Engine) Evaluate() {
 	rules := e.st.Rules()
 	now := time.Now().Unix()
 
+	// 本轮实际评估到的 key，用于清理引擎状态：
+	// 节点被删除或规则被停用后，它们不再进入下面的循环，
+	// 其 since/active/lastAt 条目会永久残留（内存泄漏），
+	// 且停用规则名下的活跃告警会永远挂在「进行中」无法自愈。
+	seen := make(map[string]struct{}, len(rules)*len(nodes))
+
 	for _, rule := range rules {
 		if !rule.Enabled {
+			// 停用规则：关闭其遗留的活跃告警，避免僵尸条目
+			if e.st.ResolveRuleAlerts(rule.ID) > 0 {
+				e.mu.Lock()
+				for k := range e.active {
+					if strings.HasPrefix(k, rule.ID+"|") {
+						delete(e.active, k)
+						delete(e.since, k)
+						delete(e.lastAt, k)
+					}
+				}
+				e.mu.Unlock()
+			}
 			continue
 		}
 		for _, n := range nodes {
 			key := rule.ID + "|" + n.ID
+			seen[key] = struct{}{}
 			val, breached := e.check(rule, n.ID, now)
 
 			if !breached {
@@ -175,6 +197,27 @@ func (e *Engine) Evaluate() {
 			}
 		}
 	}
+
+	// 清理本轮未评估到的 key（节点被删或规则被停用/删除）。
+	// 否则 since/active/lastAt 会随节点与规则的增删无限增长。
+	e.mu.Lock()
+	for k := range e.since {
+		if _, ok := seen[k]; !ok {
+			delete(e.since, k)
+		}
+	}
+	for k := range e.active {
+		if _, ok := seen[k]; !ok {
+			delete(e.active, k)
+			delete(e.lastAt, k)
+		}
+	}
+	for k := range e.lastAt {
+		if _, ok := seen[k]; !ok {
+			delete(e.lastAt, k)
+		}
+	}
+	e.mu.Unlock()
 }
 
 // check 返回当前值与是否越界。
@@ -227,6 +270,11 @@ func pct(used, total uint64) float64 {
 }
 
 func describe(rule *model.AlertRule, node string, v float64) string {
+	// op 决定措辞：lt 规则（例如"可用率低于 X"）说"超过阈值"是错的
+	rel := "超过"
+	if rule.Op == "lt" {
+		rel = "低于"
+	}
 	switch rule.Metric {
 	case "offline":
 		if v <= 0 {
@@ -234,10 +282,10 @@ func describe(rule *model.AlertRule, node string, v float64) string {
 		}
 		return fmt.Sprintf("%s 已失联 %s", node, humanDur(int64(v)))
 	case "cpu", "mem", "disk":
-		return fmt.Sprintf("%s %s 使用率 %.1f%%，超过阈值 %.0f%%",
-			node, metricName(rule.Metric), v, rule.Threshold)
+		return fmt.Sprintf("%s %s 使用率 %.1f%%，%s阈值 %.0f%%",
+			node, metricName(rule.Metric), v, rel, rule.Threshold)
 	case "load":
-		return fmt.Sprintf("%s 1 分钟负载 %.2f，超过阈值 %.2f", node, v, rule.Threshold)
+		return fmt.Sprintf("%s 1 分钟负载 %.2f，%s阈值 %.2f", node, v, rel, rule.Threshold)
 	}
 	return fmt.Sprintf("%s %s = %.2f", node, rule.Metric, v)
 }

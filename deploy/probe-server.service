@@ -8,7 +8,10 @@ Type=simple
 User=probe
 Group=probe
 WorkingDirectory=/opt/probe
-ExecStart=/opt/probe/probe-server -addr :9080 -data /opt/probe/data
+# 默认只监听回环：对外访问请经反向代理，或改绑 0.0.0.0 并同时启用 -auth。
+# ⚠ 直接改绑 0.0.0.0 而不加 -auth，会把管理界面暴露到公网
+#   （管理 API 有 X-Admin-Token 保护，但 Web UI 本身无任何认证）。
+ExecStart=/opt/probe/probe-server -addr 127.0.0.1:19080 -data /opt/probe/data
 Restart=always
 RestartSec=5s
 
@@ -18,6 +21,14 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/opt/probe/data
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 进程被攻破时的收敛措施
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
 
 [Install]
 WantedBy=multi-user.target
