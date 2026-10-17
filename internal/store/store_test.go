@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/motao/probe/internal/model"
+	"github.com/motao/rollcall/internal/model"
 )
 
 // TestTokenPersistsAcrossRestart 是回归测试：

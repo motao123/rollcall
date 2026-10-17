@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/motao/probe/internal/model"
-	"github.com/motao/probe/internal/store"
+	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/store"
 )
 
 func TestCSVSafeBlocksFormulaInjection(t *testing.T) {

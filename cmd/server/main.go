@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/probe/internal/alert"
-	"github.com/motao/probe/internal/probe"
-	"github.com/motao/probe/internal/store"
-	"github.com/motao/probe/internal/web"
+	"github.com/motao/rollcall/internal/alert"
+	"github.com/motao/rollcall/internal/probe"
+	"github.com/motao/rollcall/internal/store"
+	"github.com/motao/rollcall/internal/web"
 )
 
 func main() {

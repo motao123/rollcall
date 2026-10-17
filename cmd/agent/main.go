@@ -20,12 +20,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/motao/probe/internal/collect"
-	"github.com/motao/probe/internal/model"
+	"github.com/motao/rollcall/internal/collect"
+	"github.com/motao/rollcall/internal/model"
 )
 
 type config struct {
-	Server   string `json:"server"` // 主控地址，如 https://probe.example.com
+	Server   string `json:"server"` // 主控地址，如 https://rollcall.example.com
 	NodeID   string `json:"nodeId"`
 	Token    string `json:"token"`
 	Interval int    `json:"interval"` // 秒

@@ -3,8 +3,8 @@ package alert
 import (
 	"testing"
 
-	"github.com/motao/probe/internal/model"
-	"github.com/motao/probe/internal/store"
+	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/store"
 )
 
 // TestDisabledRuleResolvesItsAlerts 是回归测试。

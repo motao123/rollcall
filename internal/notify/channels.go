@@ -82,7 +82,7 @@ func Defs() []ChannelDef {
 				{Key: "serverUrl", Label: "服务端地址（可选）", Type: "url",
 					Placeholder: "https://api.day.app/", Default: "https://api.day.app/",
 					Hint: "留空使用官方服务"},
-				{Key: "group", Label: "分组（可选）", Type: "text", Placeholder: "Probe"},
+				{Key: "group", Label: "分组（可选）", Type: "text", Placeholder: "Rollcall"},
 			},
 		},
 		{
@@ -133,7 +133,7 @@ func Defs() []ChannelDef {
 				{Key: "url", Label: "URL", Type: "url", Required: true,
 					Placeholder: "https://your-endpoint/hook"},
 				{Key: "secret", Label: "密钥（可选）", Type: "password", Secret: true,
-					Hint: "放在 X-Probe-Secret 请求头"},
+					Hint: "放在 X-Rollcall-Secret 请求头"},
 			},
 		},
 	}

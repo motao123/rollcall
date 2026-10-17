@@ -7,7 +7,7 @@ package collect
 import (
 	"runtime"
 
-	"github.com/motao/probe/internal/model"
+	"github.com/motao/rollcall/internal/model"
 )
 
 type Collector struct {

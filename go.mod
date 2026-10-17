@@ -1,3 +1,3 @@
-module github.com/motao/probe
+module github.com/motao/rollcall
 
 go 1.22

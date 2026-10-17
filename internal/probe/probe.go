@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/probe/internal/model"
+	"github.com/motao/rollcall/internal/model"
 )
 
 // Runner 负责按间隔执行探测。
@@ -66,7 +66,7 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 		res.Detail = "bad url"
 		return
 	}
-	req.Header.Set("User-Agent", "motao-probe/1.0 (+availability check)")
+	req.Header.Set("User-Agent", "motao-rollcall/1.0 (+availability check)")
 
 	resp, err := r.client.Do(req)
 	res.LatencyMs = int(time.Since(start).Milliseconds())

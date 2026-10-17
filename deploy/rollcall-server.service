@@ -1,17 +1,17 @@
 [Unit]
-Description=Probe Server (fleet monitoring)
+Description=Rollcall Server (fleet monitoring)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=probe
-Group=probe
-WorkingDirectory=/opt/probe
+User=rollcall
+Group=rollcall
+WorkingDirectory=/opt/rollcall
 # 默认只监听回环：对外访问请经反向代理，或改绑 0.0.0.0 并同时启用 -auth。
 # ⚠ 直接改绑 0.0.0.0 而不加 -auth，会把管理界面暴露到公网
 #   （管理 API 有 X-Admin-Token 保护，但 Web UI 本身无任何认证）。
-ExecStart=/opt/probe/probe-server -addr 127.0.0.1:19080 -data /opt/probe/data
+ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data
 Restart=always
 RestartSec=5s
 
@@ -19,7 +19,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/probe/data
+ReadWritePaths=/opt/rollcall/data
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # 进程被攻破时的收敛措施
 ProtectKernelTunables=true

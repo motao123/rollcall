@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/motao/probe/internal/model"
-	"github.com/motao/probe/internal/notify"
-	"github.com/motao/probe/internal/store"
+	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/notify"
+	"github.com/motao/rollcall/internal/store"
 )
 
 type Engine struct {

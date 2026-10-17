@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/probe/internal/alert"
-	"github.com/motao/probe/internal/model"
-	"github.com/motao/probe/internal/notify"
-	"github.com/motao/probe/internal/probe"
-	"github.com/motao/probe/internal/store"
+	"github.com/motao/rollcall/internal/alert"
+	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/notify"
+	"github.com/motao/rollcall/internal/probe"
+	"github.com/motao/rollcall/internal/store"
 )
 
 //go:embed dist
@@ -131,7 +131,7 @@ func withAuth(h http.Handler, s *Server) http.Handler {
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(u), []byte(s.authUser)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(p), []byte(s.authPass)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Probe", charset="UTF-8"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall", charset="UTF-8"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -844,7 +844,7 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 测试消息无视开关与严重度阈值，强制投递
-	probeCfg := &notify.Config{
+	testCfg := &notify.Config{
 		Enabled:     true,
 		MinSeverity: "info",
 		Channels:    make([]notify.ChannelConfig, 0, len(cfg.Channels)),
@@ -855,18 +855,18 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		c.Enabled = true // 未启用的也测，便于配置阶段验证
-		probeCfg.Channels = append(probeCfg.Channels, c)
+		testCfg.Channels = append(testCfg.Channels, c)
 	}
-	if len(probeCfg.Channels) == 0 {
+	if len(testCfg.Channels) == 0 {
 		fail(w, 400, "没有可测试的通道，请先添加通道配置")
 		return
 	}
 
-	results := notify.Send(probeCfg, notify.Message{
+	results := notify.Send(testCfg, notify.Message{
 		Title:    "测试通知",
-		Body:     "这是一条来自 Probe 的测试通知，收到即表示通道配置正确。",
+		Body:     "这是一条来自 Rollcall 的测试通知，收到即表示通道配置正确。",
 		Severity: "info",
-		NodeName: "Probe 控制端",
+		NodeName: "Rollcall 控制端",
 		RuleName: "连通性自检",
 		TS:       time.Now().Unix(),
 		Link:     s.panelLink,

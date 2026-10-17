@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/motao/probe/internal/model"
+	"github.com/motao/rollcall/internal/model"
 )
 
 // RingSize 是每节点保留的采样点数。30s × 2880 = 24h。

@@ -1,5 +1,5 @@
-BINARY_SERVER := probe-server
-BINARY_AGENT  := probe-agent
+BINARY_SERVER := rollcall-server
+BINARY_AGENT  := rollcall-agent
 
 .PHONY: all server agent linux clean demo fmt vet
 
@@ -14,11 +14,11 @@ agent:
 # 交叉编译到 Linux（静态链接，无 CGO 依赖）
 linux:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
-		-o dist/probe-server-linux-amd64 ./cmd/server
+		-o dist/rollcall-server-linux-amd64 ./cmd/server
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
-		-o dist/probe-agent-linux-amd64 ./cmd/agent
+		-o dist/rollcall-agent-linux-amd64 ./cmd/agent
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
-		-o dist/probe-agent-linux-arm64 ./cmd/agent
+		-o dist/rollcall-agent-linux-arm64 ./cmd/agent
 	@ls -lh dist/
 
 demo: server

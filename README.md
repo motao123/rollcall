@@ -1,17 +1,17 @@
-# Probe — 轻量机群监控平台
+# Rollcall — 轻量机群监控平台
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
 ```
-┌─────────────┐   HTTPS POST (单向)   ┌──────────────┐
-│  probe-agent │ ───────────────────▶ │ probe-server │
-│  (只读采集)   │   每 30s 一次指标      │  (Go + 内嵌) │
-└─────────────┘                       └──────┬───────┘
-                                             │
-                                    ┌────────▼────────┐
-                                    │  Web UI (原生)   │
-                                    │  5 个视图        │
-                                    └─────────────────┘
+┌────────────────┐                          ┌─────────────────┐
+│ rollcall-agent │                          │ rollcall-server │
+│  （只读采集）  │      ──▶ 单向 POST       │（Go + 内嵌前端）│
+└────────────────┘                          └─────────────────┘
+                                                    │
+                                            ┌────────────────┐
+                                            │ Web UI（原生） │
+                                            │    5 个视图    │
+                                            └────────────────┘
 ```
 
 ---
@@ -29,7 +29,7 @@
 | 代码可审计性 | 低（仓库 14.2MB） | 中 |
 | 资产台账 | 无 | 无 |
 
-**Probe 的定位：保留前者"看得清"的能力与后者"装得快"的体验，砍掉前者"能被执行"的危险面，并补上两者都缺的资产台账。**
+**Rollcall 的定位：保留前者"看得清"的能力与后者"装得快"的体验，砍掉前者"能被执行"的危险面，并补上两者都缺的资产台账。**
 
 核心取舍是一句话：
 
@@ -99,7 +99,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 | PushPlus | `pushplus` | Token，支持群组推送 |
 | Gotify（自建） | `gotify` | 服务地址 + Token + 优先级 |
 | 邮件 | `email` | SMTP，465 隐式 TLS / 587 STARTTLS |
-| 通用 Webhook | `webhook` | JSON POST，可带 `X-Probe-Secret` |
+| 通用 Webhook | `webhook` | JSON POST，可带 `X-Rollcall-Secret` |
 
 - **可配置多个同类型通道**（例如两个不同的 Telegram 群），每个通道独立启停
 - **逐通道测试**：配置阶段可单独发测试消息，错误原样回传
@@ -225,14 +225,14 @@ Agent 每 30 秒读取以下文件，**不做任何其他操作**：
 
 ```bash
 # 1. 编译（纯标准库，无网络依赖）
-cd probe
-go build -o probe-server ./cmd/server
+cd rollcall
+go build -o rollcall-server ./cmd/server
 
 # 2. 预览 UI（内置 15 台演示数据，不发起真实探测）
-./probe-server -addr :9080 -demo
+./rollcall-server -addr :9080 -demo
 
 # 3. 生产运行
-./probe-server -addr :9080 -data /opt/probe/data
+./rollcall-server -addr :9080 -data /opt/rollcall/data
 ```
 
 打开 `http://<host>:9080` 即可。
@@ -241,23 +241,23 @@ go build -o probe-server ./cmd/server
 
 ```bash
 # 1. 在控制端注册节点（管理 API）
-TOKEN=$(cat /opt/probe/data/admin.token)
+TOKEN=$(cat /opt/rollcall/data/admin.token)
 curl -s -X POST http://127.0.0.1:19080/api/admin/nodes \
   -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"节点名","provider":"racknerd","region":"美国","group":"prod"}'
 # → 返回 {"id":"n_xxxx","token":"<48位上报令牌>", ...}
 
 # 2. 编译 Agent 并部署
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o probe-agent ./cmd/agent
-scp probe-agent root@node:/usr/local/bin/
-scp deploy/agent.json root@node:/etc/probe/agent.json   # 填入 server/nodeId/token
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
+scp rollcall-agent root@node:/usr/local/bin/
+scp deploy/agent.json root@node:/etc/rollcall/agent.json   # 填入 server/nodeId/token
 
 # 3. 安装 systemd 服务
-install -m 644 deploy/probe-agent.service /etc/systemd/system/
-systemctl enable --now probe-agent
+install -m 644 deploy/rollcall-agent.service /etc/systemd/system/
+systemctl enable --now rollcall-agent
 
 # 4. 验证一次上报
-probe-agent -config /etc/probe/agent.json -once
+rollcall-agent -config /etc/rollcall/agent.json -once
 ```
 
 ### 管理 API
@@ -306,7 +306,7 @@ ssh -N -L 19080:127.0.0.1:19080 root@<控制端 IP>
 **C. 内置 Basic Auth（无需面板）**
 
 ```bash
-# 在 probe-server.service 的 ExecStart 追加：
+# 在 rollcall-server.service 的 ExecStart 追加：
 -auth admin:<强密码> -addr 0.0.0.0:19080
 ```
 
@@ -317,7 +317,7 @@ ssh -N -L 19080:127.0.0.1:19080 root@<控制端 IP>
 ## 六、项目结构
 
 ```
-probe/
+rollcall/
 ├── cmd/
 │   ├── server/main.go       服务端入口
 │   └── agent/main.go        只读 Agent 入口
@@ -396,17 +396,17 @@ CSV 带 UTF-8 BOM，Excel 打开中文不乱码；文件名含时间戳。
 
 ```yaml
 scrape_configs:
-  - job_name: probe
+  - job_name: rollcall
     static_configs: [{ targets: ["host:19080"] }]
-    basic_auth: { username: probe, password: "<admin.token 内容>" }
+    basic_auth: { username: rollcall, password: "<admin.token 内容>" }  # username 任意，密码填令牌
 ```
 
 暴露的指标族（均带 `id`/`name` 标签）：
-`probe_build_info`、`probe_nodes_total/online`、`probe_alerts_active`、
-`probe_services_total/down`、`probe_node_{online,cpu_percent,memory_percent,
+`rollcall_build_info`、`rollcall_nodes_total/online`、`rollcall_alerts_active`、
+`rollcall_services_total/down`、`rollcall_node_{online,cpu_percent,memory_percent,
 disk_percent,load1/5/15,uptime_seconds,tcp_connections,processes,
 network_receive_bytes_total,network_transmit_bytes_total,
-last_report_age_seconds}`、`probe_service_{up,latency_milliseconds,
+last_report_age_seconds}`、`rollcall_service_{up,latency_milliseconds,
 certificate_days_remaining,uptime_percent_24h}`
 
 ---
@@ -417,7 +417,7 @@ certificate_days_remaining,uptime_percent_24h}`
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | probe-server / probe-agent 均 active + enabled |
+| 服务状态 | rollcall-server / rollcall-agent 均 active + enabled |
 | 上报频率 | 严格 30 秒一报，曲线无丢点 |
 | 指标正确性 | 与 `df`/`free` 交叉核对无偏差 |
 | 数据持久化 | state.json 写入正常，重启后历史保留 |

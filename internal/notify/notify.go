@@ -97,11 +97,12 @@ func Parse(raw string) (*Config, error) {
 	}
 
 	// 若不含 channels 键，说明是 v1 结构，走迁移
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &probe); err != nil {
+	// peek 只用于探测 JSON 结构，判断是新格式还是 v1 旧格式
+	var peek map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &peek); err != nil {
 		return nil, err
 	}
-	if _, has := probe["channels"]; !has {
+	if _, has := peek["channels"]; !has {
 		var lg legacyConfig
 		if err := json.Unmarshal([]byte(raw), &lg); err != nil {
 			return nil, err
@@ -366,7 +367,7 @@ func postJSON(urlStr string, payload any) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "motao-probe/1.0")
+	req.Header.Set("User-Agent", "motao-rollcall/1.0")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -604,9 +605,9 @@ func sendWebhook(o map[string]string, m Message) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "motao-probe/1.0")
+	req.Header.Set("User-Agent", "motao-rollcall/1.0")
 	if s := o["secret"]; s != "" {
-		req.Header.Set("X-Probe-Secret", s)
+		req.Header.Set("X-Rollcall-Secret", s)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/probe/internal/model"
+	"github.com/motao/rollcall/internal/model"
 )
 
 // Version 是构建版本，写入 Prometheus build_info 与设置页。
@@ -76,7 +76,7 @@ func csvWriter(w http.ResponseWriter, filename string) *csv.Writer {
 }
 
 func (s *Server) exportAssets(w http.ResponseWriter) {
-	cw := csvWriter(w, "probe-assets")
+	cw := csvWriter(w, "rollcall-assets")
 	defer cw.Flush()
 
 	_ = cw.Write([]string{
@@ -112,7 +112,7 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 }
 
 func (s *Server) exportAlerts(w http.ResponseWriter) {
-	cw := csvWriter(w, "probe-alerts")
+	cw := csvWriter(w, "rollcall-alerts")
 	defer cw.Flush()
 
 	_ = cw.Write([]string{
@@ -157,7 +157,7 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cw := csvWriter(w, "probe-metrics-"+sanitize(node.Name))
+	cw := csvWriter(w, "rollcall-metrics-"+sanitize(node.Name))
 	defer cw.Flush()
 
 	_ = cw.Write([]string{
@@ -188,12 +188,12 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 // Prometheus 抓取配置示例：
 //
 //	scrape_configs:
-//	  - job_name: probe
+//	  - job_name: rollcall
 //	    static_configs: [{ targets: ["host:19080"] }]
-//	    basic_auth: { username: probe, password: "<admin.token 内容>" }
+//	    basic_auth: { username: rollcall, password: "<admin.token 内容>" }
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !s.metricsAuthOK(r) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="Probe metrics"`)
+		w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall metrics"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -213,8 +213,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 构建信息
-	help("probe_build_info", "Build information.", "gauge")
-	fmt.Fprintf(&b, "probe_build_info{version=%q,go=%q} 1\n", Version, runtime.Version())
+	help("rollcall_build_info", "Build information.", "gauge")
+	fmt.Fprintf(&b, "rollcall_build_info{version=%q,go=%q} 1\n", Version, runtime.Version())
 
 	// 汇总
 	views := s.buildNodeViews()
@@ -224,12 +224,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			online++
 		}
 	}
-	help("probe_nodes_total", "Total registered nodes.", "gauge")
-	gauge("probe_nodes_total", nil, float64(len(views)))
-	help("probe_nodes_online", "Nodes currently online.", "gauge")
-	gauge("probe_nodes_online", nil, float64(online))
-	help("probe_alerts_active", "Currently active alerts.", "gauge")
-	gauge("probe_alerts_active", nil, float64(s.st.ActiveAlertCount()))
+	help("rollcall_nodes_total", "Total registered nodes.", "gauge")
+	gauge("rollcall_nodes_total", nil, float64(len(views)))
+	help("rollcall_nodes_online", "Nodes currently online.", "gauge")
+	gauge("rollcall_nodes_online", nil, float64(online))
+	help("rollcall_alerts_active", "Currently active alerts.", "gauge")
+	gauge("rollcall_alerts_active", nil, float64(s.st.ActiveAlertCount()))
 
 	svcs := s.st.Services()
 	svcDown := 0
@@ -239,10 +239,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			svcDown++
 		}
 	}
-	help("probe_services_total", "Total service probes.", "gauge")
-	gauge("probe_services_total", nil, float64(len(svcs)))
-	help("probe_services_down", "Service probes currently failing.", "gauge")
-	gauge("probe_services_down", nil, float64(svcDown))
+	help("rollcall_services_total", "Total service probes.", "gauge")
+	gauge("rollcall_services_total", nil, float64(len(svcs)))
+	help("rollcall_services_down", "Service probes currently failing.", "gauge")
+	gauge("rollcall_services_down", nil, float64(svcDown))
 
 	// 节点指标
 	nodeMetrics := []struct {
@@ -251,31 +251,31 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		typ  string
 		get  func(v model.NodeView) float64
 	}{
-		{"probe_node_online", "1 if node reported recently, else 0.", "gauge",
+		{"rollcall_node_online", "1 if node reported recently, else 0.", "gauge",
 			func(v model.NodeView) float64 { return b2f(v.Online) }},
-		{"probe_node_cpu_percent", "CPU usage percent.", "gauge",
+		{"rollcall_node_cpu_percent", "CPU usage percent.", "gauge",
 			func(v model.NodeView) float64 { return v.Latest.CPUPct }},
-		{"probe_node_memory_percent", "Memory usage percent.", "gauge",
+		{"rollcall_node_memory_percent", "Memory usage percent.", "gauge",
 			func(v model.NodeView) float64 { return pctF(v.Latest.MemUsed, v.Latest.MemTotal) }},
-		{"probe_node_disk_percent", "Root disk usage percent.", "gauge",
+		{"rollcall_node_disk_percent", "Root disk usage percent.", "gauge",
 			func(v model.NodeView) float64 { return pctF(v.Latest.DiskUsed, v.Latest.DiskTotal) }},
-		{"probe_node_load1", "1-minute load average.", "gauge",
+		{"rollcall_node_load1", "1-minute load average.", "gauge",
 			func(v model.NodeView) float64 { return v.Latest.Load1 }},
-		{"probe_node_load5", "5-minute load average.", "gauge",
+		{"rollcall_node_load5", "5-minute load average.", "gauge",
 			func(v model.NodeView) float64 { return v.Latest.Load5 }},
-		{"probe_node_load15", "15-minute load average.", "gauge",
+		{"rollcall_node_load15", "15-minute load average.", "gauge",
 			func(v model.NodeView) float64 { return v.Latest.Load15 }},
-		{"probe_node_uptime_seconds", "Node uptime in seconds.", "gauge",
+		{"rollcall_node_uptime_seconds", "Node uptime in seconds.", "gauge",
 			func(v model.NodeView) float64 { return float64(v.Latest.Uptime) }},
-		{"probe_node_tcp_connections", "Established TCP connections.", "gauge",
+		{"rollcall_node_tcp_connections", "Established TCP connections.", "gauge",
 			func(v model.NodeView) float64 { return float64(v.Latest.TCPConn) }},
-		{"probe_node_processes", "Running processes.", "gauge",
+		{"rollcall_node_processes", "Running processes.", "gauge",
 			func(v model.NodeView) float64 { return float64(v.Latest.Procs) }},
-		{"probe_node_network_receive_bytes_total", "Cumulative received bytes.", "counter",
+		{"rollcall_node_network_receive_bytes_total", "Cumulative received bytes.", "counter",
 			func(v model.NodeView) float64 { return float64(v.Latest.NetRx) }},
-		{"probe_node_network_transmit_bytes_total", "Cumulative transmitted bytes.", "counter",
+		{"rollcall_node_network_transmit_bytes_total", "Cumulative transmitted bytes.", "counter",
 			func(v model.NodeView) float64 { return float64(v.Latest.NetTx) }},
-		{"probe_node_last_report_age_seconds", "Seconds since last report.", "gauge",
+		{"rollcall_node_last_report_age_seconds", "Seconds since last report.", "gauge",
 			func(v model.NodeView) float64 {
 				if v.LastSeen == 0 {
 					return -1
@@ -296,10 +296,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		help string
 		get  func(ok bool, lat int, cert int, up float64) float64
 	}{
-		{"probe_service_up", "1 if last probe succeeded.", func(ok bool, lat, cert int, up float64) float64 { return b2f(ok) }},
-		{"probe_service_latency_milliseconds", "Last probe latency in ms.", func(ok bool, lat, cert int, up float64) float64 { return float64(lat) }},
-		{"probe_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", func(ok bool, lat, cert int, up float64) float64 { return float64(cert) }},
-		{"probe_service_uptime_percent_24h", "24h availability percent.", func(ok bool, lat, cert int, up float64) float64 { return up }},
+		{"rollcall_service_up", "1 if last probe succeeded.", func(ok bool, lat, cert int, up float64) float64 { return b2f(ok) }},
+		{"rollcall_service_latency_milliseconds", "Last probe latency in ms.", func(ok bool, lat, cert int, up float64) float64 { return float64(lat) }},
+		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", func(ok bool, lat, cert int, up float64) float64 { return float64(cert) }},
+		{"rollcall_service_uptime_percent_24h", "24h availability percent.", func(ok bool, lat, cert int, up float64) float64 { return up }},
 	}
 	for _, m := range svcMetrics {
 		help(m.name, m.help, "gauge")
