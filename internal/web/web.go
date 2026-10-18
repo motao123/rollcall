@@ -25,6 +25,9 @@ import (
 	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/probe"
 	"github.com/motao/rollcall/internal/store"
+	// 包内已有一个同名函数 sanitize（清理 Content-Disposition 文件名），
+	// 故此处带别名引入。
+	sanitizetext "github.com/motao/rollcall/internal/sanitize"
 )
 
 //go:embed dist
@@ -549,7 +552,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
-	s.st.AddMetrics(node.ID, rep.Host, sanitizeMetrics(rep.Metrics))
+	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics))
 
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -583,6 +586,25 @@ func sanitizeMetrics(m model.Metrics) model.Metrics {
 		m.Procs = 0
 	}
 	return m
+}
+
+// sanitizeHost 清洗 Agent 自报的文本字段。
+//
+// 这些字符串会原样进入内存快照、状态页、CSV 导出、Prometheus 输出与服务端
+// 日志。控制字符能伪造日志换行（把一条记录伪装成两条），双向控制符能让文本
+// 在编辑器与终端里显示成与真实字节序不同的样子 —— 而告警处置恰恰是靠人读
+// 这些文本做判断的，所以必须在入口就清洗掉。
+//
+// 每个字段单独限长：CPU 型号这类字段在某些机器上会很长，统一截断即可，
+// 不需要为此拒绝整份上报。
+func sanitizeHost(h model.HostInfo) model.HostInfo {
+	h.Hostname = sanitizetext.Text(h.Hostname, 128)
+	h.OS = sanitizetext.Text(h.OS, 64)
+	h.Kernel = sanitizetext.Text(h.Kernel, 128)
+	h.Arch = sanitizetext.Text(h.Arch, 32)
+	h.CPUModel = sanitizetext.Text(h.CPUModel, 128)
+	h.Virt = sanitizetext.Text(h.Virt, 32)
+	return h
 }
 
 func clampRange(v, lo, hi float64) float64 {

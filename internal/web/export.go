@@ -205,7 +205,7 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 				strconv.Itoa(p.TCPConn), strconv.Itoa(p.Procs), strconv.FormatUint(p.Uptime, 10),
 			})
 		}
-		flushCSV(w, "rollcall-metrics-"+sanitize(node.Name), buf, cw)
+		flushCSV(w, "rollcall-metrics-"+safeFileName(node.Name), buf, cw)
 		return
 	}
 
@@ -231,7 +231,7 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 			strconv.FormatUint(uint64(p.Count), 10),
 		})
 	}
-	flushCSV(w, "rollcall-metrics-"+sanitize(node.Name), buf, cw)
+	flushCSV(w, "rollcall-metrics-"+safeFileName(node.Name), buf, cw)
 }
 
 // ---------- Prometheus ----------
@@ -502,7 +502,7 @@ func tsFmt(ts int64) string {
 // sanitize 清理用于 Content-Disposition 文件名的字符串。
 // 除文件系统非法字符外，必须一并去掉 CR/LF 与控制字符，
 // 否则节点名可被用来注入响应头（node.Name 经管理 API 可控）。
-func sanitize(s string) string {
+func safeFileName(s string) string {
 	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-", " ", "-", "\r", "", "\n", "", "\t", "-")
 	out := r.Replace(s)
 	// 去除其余控制字符（0x00–0x1F），避免任何头注入残留

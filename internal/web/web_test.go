@@ -146,13 +146,13 @@ func TestSanitizeStripsHeaderInjection(t *testing.T) {
 		{"ctrl\x00\x1fend", "ctrlend"},
 	}
 	for _, c := range cases {
-		got := sanitize(c.in)
+		got := safeFileName(c.in)
 		if got != c.want {
-			t.Errorf("sanitize(%q) = %q, 期望 %q", c.in, got, c.want)
+			t.Errorf("safeFileName(%q) = %q, 期望 %q", c.in, got, c.want)
 		}
 		// 无论输入如何，输出绝不能含 CR/LF
 		if bytes.ContainsAny([]byte(got), "\r\n") {
-			t.Errorf("sanitize(%q) 仍含 CR/LF: %q", c.in, got)
+			t.Errorf("safeFileName(%q) 仍含 CR/LF: %q", c.in, got)
 		}
 	}
 }
