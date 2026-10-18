@@ -10,7 +10,8 @@ Group=rollcall
 WorkingDirectory=/opt/rollcall
 # 默认只监听回环：对外访问请经反向代理。
 # 若要直接改绑 0.0.0.0，必须同时启用 -auth 与内置 TLS（-tls-cert/-tls-key），
-# 否则服务会拒绝启动；匿名公开只读面板需显式加 -allow-public，
+# 否则服务会拒绝启动；未启用 Basic Auth 直接对外监听需显式加 -allow-public
+# （仪表盘数据仍要求管理令牌，对外公开的只有 /status），
 # 明文 HTTP 暴露需显式加 -allow-insecure。
 # 探测与通知默认拒绝私网地址；本机服务探测（如 127.0.0.1:22）与本机自建
 # webhook 需显式开启对应开关；若全部使用公网目标，应删掉这两个参数。

@@ -15,6 +15,7 @@ const state = {
   search: '',
   data: {},
   panelLink: '',
+  authRequired: false,
   timers: [],
 };
 
@@ -79,8 +80,18 @@ function tone(v, warnAt, critAt) {
 /* ---------------- 请求 ---------------- */
 
 async function api(path) {
-  const r = await fetch(path, { headers: { Accept: 'application/json' } });
+  const headers = { Accept: 'application/json' };
+  const tok = adminToken();
+  if (tok) headers['X-Admin-Token'] = tok;
+  const r = await fetch(path, { headers });
+  if (r.status === 401) {
+    state.authRequired = true;
+    const e = new Error('需要管理令牌');
+    e.status = 401;
+    throw e;
+  }
   if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+  state.authRequired = false;
   return r.json();
 }
 
@@ -770,6 +781,8 @@ async function adminApi(path, opts = {}) {
   const txt = await r.text();
   let data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { raw: txt }; }
+  if (r.status === 401) state.authRequired = true;
+  else if (r.ok) state.authRequired = false;
   if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
   return data;
 }
@@ -909,18 +922,22 @@ async function viewSettings() {
           <td>${esc(n.region || '—')}</td>
           <td>${esc(n.group || '—')}</td>
           <td class="mono">${esc(n.expireAt || '—')}</td>
-          <td class="num"><button class="btn tiny danger" data-del-node="${esc(n.id)}">删除</button></td>
+          <td class="num"><button class="btn tiny" data-edit-node="${esc(n.id)}">编辑</button>
+            <button class="btn tiny danger" data-del-node="${esc(n.id)}">删除</button></td>
         </tr>`).join('') || `<tr><td colspan="6"><div class="empty">暂无节点</div></td></tr>`}</tbody>
       </table></div>
       <details class="panel panel-pad">
         <summary class="sum">＋ 新增节点</summary>
         <form id="nodeForm" class="form-grid">
-          ${field('名称', 'name', '', { required: true, placeholder: '例如 racknerd-圣何塞' })}
+          ${field('名称', 'name', '', { required: true, placeholder: '例如 prod-01', hint: '会显示在公开状态页，勿填主机名/IP' })}
           ${field('服务商', 'provider', '', { placeholder: 'racknerd / 腾讯云 …' })}
           ${field('位置', 'region', '', { placeholder: '美国 / 香港 …' })}
           ${field('分组', 'group', '', { placeholder: 'prod / test' })}
           ${field('到期日', 'expireAt', '', { placeholder: '2027-06-01' })}
           ${field('年付价', 'price', '', { type: 'number', placeholder: '11.00' })}
+          ${selectField('币种', 'currency', 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
+          ${field('备注', 'note', '', { placeholder: '可选' })}
+          ${field('排序权重', 'weight', '', { type: 'number', placeholder: '0' })}
           <div class="form-actions"><button class="btn primary" type="submit">创建并获取令牌</button></div>
         </form>
       </details>
@@ -1048,6 +1065,13 @@ async function viewSettings() {
     };
   });
 
+  $$('[data-edit-node]').forEach((b) => {
+    b.onclick = () => {
+      const n = nodes.find((x) => x.id === b.dataset.editNode);
+      if (n) showNodeEdit(n);
+    };
+  });
+
   $$('[data-del-node]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('确认删除该节点？其监控数据也会一并移除。')) return;
@@ -1074,7 +1098,8 @@ async function viewSettings() {
     try {
       const r = await adminApi('/api/admin/nodes', { method: 'POST', body: JSON.stringify({
         name: d.name, provider: d.provider, region: d.region, group: d.group,
-        expireAt: d.expireAt, price: Number(d.price) || 0,
+        expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
+        note: d.note, weight: Number(d.weight) || 0,
       }) });
       toast('节点已创建');
       showAgentConfig(r);
@@ -1292,6 +1317,54 @@ rollcall-agent -config /etc/rollcall/agent.json -once`;
   dlg.onclick = (e) => { if (e.target === dlg) dlg.remove(); };
 }
 
+// showNodeEdit 编辑节点台账，避免为了改名/改价删除节点、丢失历史。
+function showNodeEdit(n) {
+  const dlg = document.createElement('div');
+  dlg.className = 'modal-mask';
+  dlg.innerHTML = `<div class="modal">
+    <div class="modal-title">编辑节点</div>
+    <p class="modal-sub">节点名称会显示在公开状态页，请勿填写主机名、IP 或可识别信息。</p>
+    <form id="editNodeForm" class="form-grid">
+      ${field('名称', 'name', n.name, { required: true, placeholder: '例如 prod-01' })}
+      ${field('服务商', 'provider', n.provider, { placeholder: 'racknerd / 腾讯云 …' })}
+      ${field('位置', 'region', n.region, { placeholder: '美国 / 香港 …' })}
+      ${field('分组', 'group', n.group, { placeholder: 'prod / test' })}
+      ${field('到期日', 'expireAt', n.expireAt, { placeholder: '2027-06-01' })}
+      ${field('年付价', 'price', n.price, { type: 'number', placeholder: '11.00' })}
+      ${selectField('币种', 'currency', n.currency || 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
+      ${field('备注', 'note', n.note, { placeholder: '可选' })}
+      ${field('排序权重', 'weight', n.weight, { type: 'number', placeholder: '0' })}
+      <div class="form-actions">
+        <button class="btn" type="button" id="editCancel">取消</button>
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+    </form>
+  </div>`;
+  document.body.appendChild(dlg);
+  const close = () => dlg.remove();
+  dlg.querySelector('#editCancel').onclick = close;
+  dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  dlg.querySelector('#editNodeForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(e.target);
+    try {
+      await adminApi('/api/admin/nodes/' + encodeURIComponent(n.id), {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: d.name, provider: d.provider, region: d.region, group: d.group,
+          expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
+          note: d.note, weight: Number(d.weight) || 0,
+        }),
+      });
+      close();
+      toast('节点已更新');
+      viewSettings();
+    } catch (err) {
+      toast('保存失败：' + err.message, 'err');
+    }
+  };
+}
+
 /* ---------------- 路由 ---------------- */
 
 const ROUTES = {
@@ -1318,7 +1391,53 @@ function setActiveNav(route) {
   });
 }
 
+function renderTokenGate() {
+  state.authRequired = true;
+  const had = !!adminToken();
+  $('#view').innerHTML = `
+    <div class="panel panel-pad" style="max-width:560px;margin:32px auto">
+      <div class="section-title" style="margin-bottom:6px">需要管理令牌</div>
+      <p style="font-size:12.5px;color:var(--fg-2);margin:0 0 14px">
+        仪表盘包含主机名、内核、服务商、价格等资产信息，需要控制端生成的令牌。
+        它位于服务端数据目录（默认
+        <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>）。
+      </p>
+      ${had ? '<p class="field-hint" style="color:var(--warn);margin:0 0 12px">当前保存的令牌无效，请重新输入或清除。</p>' : ''}
+      <form id="gateForm" class="form-grid">
+        ${field('管理令牌', 'token', '', { type: 'password', placeholder: '粘贴 admin.token 内容', required: true })}
+        <div class="form-actions">
+          <button class="btn primary" type="submit">进入仪表盘</button>
+          ${had ? '<button class="btn" type="button" id="gateClear">清除令牌</button>' : ''}
+        </div>
+      </form>
+      <p class="field-hint" style="margin-top:12px">
+        首次部署也可用 <code>#admin=&lt;令牌&gt;</code> 打开；令牌只保存在浏览器本地。
+      </p>
+    </div>`;
+  $('#gateForm').onsubmit = (e) => {
+    e.preventDefault();
+    lsSet(LS_TOKEN, LS_TOKEN_LEGACY, formData(e.target).token);
+    state.authRequired = false;
+    state.data = {};
+    toast('令牌已保存');
+    render();
+  };
+  if (had) {
+    $('#gateClear').onclick = () => {
+      lsDel(LS_TOKEN, LS_TOKEN_LEGACY);
+      state.authRequired = false;
+      state.data = {};
+      render();
+    };
+  }
+  $('#liveText').textContent = '需要令牌';
+}
+
 async function render() {
+  if (state.authRequired) {
+    renderTokenGate();
+    return;
+  }
   const hash = location.hash.replace(/^#\/?/, '') || 'overview';
   const [route, param] = hash.split('/');
   state.route = route;
@@ -1344,6 +1463,10 @@ async function render() {
     }
     $('#liveText').textContent = '实时';
   } catch (e) {
+    if (e && e.status === 401) {
+      renderTokenGate();
+      return;
+    }
     $('#view').innerHTML = `<div class="panel panel-pad" style="text-align:center;padding:48px 20px">
       <div style="font-size:13px;color:var(--crit);font-weight:600;margin-bottom:6px">数据加载失败</div>
       <div style="font-size:12px;color:var(--fg-3)">${esc(e.message)}</div>
@@ -1418,12 +1541,13 @@ function boot() {
   render();
 
   // 每 20 秒静默刷新当前视图（节点详情页刷新频率更高以体现实时）
+  // 未认证时停止轮询，避免把一次令牌缺失放大成持续的 401 触发限速。
   setInterval(() => {
-    if (document.hidden) return;
+    if (document.hidden || state.authRequired) return;
     if (state.route === 'nodes' && state.param) render();
   }, 20000);
   setInterval(() => {
-    if (document.hidden) return;
+    if (document.hidden || state.authRequired) return;
     if (!(state.route === 'nodes' && state.param)) render();
   }, 30000);
 }

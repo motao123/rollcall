@@ -2,7 +2,6 @@ package web
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -351,18 +350,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-// metricsAuthOK 接受 X-Admin-Token 头或 Basic Auth 密码为管理令牌。
+// metricsAuthOK 接受 X-Admin-Token，或 Basic 密码为管理令牌（用户名任意）；
+// 启用 -auth 时也接受面板凭据，方便同一套 Basic Auth 同时抓指标。
 func (s *Server) metricsAuthOK(r *http.Request) bool {
-	if s.adminToken == "" {
-		return false
-	}
-	if t := r.Header.Get("X-Admin-Token"); t != "" {
-		return subtle.ConstantTimeCompare([]byte(t), []byte(s.adminToken)) == 1
-	}
-	if _, pw, ok := r.BasicAuth(); ok {
-		return subtle.ConstantTimeCompare([]byte(pw), []byte(s.adminToken)) == 1
-	}
-	return false
+	return s.adminTokenOK(r) || s.panelBasicOK(r)
 }
 
 // ---------- 小工具 ----------

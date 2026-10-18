@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -88,10 +87,7 @@ func TestSavePersistsAllSections(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	b, err := os.ReadFile(filepath.Join(dir, "state.json"))
-	if err != nil {
-		t.Fatalf("读快照: %v", err)
-	}
+	b := readSnapshotFile(t, filepath.Join(dir, "state.json"))
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("解析快照: %v", err)

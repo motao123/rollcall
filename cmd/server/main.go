@@ -37,7 +37,7 @@ func main() {
 	panelLink := flag.String("panel-link", "", "面板对外地址（拼进告警通知，可留空）")
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 HTTPS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
-	allowPublic := flag.Bool("allow-public", false, "允许在未启用 Basic Auth 时监听非回环地址")
+	allowPublic := flag.Bool("allow-public", false, "允许未启用 Basic Auth 时监听非回环地址（仪表盘数据仍需管理令牌，/status 保持公开）")
 	allowInsecure := flag.Bool("allow-insecure", false, "允许在非回环地址上使用明文 HTTP（不建议）")
 	allowPrivateProbes := flag.Bool("allow-private-probes", false, "允许探测回环/私网/链路本地目标")
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
@@ -108,7 +108,7 @@ func main() {
 	loopback := isLoopbackListen(*addr)
 	if !loopback {
 		if authUser == "" && !*allowPublic {
-			log.Fatal("拒绝在未启用 Basic Auth 时监听非回环地址；请加 -auth，或显式加 -allow-public 接受公开只读访问")
+			log.Fatal("拒绝在未启用 Basic Auth 时监听非回环地址；请加 -auth，或显式加 -allow-public（仪表盘数据仍需管理令牌，/status 保持公开）")
 		}
 		if *tlsCert == "" && !*allowInsecure {
 			log.Fatal("拒绝在非回环地址上使用明文 HTTP；请配置 -tls-cert/-tls-key，或通过反向代理/隧道，或显式加 -allow-insecure")

@@ -53,13 +53,72 @@ func TestTokenNotLeakedToStateFile(t *testing.T) {
 	if err := st.Save(); err != nil {
 		t.Fatalf("Save 失败: %v", err)
 	}
+	b := readSnapshotFile(t, filepath.Join(dir, "state.json"))
+	// 令牌存在（在 tokens 字段），但 nodes 里不应有 token 键
+	if !contains(string(b), `"tokens"`) {
+		t.Fatal("state.json 缺少 tokens 字段")
+	}
+}
+
+// readSnapshotFile 读取并解压落盘快照，供断言原始 JSON 内容。
+func readSnapshotFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读快照: %v", err)
+	}
+	raw, err := decodeSnapshot(b)
+	if err != nil {
+		t.Fatalf("解压快照: %v", err)
+	}
+	return raw
+}
+
+// TestSnapshotIsGzip 确认快照落盘为 gzip，且仍可完整恢复。
+func TestSnapshotIsGzip(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "tok"})
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	b, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 令牌存在（在 tokens 字段），但 nodes 里不应有 token 键
-	if !contains(string(b), `"tokens"`) {
-		t.Fatal("state.json 缺少 tokens 字段")
+	if len(b) < 2 || b[0] != 0x1f || b[1] != 0x8b {
+		t.Fatalf("state.json 不是 gzip 格式，前 2 字节: %v", b[:min(2, len(b))])
+	}
+	if _, ok := New(dir).Node("n1"); !ok {
+		t.Fatal("gzip 快照重载后节点丢失")
+	}
+}
+
+// TestLoadLegacyPlainSnapshot 保证升级兼容：旧版本写出的明文 JSON 仍可读取。
+func TestLoadLegacyPlainSnapshot(t *testing.T) {
+	oldDir := t.TempDir()
+	st := New(oldDir)
+	st.UpsertNode(&model.Node{ID: "n_old", Name: "旧节点", Token: "old-token"})
+	st.AddMetrics("n_old", model.HostInfo{Hostname: "h"}, model.Metrics{TS: 1000, CPUPct: 1})
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	newDir := t.TempDir()
+	plain := readSnapshotFile(t, filepath.Join(oldDir, "state.json"))
+	if err := os.WriteFile(filepath.Join(newDir, "state.json"), plain, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	re := New(newDir)
+	if err := re.LoadErr(); err != nil {
+		t.Fatalf("明文快照应可读取: %v", err)
+	}
+	got, ok := re.Node("n_old")
+	if !ok || got.Token != "old-token" {
+		t.Fatalf("明文快照内容丢失: %+v ok=%v", got, ok)
+	}
+	if _, _, ok := re.Latest("n_old"); !ok {
+		t.Fatal("明文快照时序丢失")
 	}
 }
 
@@ -100,6 +159,22 @@ func TestLoadCorruptSnapshotIsolated(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "state.json")); !os.IsNotExist(err) {
 		t.Error("损坏文件应被移走，避免下次启动重复失败")
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "state.json.corrupt-*"))
+	if len(matches) != 1 {
+		t.Errorf("应生成一份隔离备份，实际 %d 份", len(matches))
+	}
+}
+
+// TestLoadCorruptGzipIsolated 截断的 gzip 也必须走隔离流程，不能当成空库启动。
+func TestLoadCorruptGzipIsolated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte{0x1f, 0x8b, 0x08, 0x00}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := New(dir)
+	if st.LoadErr() == nil {
+		t.Fatal("损坏的 gzip 快照应返回 LoadErr")
 	}
 	matches, _ := filepath.Glob(filepath.Join(dir, "state.json.corrupt-*"))
 	if len(matches) != 1 {

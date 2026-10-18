@@ -139,9 +139,10 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 不含 IP、服务商、价格、到期日、备注、主机名、内核、架构、节点 ID、上报令牌。
 仅保留：展示名、分组、在线状态、三项使用率、运行时长、24h 可用率色块。
 
-**与 Basic Auth 的关系**：启用 `-auth` 后，`/` 管理界面需登录，
-但 `/status` 与 `/api/status` **仍可匿名访问**（这是公开页的设计意图）。
-管理 API 与 Agent 上报不受影响（前者需令牌，后者需节点 token）。
+**与 Basic Auth 的关系**：启用 `-auth` 后，`/` 管理界面与仪表盘只读数据需要 Basic 登录；
+未启用时，仪表盘只读接口仍需管理令牌（浏览器首次打开会显示令牌输入页）。
+`/status` 与 `/api/status` **始终可匿名访问**（这是公开页的设计意图）。
+管理写接口与 CSV 导出只认 `X-Admin-Token`，Agent 上报只认节点令牌。
 
 ---
 
@@ -149,7 +150,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 
 ### 采集方式：只读、单向、无指令通道
 
-Agent 每 30 秒读取以下文件，**不做任何其他操作**：
+Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒），**不做任何其他操作**：
 
 | 指标 | 来源 |
 |---|---|
@@ -169,8 +170,9 @@ Agent 每 30 秒读取以下文件，**不做任何其他操作**：
 对齐 Komari 的"无数据库"理念，同时保证重启不丢历史：
 
 - 每节点一个**定长环形缓冲**（2880 点 = 24h @30s），全量常驻内存约 30MB
-- 每分钟把状态快照写入 `data/state.json`（先写 `.tmp` 再 rename，保证原子性）
-- 启动时自动恢复；快照损坏会隔离为 `state.json.corrupt-<时间>` 并拒绝启动，
+- 每分钟把状态快照写入 `data/state.json`（gzip 压缩 JSON，先写 `.tmp` 再 rename，保证原子性）
+- 启动时自动恢复；兼容旧版本写出的明文 JSON，首次保存后自动转为 gzip
+- 快照损坏会隔离为 `state.json.corrupt-<时间>` 并拒绝启动，
   而不是静默以空库运行（否则全部节点与令牌会凭空消失）
 
 **为什么不用 SQLite？** 40 台规模下，环形缓冲 + JSON 已足够，且少一个依赖就少一个需要审计和升级的组件。若未来规模翻数倍，替换 `internal/store` 即可，上层无感。
@@ -331,6 +333,12 @@ systemctl enable --now rollcall-agent
 rollcall-agent -config /etc/rollcall/agent.json -once
 ```
 
+> `interval` 单位为秒，默认 30，**最大 60**：服务端 120 秒未收到上报即判定离线，
+> 间隔过大会把一次抖动误报为失联。超出上限时 Agent 会拒绝启动并给出明确提示。
+>
+> `name` 会显示在公开状态页，请使用展示名，**不要填主机名或 IP**。
+> 后续可在「设置」页编辑节点台账（`PUT /api/admin/nodes/{id}`），编辑不会轮换令牌。
+
 > Agent 默认拒绝向**非本机**的明文 HTTP 服务端上报（节点令牌会裸奔）。
 > 远程节点必须使用 `https://`；仅本机回环或明确接受风险时才加 `-allow-insecure`。
 > Agent 不跟随 3xx，确保 `X-Node-Token` 不会被转发到其他主机。
@@ -343,7 +351,8 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 > 2. 内置 TLS：`-addr 0.0.0.0:19080 -tls-cert fullchain.pem -tls-key privkey.pem -auth user:<强密码>`；
 > 3. 仅限可信内网：显式加 `-allow-insecure` 接受明文 HTTP（不推荐）。
 >
-> 如需匿名公开只读面板，必须显式加 `-allow-public`；只加 `-addr 0.0.0.0` 已不会再"静默暴露"。
+> 未启用 Basic Auth 却要直接对外监听，必须显式加 `-allow-public`
+> （仪表盘只读数据仍需管理令牌，只有 `/status` 公开）；只加 `-addr 0.0.0.0` 已不会再"静默暴露"。
 
 完整参数：
 
@@ -354,7 +363,7 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 | `-panel-link` | 空 | 面板对外地址（用于告警链接和 Agent 接入指引） |
 | `-tls-cert` / `-tls-key` | 空 | 同时提供则启用 HTTPS |
 | `-auth` | 空 | `user:password`，启用 Basic Auth（密码不可为空） |
-| `-allow-public` | false | 允许无 Basic Auth 时监听非回环（公开只读） |
+| `-allow-public` | false | 允许无 Basic Auth 时监听非回环（仪表盘数据仍需管理令牌，`/status` 公开） |
 | `-allow-insecure` | false | 允许非回环地址使用明文 HTTP |
 | `-allow-private-probes` | false | 允许 HTTP/TCP 探测内网与回环目标 |
 | `-allow-private-notify` | false | 允许通知通道访问内网/回环目标（自建 Gotify/Bark/Webhook） |
@@ -370,6 +379,7 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 | GET | `/api/admin/nodes` | 列出节点（含上报令牌） |
 | POST | `/api/admin/nodes` | 创建节点，服务端生成 id 与令牌 |
 | GET | `/api/admin/nodes/{id}` | 查看单个节点 |
+| PUT | `/api/admin/nodes/{id}` | 编辑台账字段（保留 ID 与上报令牌） |
 | DELETE | `/api/admin/nodes/{id}` | 删除节点 |
 | GET/POST | `/api/admin/services` | 列出 / 创建探测目标（`enabled` 默认 true） |
 | DELETE | `/api/admin/services/{id}` | 删除探测目标 |
@@ -385,9 +395,27 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 |---|---|---|
 | GET | `/status` | 公开状态页 HTML |
 | GET | `/api/status` | 公开状态页数据（严格脱敏） |
+| GET | `/status.js` | 公开状态页脚本 |
 | GET | `/healthz` | 健康检查 |
 
-一律要求请求头 `X-Admin-Token`。令牌首次启动时自动生成到 `data/admin.token`（0600），也可用 `-admin-token` 显式指定。
+管理接口与 CSV 导出要求请求头 `X-Admin-Token`（写操作不接受 Basic 密码）。
+令牌首次启动时自动生成到 `data/admin.token`（0600），也可用 `-admin-token` 显式指定。
+
+仪表盘只读接口（包含主机名、内核、服务商、价格、到期日等资产信息，不再匿名开放）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/overview` | KPI 汇总 |
+| GET | `/api/nodes` | 节点列表与最新指标 |
+| GET | `/api/nodes/{id}` | 节点详情 |
+| GET | `/api/nodes/{id}/series?range=1h\|6h\|24h` | 历史时序 |
+| GET | `/api/services` | 服务探测状态 |
+| GET | `/api/alerts` | 告警历史 |
+| GET | `/api/rules` | 告警规则 |
+| GET | `/api/assets` | 资产台账视图 |
+
+鉴权：`X-Admin-Token`；启用 `-auth` 时也接受面板 Basic 凭据（已登录用户无需重复粘贴令牌）。
+未通过鉴权时，前端会显示令牌输入页，停止自动刷新，避免持续 401 触发限速。
 
 ### 对外暴露与面板集成
 
@@ -416,7 +444,8 @@ ssh -N -L 19080:127.0.0.1:19080 root@<控制端 IP>
 
 > 非回环绑定要求同时具备 `-auth` 与 TLS（任一缺失都会拒绝启动）。
 > 若确实要用明文 HTTP 暴露到可信内网，必须显式加 `-allow-insecure`；
-> 若要匿名公开只读面板，必须显式加 `-allow-public`。
+> 未启用 Basic Auth 却要直接对外监听，必须显式加 `-allow-public`
+> （仪表盘数据仍需管理令牌，只有 `/status` 公开）。
 
 管理令牌与 Basic Auth 失败会按来源 IP 限速（5 分钟内 10 次失败封禁 10 分钟），
 并记录 `ip/method/path` 审计日志；`X-Admin-Token` 仅通过请求头传递，
@@ -512,7 +541,8 @@ CSV 带 UTF-8 BOM，Excel 打开中文不乱码；文件名含时间戳。
 
 *Prometheus 端点* `GET /metrics`
 
-鉴权：`X-Admin-Token` 头，或 Basic Auth（用户名任意、**密码为管理令牌**）。
+鉴权：`X-Admin-Token` 头，或 Basic Auth（用户名任意、**密码为管理令牌**）；
+启用 `-auth` 时也接受面板 Basic 凭据。`/metrics` 独立校验，不受 Basic 前置拦截影响。
 抓取配置：
 
 ```yaml

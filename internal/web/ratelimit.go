@@ -101,6 +101,13 @@ func (s *Server) isProtectedPath(path string) bool {
 		return true
 	case strings.HasPrefix(path, "/api/export/"), path == "/metrics":
 		return true
+	case strings.HasPrefix(path, "/api/overview"),
+		strings.HasPrefix(path, "/api/nodes"),
+		strings.HasPrefix(path, "/api/services"),
+		strings.HasPrefix(path, "/api/alerts"),
+		strings.HasPrefix(path, "/api/rules"),
+		strings.HasPrefix(path, "/api/assets"):
+		return true
 	}
 	if s.authUser == "" {
 		return false

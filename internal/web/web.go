@@ -90,13 +90,15 @@ func (s *Server) applyNotifyConfig(cfg *notify.Config) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/overview", s.handleOverview)
-	mux.HandleFunc("/api/nodes", s.handleNodes)
-	mux.HandleFunc("/api/nodes/", s.handleNodeDetail)
-	mux.HandleFunc("/api/services", s.handleServices)
-	mux.HandleFunc("/api/alerts", s.handleAlerts)
-	mux.HandleFunc("/api/rules", s.handleRules)
-	mux.HandleFunc("/api/assets", s.handleAssets)
+	// 仪表盘只读数据也包含主机名、内核、服务商、价格等资产信息，
+	// 不能像公开状态页那样匿名下发。统一要求管理令牌或已通过 Basic Auth 的面板用户。
+	mux.HandleFunc("/api/overview", s.requireAdmin(s.handleOverview))
+	mux.HandleFunc("/api/nodes", s.requireAdmin(s.handleNodes))
+	mux.HandleFunc("/api/nodes/", s.requireAdmin(s.handleNodeDetail))
+	mux.HandleFunc("/api/services", s.requireAdmin(s.handleServices))
+	mux.HandleFunc("/api/alerts", s.requireAdmin(s.handleAlerts))
+	mux.HandleFunc("/api/rules", s.requireAdmin(s.handleRules))
+	mux.HandleFunc("/api/assets", s.requireAdmin(s.handleAssets))
 	mux.HandleFunc("/api/report", s.handleReport)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/status", s.handleStatusPage)
@@ -127,6 +129,47 @@ func (s *Server) Handler() http.Handler {
 	return withCommon(s.withAuthGuard(withAuth(mux, s)))
 }
 
+// requireAdmin 保护仪表盘只读接口。
+//
+// 管理令牌优先；启用 -auth 时也接受面板 Basic 凭据，避免已登录用户
+// 为了查看只读页面还要再粘贴一次令牌。写操作仍只认 X-Admin-Token。
+func (s *Server) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.adminTokenOK(r) || s.panelBasicOK(r) {
+			h(w, r)
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+}
+
+// adminTokenOK 接受 X-Admin-Token，或 Basic 密码为管理令牌（用户名任意）。
+func (s *Server) adminTokenOK(r *http.Request) bool {
+	if s.adminToken == "" {
+		return false
+	}
+	if t := r.Header.Get("X-Admin-Token"); t != "" {
+		return subtle.ConstantTimeCompare([]byte(t), []byte(s.adminToken)) == 1
+	}
+	if _, pw, ok := r.BasicAuth(); ok {
+		return subtle.ConstantTimeCompare([]byte(pw), []byte(s.adminToken)) == 1
+	}
+	return false
+}
+
+// panelBasicOK 校验收到的 Basic Auth 是否匹配 -auth 配置的面板凭据。
+func (s *Server) panelBasicOK(r *http.Request) bool {
+	if s.authUser == "" || s.authPass == "" {
+		return false
+	}
+	u, p, ok := r.BasicAuth()
+	if !ok {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(u), []byte(s.authUser)) == 1 &&
+		subtle.ConstantTimeCompare([]byte(p), []byte(s.authPass)) == 1
+}
+
 // withAuth 对浏览器访问启用 Basic Auth；Agent 上报走自己的 token，不受影响。
 func withAuth(h http.Handler, s *Server) http.Handler {
 	if s.authUser == "" {
@@ -141,8 +184,12 @@ func withAuth(h http.Handler, s *Server) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Agent 上报用 X-Node-Token 自行鉴权；/status 与 /api/status 为公开页，
 		// /status.js 是公开页依赖的静态脚本，必须一并放行，否则页面会卡在骨架屏。
-		switch r.URL.Path {
-		case "/api/report", "/healthz", "/status", "/api/status", "/status.js":
+		// 带自身鉴权的 API 也不能被 -auth 的 Basic 前置拦截：
+		//   · /metrics 由 metricsAuthOK 校验管理令牌（否则 README 的 Prometheus 配置恒 401）
+		//   · /api/admin/、/api/export/ 由 adminOK 校验 X-Admin-Token
+		//   · 仪表盘只读接口由 requireAdmin 接受管理令牌或面板 Basic 凭据
+		// 这样启用 -auth 后，API 脚本仍可只带令牌调用，不必再拼一层 Basic。
+		if pathNeedsNoBasic(r.URL.Path) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -156,6 +203,27 @@ func withAuth(h http.Handler, s *Server) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// pathNeedsNoBasic 返回该路径是否已有独立鉴权（或本就公开），
+// 无需再经过 -auth 的 Basic 前置校验。
+func pathNeedsNoBasic(path string) bool {
+	switch path {
+	case "/api/report", "/healthz", "/status", "/api/status", "/status.js", "/metrics":
+		return true
+	}
+	switch {
+	case strings.HasPrefix(path, "/api/admin/"),
+		strings.HasPrefix(path, "/api/export/"),
+		strings.HasPrefix(path, "/api/overview"),
+		strings.HasPrefix(path, "/api/nodes"),
+		strings.HasPrefix(path, "/api/services"),
+		strings.HasPrefix(path, "/api/alerts"),
+		strings.HasPrefix(path, "/api/rules"),
+		strings.HasPrefix(path, "/api/assets"):
+		return true
+	}
+	return false
 }
 
 func withCommon(h http.Handler) http.Handler {
@@ -721,6 +789,35 @@ type adminNodeView struct {
 	Token string `json:"token"`
 }
 
+// validateNodeMeta 清理并校验节点台账字段，返回空字符串表示通过。
+func validateNodeMeta(n *model.Node) string {
+	n.Name = strings.TrimSpace(n.Name)
+	n.Provider = strings.TrimSpace(n.Provider)
+	n.Region = strings.TrimSpace(n.Region)
+	n.Group = strings.TrimSpace(n.Group)
+	n.Note = strings.TrimSpace(n.Note)
+	n.ExpireAt = strings.TrimSpace(n.ExpireAt)
+	n.Currency = strings.ToUpper(strings.TrimSpace(n.Currency))
+	if n.Name == "" {
+		return "name is required"
+	}
+	if n.Currency == "" {
+		n.Currency = "USD"
+	}
+	if n.Currency != "USD" && n.Currency != "CNY" {
+		return "currency must be USD or CNY"
+	}
+	if n.Price < 0 {
+		return "price must be >= 0"
+	}
+	if n.ExpireAt != "" {
+		if _, err := time.Parse("2006-01-02", n.ExpireAt); err != nil {
+			return "expireAt must be YYYY-MM-DD"
+		}
+	}
+	return ""
+}
+
 func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(r) {
 		fail(w, 401, "invalid admin token")
@@ -745,8 +842,8 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "bad json: "+err.Error())
 			return
 		}
-		if strings.TrimSpace(in.Name) == "" {
-			fail(w, 400, "name is required")
+		if msg := validateNodeMeta(&in); msg != "" {
+			fail(w, 400, msg)
 			return
 		}
 		if in.ID == "" {
@@ -759,9 +856,6 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 			in.Token = old.Token
 		} else {
 			in.Token = store.NewToken()
-		}
-		if in.Currency == "" {
-			in.Currency = "USD"
 		}
 		s.st.UpsertNode(&in)
 		writeJSON(w, 201, adminNodeView{Node: in, Token: in.Token})
@@ -789,6 +883,37 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, adminNodeView{Node: *n, Token: n.Token})
+	case http.MethodPut:
+		old, ok := s.st.Node(id)
+		if !ok {
+			fail(w, 404, "node not found")
+			return
+		}
+		body := http.MaxBytesReader(w, r.Body, 16<<10)
+		var in model.Node
+		dec := json.NewDecoder(body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil {
+			fail(w, 400, "bad json: "+err.Error())
+			return
+		}
+		if msg := validateNodeMeta(&in); msg != "" {
+			fail(w, 400, msg)
+			return
+		}
+		updated := *old
+		updated.Name = in.Name
+		updated.Provider = in.Provider
+		updated.Region = in.Region
+		updated.Group = in.Group
+		updated.Note = in.Note
+		updated.ExpireAt = in.ExpireAt
+		updated.Price = in.Price
+		updated.Currency = in.Currency
+		updated.Weight = in.Weight
+		// ID 与 Token 来自原节点，避免一次台账编辑静默换掉 Agent 凭据。
+		s.st.UpsertNode(&updated)
+		writeJSON(w, 200, adminNodeView{Node: updated, Token: updated.Token})
 	case http.MethodDelete:
 		if _, ok := s.st.Node(id); !ok {
 			fail(w, 404, "node not found")

@@ -48,9 +48,10 @@ func loadConfig(path string) (*config, error) {
 	if c.Interval <= 0 {
 		c.Interval = 30
 	}
-	// 上限防止 time.Duration 乘法溢出成负数，触发 NewTicker panic
-	if c.Interval > 86400 {
-		return nil, fmt.Errorf("interval 不能超过 86400 秒")
+	// 服务端 120 秒未收到上报即判定离线；间隔超过 60 秒时，
+	// 一次网络抖动或采集延迟就会被误报为失联。
+	if c.Interval > 60 {
+		return nil, fmt.Errorf("interval 不能超过 60 秒（服务端 120 秒未收到上报即判定离线），当前 %d 秒", c.Interval)
 	}
 	return &c, nil
 }

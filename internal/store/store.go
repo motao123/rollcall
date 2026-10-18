@@ -1,4 +1,4 @@
-// Package store 实现内存时序存储与 JSON 持久化。
+// Package store 实现内存时序存储与 gzip JSON 快照持久化。
 //
 // 设计取舍：不引入数据库依赖（对齐 Komari 的"零数据库"理念）。
 // 40 台规模、30 秒粒度、保留 24 小时 = 每节点 2880 点，
@@ -6,12 +6,15 @@
 package store
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -139,6 +142,42 @@ func (s *Store) LoadErr() error { return s.loadErr }
 
 // ---------- 快照结构 ----------
 
+// 快照以 gzip 压缩的 JSON 落盘：40 节点 × 2880 点的明文 JSON 约 30MB，
+// 压缩后通常只有几 MB，可显著降低每分钟一次快照的磁盘写放大。
+// 读取时按魔数识别，兼容升级前遗留的明文 JSON。
+var gzipMagic = []byte{0x1f, 0x8b}
+
+func encodeSnapshot(raw []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := zw.Write(raw); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeSnapshot(b []byte) ([]byte, error) {
+	if !bytes.HasPrefix(b, gzipMagic) {
+		return b, nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, fmt.Errorf("解压快照: %w", err)
+	}
+	defer zr.Close()
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, fmt.Errorf("解压快照: %w", err)
+	}
+	return raw, nil
+}
+
 type snapshot struct {
 	Nodes    map[string]*model.Node      `json:"nodes"`
 	Hosts    map[string]model.HostInfo   `json:"hosts"`
@@ -162,8 +201,12 @@ func (s *Store) load() error {
 	if err != nil {
 		return fmt.Errorf("读取快照 %s: %w", s.path, err)
 	}
+	raw, err := decodeSnapshot(b)
 	var snap snapshot
-	if err := json.Unmarshal(b, &snap); err != nil {
+	if err == nil {
+		err = json.Unmarshal(raw, &snap)
+	}
+	if err != nil {
 		bak := s.path + ".corrupt-" + time.Now().Format("20060102-150405")
 		if renameErr := os.Rename(s.path, bak); renameErr != nil {
 			return fmt.Errorf("快照损坏且无法隔离 %s: %w", s.path, err)
@@ -284,6 +327,10 @@ func (s *Store) Save() error {
 	b, err := json.Marshal(&snap)
 	if err != nil {
 		return err
+	}
+	b, err = encodeSnapshot(b)
+	if err != nil {
+		return fmt.Errorf("压缩快照: %w", err)
 	}
 	// 串行化磁盘写入：固定 temp 路径下，两个并发 Save 会互相截断/覆盖。
 	s.saveMu.Lock()

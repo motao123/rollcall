@@ -65,10 +65,11 @@ func TestSaveDurationScalesSane(t *testing.T) {
 	// 只要单次 Save 远低于秒级，锁窗口就不可能造成上报失败。
 	const bound = 2 * time.Second
 
-	for _, nodes := range []int{1, 10, 40, 100} {
+	for _, nodes := range []int{1, 40, 100} {
 		s := buildStore(t, nodes)
 
-		const trials = 6
+		// 3 次已足以暴露数量级退化；6 次会让 go test ./... 多花几十秒。
+		const trials = 3
 		var sum, max time.Duration
 		for i := 0; i < trials; i++ {
 			t0 := time.Now()

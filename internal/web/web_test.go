@@ -286,3 +286,274 @@ func TestPublicNodeViewDoesNotCarryToken(t *testing.T) {
 		t.Errorf("公开节点视图不应携带令牌，实际 %q", views[0].Token)
 	}
 }
+
+// TestDashboardReadAPIsRequireAuth 是回归测试：
+// 仪表盘只读接口曾完全匿名，反代未加 Basic Auth 时会直接泄露
+// 主机名、内核、服务商、价格、到期日等资产信息。
+func TestDashboardReadAPIsRequireAuth(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "node-secret"})
+	srv := New(st, nil, nil, Config{AdminToken: adminTok})
+	h := srv.Handler()
+
+	paths := []string{
+		"/api/overview", "/api/nodes", "/api/nodes/n1", "/api/nodes/n1/series",
+		"/api/services", "/api/alerts", "/api/rules", "/api/assets",
+	}
+	for _, p := range paths {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s 无令牌应 401，实际 %d", p, w.Code)
+		}
+	}
+	for _, p := range paths {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		req.Header.Set("X-Admin-Token", adminTok)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s 带令牌应 200，实际 %d: %s", p, w.Code, w.Body.String())
+		}
+	}
+}
+
+// TestDashboardReadAPIsAcceptPanelBasic 确认启用 -auth 后，
+// 已通过 Basic Auth 的面板用户无需再粘贴管理令牌。
+func TestDashboardReadAPIsAcceptPanelBasic(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{
+		AdminToken: "test-admin-token-1234567890",
+		AuthUser:   "panel",
+		AuthPass:   "panel-password-123",
+	})
+	h := srv.Handler()
+
+	cases := []struct {
+		name string
+		user string
+		pass string
+		code int
+	}{
+		{"no auth", "", "", http.StatusUnauthorized},
+		{"wrong password", "panel", "wrong", http.StatusUnauthorized},
+		{"panel credentials", "panel", "panel-password-123", http.StatusOK},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+		if c.user != "" {
+			req.SetBasicAuth(c.user, c.pass)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != c.code {
+			t.Errorf("%s: 状态码 %d，期望 %d", c.name, w.Code, c.code)
+		}
+	}
+
+	// 启用 -auth 后，API 客户端仍可只带管理令牌（无需再拼一层 Basic）
+	req := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("仅带管理令牌应 200，实际 %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/nodes", nil)
+	req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("仅带管理令牌访问管理 API 应 200，实际 %d", w.Code)
+	}
+}
+
+// TestMetricsAuth 校验 /metrics 在 -auth 下不再被 Basic 前置拦截，
+// 同时管理令牌与面板凭据都能抓取。
+func TestMetricsAuth(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	st := store.New(t.TempDir())
+
+	t.Run("no-basic-config", func(t *testing.T) {
+		srv := New(st, nil, nil, Config{AdminToken: adminTok})
+		h := srv.Handler()
+
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("无凭据应 401，实际 %d", w.Code)
+		}
+
+		req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.SetBasicAuth("any", adminTok)
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Basic 密码为管理令牌应 200，实际 %d", w.Code)
+		}
+
+		req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.Header.Set("X-Admin-Token", adminTok)
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("X-Admin-Token 应 200，实际 %d", w.Code)
+		}
+	})
+
+	t.Run("with-basic-config", func(t *testing.T) {
+		srv := New(st, nil, nil, Config{
+			AdminToken: adminTok, AuthUser: "panel", AuthPass: "panel-password-123",
+		})
+		h := srv.Handler()
+
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.SetBasicAuth("panel", "panel-password-123")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("面板凭据抓指标应 200，实际 %d", w.Code)
+		}
+
+		req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.SetBasicAuth("any", adminTok)
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("管理令牌 Basic 抓指标应 200，实际 %d", w.Code)
+		}
+
+		// /api/status 仍应匿名可访问
+		req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("/api/status 应保持公开，实际 %d", w.Code)
+		}
+	})
+}
+
+// TestNodePUTUpdatesMetadataPreservesToken 校验台账编辑只改元数据，
+// ID 与上报令牌保持不变（否则一次改名会让 Agent 立即 401）。
+func TestNodePUTUpdatesMetadataPreservesToken(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{
+		ID: "n1", Name: "旧名", Provider: "old", Region: "old", Group: "old",
+		Note: "old", ExpireAt: "2027-01-02", Price: 100, Currency: "USD",
+		Weight: 5, Token: "original-token",
+	})
+	srv := New(st, nil, nil, Config{AdminToken: adminTok})
+
+	body := []byte(`{"name":"  新展示名  ","provider":"newp","region":"sg","group":"prod",
+		"note":"备注","expireAt":"2027-03-04","price":120.5,"currency":"cny","weight":1}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/nodes/n1", bytes.NewReader(body))
+	req.Header.Set("X-Admin-Token", adminTok)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT 返回 %d: %s", w.Code, w.Body.String())
+	}
+
+	got, ok := st.Node("n1")
+	if !ok {
+		t.Fatal("节点丢失")
+	}
+	if got.ID != "n1" || got.Token != "original-token" {
+		t.Errorf("ID/令牌被改动: id=%q token=%q", got.ID, got.Token)
+	}
+	if got.Name != "新展示名" || got.Provider != "newp" || got.Region != "sg" ||
+		got.Group != "prod" || got.Note != "备注" || got.ExpireAt != "2027-03-04" ||
+		got.Price != 120.5 || got.Currency != "CNY" || got.Weight != 1 {
+		t.Errorf("元数据未正确更新: %+v", got)
+	}
+
+	// 不存在与非法输入
+	req = httptest.NewRequest(http.MethodPut, "/api/admin/nodes/nope", bytes.NewReader([]byte(`{"name":"x"}`)))
+	req.Header.Set("X-Admin-Token", adminTok)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("不存在的节点应 404，实际 %d", w.Code)
+	}
+
+	bad := []string{
+		`{"name":""}`,
+		`{"name":"x","currency":"EUR"}`,
+		`{"name":"x","price":-1}`,
+		`{"name":"x","expireAt":"2027-13-01"}`,
+	}
+	for _, b := range bad {
+		req = httptest.NewRequest(http.MethodPut, "/api/admin/nodes/n1", bytes.NewReader([]byte(b)))
+		req.Header.Set("X-Admin-Token", adminTok)
+		w = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("非法输入 %s 应 400，实际 %d", b, w.Code)
+		}
+	}
+}
+
+// TestPublicStatusIsDesensitized 确认公开状态页不泄露资产与指纹信息。
+func TestPublicStatusIsDesensitized(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{
+		ID: "n1", Name: "公开展示名", Provider: "secret-provider", Region: "secret-region",
+		Group: "prod", Note: "secret-note", ExpireAt: "2027-01-01", Price: 999,
+		Currency: "USD", Token: "secret-node-token",
+	})
+	st.AddMetrics("n1", model.HostInfo{
+		Hostname: "secret-hostname", OS: "secret-os", Kernel: "secret-kernel",
+		Arch: "secret-arch", CPUModel: "secret-cpu",
+	}, model.Metrics{TS: time.Now().Unix(), CPUPct: 10})
+
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/api/status 返回 %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, secret := range []string{
+		"secret-provider", "secret-region", "secret-note", "secret-hostname",
+		"secret-os", "secret-kernel", "secret-arch", "secret-cpu",
+		"secret-node-token", `"id"`, `"expireAt"`, `"price"`,
+	} {
+		if bytes.Contains([]byte(body), []byte(secret)) {
+			t.Errorf("公开状态页泄露 %q: %s", secret, body)
+		}
+	}
+	if !bytes.Contains([]byte(body), []byte("公开展示名")) {
+		t.Errorf("公开状态页应包含展示名: %s", body)
+	}
+}
+
+// TestReportStillUsesNodeToken 确认只读接口加固不会影响 Agent 上报。
+func TestReportStillUsesNodeToken(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点", Token: "node-token"})
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	h := srv.Handler()
+
+	report := []byte(`{"nodeId":"n1","host":{"hostname":"h"},"metrics":{"cpuPct":1}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/report", bytes.NewReader(report))
+	req.Header.Set("X-Node-Token", "node-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("合法上报应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/report", bytes.NewReader(report))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("无节点令牌应 401，实际 %d", w.Code)
+	}
+}
