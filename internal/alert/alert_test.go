@@ -278,3 +278,37 @@ func containsStr(hay, needle string) bool {
 	}
 	return false
 }
+
+// TestRecoverClosedPurgesWholeRule 是回归测试。
+//
+// 管理路径取的是「删除前的告警快照」，快照与 DeleteRule 之间可能又有
+// 同一规则的新告警写入。旧实现只删快照里那一个精确 key，
+// 新写入的条目会永久留在 active/since/lastAt 里，界面挂一条永不恢复的告警。
+func TestRecoverClosedPurgesWholeRule(t *testing.T) {
+	st := store.New(t.TempDir())
+	e := New(st)
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	st.UpsertNode(&model.Node{ID: "n2", Name: "节点二"})
+	st.UpsertRule(&model.AlertRule{
+		ID: "r1", Name: "节点失联", Metric: "offline", Op: "gt",
+		Threshold: 0, Duration: 0, Severity: "critical", Enabled: true,
+	})
+	e.Evaluate()
+
+	// 模拟「快照之后又开了一条同规则告警」
+	e.mu.Lock()
+	e.active["r1|n2"] = &model.Alert{ID: "a2", RuleID: "r1", NodeID: "n2"}
+	e.since["r1|n2"] = time.Now().Unix()
+	e.lastAt["r1|n2"] = time.Now().Unix()
+	e.mu.Unlock()
+
+	// 只传快照里的第一条，但按规则清空
+	e.RecoverRuleClosed("r1", []*model.Alert{{ID: "a1", RuleID: "r1", NodeID: "n1"}}, "规则已删除")
+
+	e.mu.Lock()
+	left := len(e.active) + len(e.since) + len(e.lastAt)
+	e.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("该规则下的引擎状态未清空，残留 %d 项", left)
+	}
+}

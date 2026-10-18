@@ -408,7 +408,7 @@ func (s *Store) Save() (err error) {
 		snap.Services[k] = &cp
 	}
 	for k, v := range s.rules {
-		cp := *v
+		cp := cloneRule(v)
 		snap.Rules[k] = &cp
 	}
 	for _, a := range s.alerts {
@@ -627,6 +627,23 @@ func (s *Store) NodeByToken(token, id string) (*model.Node, bool) {
 	return &cp, true
 }
 
+// cloneRule 深拷贝告警规则。
+//
+// AlertRule 是唯一带引用字段（NodeIDs / Groups 切片）的持久化结构。
+// 只写 `cp := *v` 会共享底层数组：快照在锁外序列化时，若处理器在
+// UpsertRule 之后继续 append 该切片（还有空闲容量），就会与 json.Marshal
+// 的迭代撞车，甚至把后续修改写回已入快照的对象。
+func cloneRule(r *model.AlertRule) model.AlertRule {
+	cp := *r
+	if r.NodeIDs != nil {
+		cp.NodeIDs = append([]string(nil), r.NodeIDs...)
+	}
+	if r.Groups != nil {
+		cp.Groups = append([]string(nil), r.Groups...)
+	}
+	return cp
+}
+
 // ---------- 指标 ----------
 
 func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) {
@@ -785,7 +802,7 @@ func (s *Store) Rules() []*model.AlertRule {
 	defer s.mu.RUnlock()
 	out := make([]*model.AlertRule, 0, len(s.rules))
 	for _, v := range s.rules {
-		cp := *v
+		cp := cloneRule(v)
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

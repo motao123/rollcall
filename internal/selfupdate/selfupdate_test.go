@@ -19,16 +19,18 @@ import (
 	"testing"
 )
 
-// fakeELF 构造带合法 ELF 头的最小文件；Apply 会校验魔数与架构。
+// fakeELF 构造带合法 ELF 头的最小文件；Apply 会校验魔数、字长与架构。
 func fakeELF(marker string) []byte {
 	b := make([]byte, 64)
 	copy(b, "\x7fELF")
-	b[4] = 2 // 64 位
-	b[5] = 1 // 小端
+	b[4] = 2 // EI_CLASS=ELFCLASS64
+	b[5] = 1 // EI_DATA=little endian
+	b[6] = 1 // EI_VERSION=EV_CURRENT
 	machine := map[string]uint16{"amd64": 62, "arm64": 183, "386": 3, "arm": 40}[runtime.GOARCH]
 	binary.LittleEndian.PutUint16(b[16:18], 2) // e_type=ET_EXEC
 	binary.LittleEndian.PutUint16(b[18:20], machine)
-	copy(b[20:], marker)
+	binary.LittleEndian.PutUint32(b[20:24], 1) // e_version
+	copy(b[24:], marker)
 	return b
 }
 
@@ -323,7 +325,15 @@ func TestManualRollbackAndStable(t *testing.T) {
 	if err := Apply(exe, down2, "3.0.0"); err != nil {
 		t.Fatal(err)
 	}
-	if err := MarkStable(exe); err != nil {
+	// 旧版本进程的「成功上报」不能删掉新版本的标记：
+	// 上报 goroutine 可能正好在 Apply 之后、reexec 之前完成。
+	if err := MarkStable(exe, "2.9.0"); err != nil {
+		t.Fatalf("MarkStable: %v", err)
+	}
+	if _, err := os.Stat(StatePath(exe)); err != nil {
+		t.Fatal("版本不匹配时不应删除标记（会让坏版本永不回滚）")
+	}
+	if err := MarkStable(exe, "3.0.0"); err != nil {
 		t.Fatalf("MarkStable: %v", err)
 	}
 	if _, err := os.Stat(StatePath(exe)); !os.IsNotExist(err) {

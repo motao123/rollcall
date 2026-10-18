@@ -37,3 +37,34 @@ func TestSeedDemoMarksOfflineNode(t *testing.T) {
 		t.Fatalf("n01 最后上报 age=%ds，应保持在线（<=120 秒）", age)
 	}
 }
+
+// TestSeedDemoUptimeMonotonic 防止运行时长方向反了。
+//
+// 旧实现 `now-t + 13 天`：越早的样本算出的 uptime 越大
+// （365 天前约 378 天、最新点只有 13 天），导出与历史曲线里
+// 看起来像每次采样都重启了一次。
+func TestSeedDemoUptimeMonotonic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seedDemo 会生成 40 万级样本，short 模式跳过")
+	}
+	st := store.New(t.TempDir())
+	seedDemo(st)
+
+	// 取跨度足够长的时间窗（365 天），Series 按时间升序返回。
+	now := time.Now().Unix()
+	pts := st.Series("n01", now-366*86400)
+	if len(pts) < 100 {
+		t.Fatalf("样本过少: %d", len(pts))
+	}
+	prev := uint64(0)
+	for i, p := range pts {
+		if p.Uptime < prev {
+			t.Fatalf("第 %d 个点 uptime 回退: %d -> %d（时间 t=%d）", i, prev, p.Uptime, p.TS)
+		}
+		prev = p.Uptime
+	}
+	// 最新点的开机时长应覆盖整段数据（约 378 天），而不是 13 天。
+	if prev < uint64(300*86400) {
+		t.Fatalf("最新点 uptime=%d 秒，明显小于数据跨度（应约 378 天）", prev)
+	}
+}

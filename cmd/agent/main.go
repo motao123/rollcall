@@ -249,7 +249,7 @@ func main() {
 		log.Printf("已上报 cpu=%.1f%% mem=%.1f%% disk=%.1f%%",
 			m.CPUPct, pct(m.MemUsed, m.MemTotal), pct(m.DiskUsed, m.DiskTotal))
 		if exePath != "" {
-			if err := selfupdate.MarkStable(exePath); err != nil {
+			if err := selfupdate.MarkStable(exePath, version.Version); err != nil {
 				log.Printf("清除更新启动标记失败: %v", err)
 			}
 		}

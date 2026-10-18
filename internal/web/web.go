@@ -588,9 +588,20 @@ func clampRange(v, lo, hi float64) float64 {
 
 // ---------- 视图 ----------
 
-func (s *Server) buildNodeViews() []model.NodeView {
+// buildNodeViews 构造仪表盘用的完整视图（含迷你曲线与告警计数）。
+func (s *Server) buildNodeViews() []model.NodeView { return s.nodeViews(true) }
+
+// buildNodeViewsLite 构造只含数值的视图，供 Prometheus 抓取等高频路径使用。
+// 抓取每次都要跑，而 sparkline 需要按节点复制造型后的原始序列、
+// 告警计数需要额外加锁统计 —— 这两项在抓取路径上完全用不到。
+func (s *Server) buildNodeViewsLite() []model.NodeView { return s.nodeViews(false) }
+
+func (s *Server) nodeViews(withExtras bool) []model.NodeView {
 	nodes := s.st.Nodes()
-	alertByNode := s.st.ActiveAlertsByNode()
+	var alertByNode map[string]int
+	if withExtras {
+		alertByNode = s.st.ActiveAlertsByNode()
+	}
 	now := time.Now().Unix()
 	out := make([]model.NodeView, 0, len(nodes))
 
@@ -598,26 +609,25 @@ func (s *Server) buildNodeViews() []model.NodeView {
 		m, ts, _ := s.st.Latest(n.ID)
 		state := store.NodeState(ts, now)
 
-		// 迷你曲线：最近 30 个点的 CPU
-		series := s.st.Series(n.ID, now-1200)
-		if len(series) > 30 {
-			series = series[len(series)-30:]
-		}
-		spark := make([]model.Point, 0, len(series))
-		for _, p := range series {
-			spark = append(spark, model.Point{T: p.TS, V: p.CPUPct})
-		}
-
-		// 视图不携带上报令牌：NodeView 不含 Token 字段，这里只需复制台账字段。
-		// adminNodeView 会显式附加自己需要的 token 字段。
 		v := model.NodeMeta(n)
 		v.Host = s.st.Host(n.ID)
 		v.Latest = m
 		v.Online = state == model.NodeStateOnline
 		v.State = state
 		v.LastSeen = ts
-		v.Alerts = alertByNode[n.ID]
-		v.Spark = spark
+		if withExtras {
+			v.Alerts = alertByNode[n.ID]
+			// 迷你曲线：最近 30 个点的 CPU
+			series := s.st.Series(n.ID, now-1200)
+			if len(series) > 30 {
+				series = series[len(series)-30:]
+			}
+			spark := make([]model.Point, 0, len(series))
+			for _, p := range series {
+				spark = append(spark, model.Point{T: p.TS, V: p.CPUPct})
+			}
+			v.Spark = spark
+		}
 		out = append(out, v)
 	}
 	return out
@@ -1801,7 +1811,9 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.engine != nil {
-			s.engine.RecoverClosed(active, "规则已删除")
+			// 传 ruleID：快照与 DeleteRule 之间新开的告警也属于已删除规则，
+			// 只按快照清会留下永不自愈的幽灵条目。
+			s.engine.RecoverRuleClosed(id, active, "规则已删除")
 		}
 		writeJSON(w, 200, map[string]any{"deleted": id})
 

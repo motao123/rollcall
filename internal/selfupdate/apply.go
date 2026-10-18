@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -109,9 +110,15 @@ func HandleStartup(exe, currentVersion string) (bool, error) {
 		return false, writeState(exe, st)
 	}
 	if err := restoreBackup(exe); err != nil {
-		// 没有可用备份时清掉标记，避免每次启动都重复失败。
-		_ = os.Remove(StatePath(exe))
-		return false, fmt.Errorf("更新回滚失败: %w", err)
+		if errors.Is(err, errNoBackup) {
+			// 确实没有可用备份：清掉标记，避免每次启动都重复失败。
+			_ = os.Remove(StatePath(exe))
+			return false, fmt.Errorf("更新回滚失败: %w", err)
+		}
+		// 暂时性失败（磁盘满、目标被占用、权限抖动）：
+		// 坏的新版本仍在盘上，清掉标记等于放弃唯一的恢复机会 ——
+		// 下次启动会继续尝试回滚。
+		return false, fmt.Errorf("更新回滚失败（下次启动重试）: %w", err)
 	}
 	st.Attempts = 0
 	st.RolledBack = true
@@ -121,7 +128,13 @@ func HandleStartup(exe, currentVersion string) (bool, error) {
 
 // MarkStable 在首次成功上报后调用，删除待验证标记。
 // 回滚后写入的标记会保留，用于 FailedVersionBackoff。
-func MarkStable(exe string) error {
+//
+// 必须比对标记里的版本：上报是独立 goroutine，可能恰好在
+// Apply 写好新版本的标记之后、reexec 替换进程之前完成一次上报。
+// 此时旧进程若无条件删标记，删掉的是**新版本**的启动计数 ——
+// 下次启动看不到 pending，HandleStartup 直接返回，
+// 一个启动即崩溃的版本会被 systemd 无限重启而永不回滚。
+func MarkStable(exe, currentVersion string) error {
 	st, err := readState(exe)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -131,6 +144,10 @@ func MarkStable(exe string) error {
 		return nil
 	}
 	if st.RolledBack {
+		return nil
+	}
+	if !SameVersion(st.Version, currentVersion) {
+		// 标记属于另一个版本（正在安装/正在回滚），不动它。
 		return nil
 	}
 	return os.Remove(StatePath(exe))
@@ -222,11 +239,14 @@ func ManualRollback(exe, failedVersion string) error {
 	})
 }
 
+// errNoBackup 表示 .prev 确实不可用（区别于复制/替换过程中的暂时性失败）。
+var errNoBackup = errors.New("没有可用的上一版本备份（.prev）")
+
 func restoreBackup(exe string) error {
 	bak := BackupPath(exe)
 	fi, err := os.Stat(bak)
 	if err != nil || !fi.Mode().IsRegular() {
-		return errors.New("没有可用的上一版本备份（.prev）")
+		return errNoBackup
 	}
 	perm := fi.Mode().Perm()
 	if perm&0o111 == 0 {
@@ -284,26 +304,47 @@ func checkELF(path string) error {
 		return fmt.Errorf("读取更新包失败: %w", err)
 	}
 	defer f.Close()
-	var hdr [20]byte
+	var hdr [24]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return errors.New("更新包过小，不是有效的 ELF")
 	}
 	if hdr[0] != 0x7f || hdr[1] != 'E' || hdr[2] != 'L' || hdr[3] != 'F' {
 		return errors.New("更新包不是 ELF 可执行文件")
 	}
-	if hdr[5] != 1 { // EI_DATA=litte endian
+	// EI_CLASS 必须与当前进程字长一致：32 位包在 64 位机上 exec 直接失败，
+	// 而失败发生在 HandleStartup 之前，既不计启动次数也无法回滚。
+	wantClass := byte(2) // ELFCLASS64
+	if strconv.IntSize == 32 {
+		wantClass = 1 // ELFCLASS32
+	}
+	if hdr[4] != wantClass {
+		return fmt.Errorf("更新包字长不匹配：ELF class %d，当前 %d 位", hdr[4], strconv.IntSize)
+	}
+	if hdr[5] != 1 { // EI_DATA=little endian
 		return errors.New("更新包不是小端 ELF")
+	}
+	if hdr[6] != 1 { // EI_VERSION
+		return errors.New("更新包 ELF 版本无效")
 	}
 	// e_type 必须可执行：ET_EXEC(2) 或 ET_DYN(3, PIE，现代 Go 默认)。
 	// ET_REL(1) 目标文件、ET_CORE(4) 内核转储装上去只会 exec 失败。
 	if etype := binary.LittleEndian.Uint16(hdr[16:18]); etype != 2 && etype != 3 {
 		return fmt.Errorf("更新包不是可执行 ELF（e_type=%d）", etype)
 	}
+	// e_version 在偏移 20（"e_ident 之后紧跟 e_type/e_machine/e_version"）。
+	if ver := binary.LittleEndian.Uint32(hdr[20:24]); ver != 1 {
+		return fmt.Errorf("更新包 e_version=%d，只支持 1", ver)
+	}
 	machine := binary.LittleEndian.Uint16(hdr[18:20])
 	want, ok := map[string]uint16{
 		"amd64": 62, "arm64": 183, "386": 3, "arm": 40,
 	}[runtime.GOARCH]
-	if ok && machine != want {
+	if !ok {
+		// 未映射的架构无法校验，必须 fail closed：
+		// 放行一个错误架构的包，结果是 exec 失败且永不回滚。
+		return fmt.Errorf("不支持的架构 %s，无法校验更新包", runtime.GOARCH)
+	}
+	if machine != want {
 		return fmt.Errorf("更新包架构不匹配：ELF machine %d，当前 %s", machine, runtime.GOARCH)
 	}
 	return nil

@@ -5,6 +5,7 @@ package alert
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,18 +100,72 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 
 // RecoverClosed 为因管理操作关闭的告警补发恢复通知，并清理引擎内跟踪状态。
 // Evaluate 只处理启用中的规则，规则停用/删除/改向关闭的告警否则会静默消失。
+//
+// 与 Evaluate 串行：管理路径（删除/停用规则）可能在任意时刻调用，
+// 若与一轮评估交错，评估可能在这条告警被关闭之后又把它写回 active，
+// 留下永远无法自愈的幽灵条目。
 func (e *Engine) RecoverClosed(alerts []*model.Alert, reason string) {
+	e.evalMu.Lock()
+	defer e.evalMu.Unlock()
+	e.recoverClosedLocked(alerts, reason, "")
+}
+
+// RecoverRuleClosed 关闭整条规则的告警并清空它的全部引擎状态。
+//
+// 用于规则被删除或停用：这类规则不会再进入 Evaluate，
+// 任何残留条目都失去清理路径。传 ruleID 而不是只传快照，是为了覆盖
+// 「取快照」与「规则真正删除」之间新开的告警。
+func (e *Engine) RecoverRuleClosed(ruleID string, alerts []*model.Alert, reason string) {
+	e.evalMu.Lock()
+	defer e.evalMu.Unlock()
+	e.recoverClosedLocked(alerts, reason, ruleID)
+}
+
+// recoverClosedLocked 要求调用方已持有 evalMu（Evaluate 内部路径直接调用，
+// 否则会在已经持锁的情况下二次加锁而自死锁）。
+// purgeRuleID 非空时按规则前缀清空全部条目；否则只清快照里那些精确 key
+// （规则只是收窄范围时，仍留在范围内的节点必须保留跟踪状态）。
+func (e *Engine) recoverClosedLocked(alerts []*model.Alert, reason, purgeRuleID string) {
+	var belongs func(string) bool
+	if purgeRuleID != "" {
+		prefix := purgeRuleID + "|"
+		belongs = func(key string) bool { return strings.HasPrefix(key, prefix) }
+	} else {
+		keys := make(map[string]struct{}, len(alerts))
+		for _, a := range alerts {
+			if a != nil {
+				keys[a.RuleID+"|"+a.NodeID] = struct{}{}
+			}
+		}
+		belongs = func(key string) bool {
+			_, ok := keys[key]
+			return ok
+		}
+	}
+	if len(alerts) > 0 || purgeRuleID != "" {
+		e.mu.Lock()
+		for k := range e.active {
+			if belongs(k) {
+				delete(e.active, k)
+			}
+		}
+		for k := range e.since {
+			if belongs(k) {
+				delete(e.since, k)
+			}
+		}
+		for k := range e.lastAt {
+			if belongs(k) {
+				delete(e.lastAt, k)
+			}
+		}
+		e.mu.Unlock()
+	}
+
 	for _, a := range alerts {
 		if a == nil {
 			continue
 		}
-		key := a.RuleID + "|" + a.NodeID
-		e.mu.Lock()
-		delete(e.active, key)
-		delete(e.since, key)
-		delete(e.lastAt, key)
-		e.mu.Unlock()
-
 		cp := *a
 		cp.Message = fmt.Sprintf("%s 的「%s」已恢复（%s）", a.NodeName, a.RuleName, reason)
 		e.send(&cp, true)
@@ -146,7 +201,7 @@ func (e *Engine) Evaluate() {
 	for _, rule := range rules {
 		if !rule.Enabled {
 			// 停用规则：关闭遗留活跃告警并补发恢复通知，避免静默消失
-			e.RecoverClosed(e.st.ResolveRuleAlerts(rule.ID), "规则已停用")
+			e.recoverClosedLocked(e.st.ResolveRuleAlerts(rule.ID), "规则已停用", rule.ID)
 			continue
 		}
 		for _, n := range nodes {
@@ -168,7 +223,7 @@ func (e *Engine) Evaluate() {
 							Severity: rule.Severity,
 						}
 					}
-					e.RecoverClosed([]*model.Alert{prev}, "规则范围已调整")
+					e.recoverClosedLocked([]*model.Alert{prev}, "规则范围已调整", "")
 				}
 				continue
 			}

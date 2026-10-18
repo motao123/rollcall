@@ -80,6 +80,10 @@ func seedDemo(st *store.Store) {
 		}
 		var total uint64 = 26_000_000_000
 		first := true
+		// 固定开机时刻：Uptime 是「t 时刻的自开机时长」，必须随 t 单调不减。
+		// 原实现用 `now-t + 13 天`，越早的样本算出的值越大（365 天前的点
+		// 约 378 天、最新点只有 13 天），导出与历史曲线里看起来像每次采样都重启。
+		bootAt := now - 365*86400 - 86400*13
 		addSample := func(t int64) {
 			phase := float64(t%86400) / 86400 * 2 * math.Pi
 			// 日间高、夜间低的双峰曲线 + 抖动
@@ -119,7 +123,7 @@ func seedDemo(st *store.Store) {
 				NetRx:     total,
 				NetTx:     total / 3,
 				TCPConn:   int(cpu*2.1) + rnd.Intn(40),
-				Uptime:    uint64(now-t) + 86400*13,
+				Uptime:    uint64(t - bootAt),
 				Procs:     120 + rnd.Intn(60),
 			})
 		}
