@@ -1131,3 +1131,49 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
   word-break: break-all;
 }
 .onecmd .btn { flex: none; align-self: flex-start; }
+
+/* ---------- 首页紧凑节点表 ---------- */
+
+.node-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.node-table thead th {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--fg-3); text-transform: uppercase;
+  padding: 7px 10px; border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.node-table tbody td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+.node-table tbody tr:last-child td { border-bottom: none; }
+.node-table tbody tr[data-node]:hover { background: var(--panel-2); }
+
+.prov-row td {
+  background: var(--panel-2);
+  padding: 5px 10px !important;
+  border-top: 1px solid var(--line);
+}
+.prov-row .prov-meta { margin-left: 10px; }
+
+.tbar {
+  display: inline-block;
+  vertical-align: middle;
+  width: 46px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  margin-right: 6px;
+}
+.tbar-fill { display: block; height: 100%; border-radius: 3px; }
+.tbar-val { font-size: 11px; color: var(--fg-2); }
+
+.tspark { width: 96px; height: 26px; }
+.tspark svg { display: block; width: 100%; height: 100%; }
+
+@media (max-width: 860px) {
+  .node-table .tspark { display: none; }
+  .node-table th:nth-child(11), .node-table td:nth-child(11) { display: none; }
+}

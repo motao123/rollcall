@@ -216,6 +216,14 @@ function kpi(label, value, unit, foot) {
   </div>`;
 }
 
+// tbar 表格单元格里的迷你用量条：数值 + 底部细条，一眼可比。
+function tbar(v, warnAt = 75, critAt = 90) {
+  if (v == null) return '<span class="mono" style="color:var(--fg-3)">—</span>';
+  const tone = v >= critAt ? 'crit' : v >= warnAt ? 'warn' : 'ok';
+  const color = tone === 'crit' ? 'var(--crit)' : tone === 'warn' ? 'var(--warn)' : 'var(--accent)';
+  return `<span class="tbar"><span class="tbar-fill ${tone}" style="width:${Math.min(100, v).toFixed(1)}%;background:${color}"></span></span><span class="mono tbar-val">${v.toFixed(0)}%</span>`;
+}
+
 function nodeCard(n) {
   const hasData = hasNodeData(n);
   const cpu = hasData ? n.latest.cpuPct || 0 : null;
@@ -333,43 +341,51 @@ async function viewOverview() {
             <span class="prov-cnt">${r.online}/${r.ns.length}</span>
           </button>`).join('')}
       </div>
-      ${providerRows.map((r) => `
-      <div class="prov-group" data-prov-group="${esc(r.p)}">
-        <div class="prov-head">
-          <span class="prov-title">${esc(r.p)}</span>
-          <span class="prov-meta">${r.ns.length} 台 · 在线 ${r.online} · CPU 均值 ${r.cpu.toFixed(0)}%</span>
-        </div>
-        <div class="node-grid">
-          ${r.ns.map(nodeCard).join('')}
-        </div>
-      </div>`).join('') || `<div class="empty">没有匹配的节点</div>`}
-    </section>
-
-    ${expiring.length ? `
-    <section class="section">
-      <div class="section-head"><h2 class="section-title">即将到期</h2></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>节点</th><th>服务商</th><th>到期日</th><th class="num">剩余</th><th class="num">续费</th></tr></thead>
-        <tbody>${expiring.map((n) => {
-          const d = Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000);
-          return `<tr>
-            <td class="strong">${esc(n.name)}</td>
-            <td>${esc(n.provider)}</td>
-            <td class="mono">${esc(n.expireAt)}</td>
-            <td class="num"><span class="badge ${d <= 7 ? 'crit' : 'warn'}">${d} 天</span></td>
-            <td class="num mono">${n.currency === 'CNY' ? '¥' : '$'}${n.price}</td>
+      <div class="table-wrap"><table class="node-table">
+        <thead><tr>
+          <th>状态</th><th>节点</th><th>位置</th><th>系统</th>
+          <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
+          <th class="num">负载</th><th class="num">流量 ↓ / ↑</th><th class="num">在线</th><th style="width:96px">24h CPU</th>
+        </tr></thead>
+        <tbody>
+          ${providerRows.map((r) => `
+            <tr class="prov-row" id="provrow-${esc(r.p)}"><td colspan="11">
+              <span class="prov-title">${esc(r.p)}</span>
+              <span class="prov-meta">${r.ns.length} 台 · 在线 ${r.online} · CPU 均值 ${r.cpu.toFixed(0)}%</span>
+            </td></tr>
+            ${r.ns.map((n) => {
+              const hasData = hasNodeData(n);
+              const st = nodeState(n);
+              const cpu = hasData ? n.latest.cpuPct || 0 : null;
+              const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
+              const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
+              const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
+              return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
+            <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
+            <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}</td>
+            <td>${esc(n.region || '—')}</td>
+            <td style="font-size:11.5px">${esc(n.host?.os || '—')}</td>
+            <td class="num">${tbar(cpu)}</td>
+            <td class="num">${tbar(mem, 80, 92)}</td>
+            <td class="num">${tbar(disk, 80, 90)}</td>
+            <td class="num mono">${hasData ? (n.latest.load1 || 0).toFixed(2) : '—'}</td>
+            <td class="num mono" style="font-size:11px">${hasData ? bytes(n.latest.netRx) + ' / ' + bytes(n.latest.netTx) : '—'}</td>
+            <td class="num mono">${hasData ? dur(n.latest.uptime) : '—'}</td>
+            <td><div class="tspark">${sparkline((n.spark || []).slice(-40).map((p) => p.v), st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)', 26)}</div></td>
           </tr>`;
-        }).join('')}</tbody>
+            }).join('')}
+          `).join('') || `<tr><td colspan="11"><div class="empty">没有匹配的节点</div></td></tr>`}
+        </tbody>
       </table></div>
-    </section>` : ''}
+    </section>
   `;
 
   const wiz = $('#wizBtn');
   if (wiz) wiz.onclick = showAgentWizard;
   $$('.prov-chip').forEach((c) => {
     c.onclick = () => {
-      const g = $(`.prov-group[data-prov-group="${CSS.escape(c.dataset.prov)}"]`);
-      if (g) g.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const g = document.getElementById('provrow-' + c.dataset.prov);
+      if (g) g.scrollIntoView({ behavior: 'smooth', block: 'center' });
     };
   });
   bindNodeClicks();
