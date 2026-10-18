@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/csv"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 )
 
 // Version 是构建版本，写入 Prometheus build_info 与设置页。
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 // ---------- CSV 导出 ----------
 
@@ -64,20 +65,32 @@ func csvSafe(s string) string {
 	return s
 }
 
-// csvWriter 设置下载响应头并返回带 BOM 的 csv.Writer。
+// csvBuffer 在内存中构建带 BOM 的 CSV。
+// 先渲染后写出，避免编码失败时向客户端留下半截文件。
 // BOM 是必需的：Excel 打开无 BOM 的 UTF-8 CSV 会乱码（中文场景高频踩坑）。
-func csvWriter(w http.ResponseWriter, filename string) *csv.Writer {
+func csvBuffer() (*bytes.Buffer, *csv.Writer) {
+	buf := &bytes.Buffer{}
+	buf.Write([]byte{0xEF, 0xBB, 0xBF})
+	return buf, csv.NewWriter(buf)
+}
+
+// flushCSV 结束编码并写出下载响应；编码失败时返回 500 而非残缺文件。
+func flushCSV(w http.ResponseWriter, filename string, buf *bytes.Buffer, cw *csv.Writer) {
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		fail(w, 500, "CSV 生成失败: "+err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="%s-%s.csv"`, filename, time.Now().Format("20060102-1504")))
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
-	return csv.NewWriter(w)
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) exportAssets(w http.ResponseWriter) {
-	cw := csvWriter(w, "rollcall-assets")
-	defer cw.Flush()
+	buf, cw := csvBuffer()
 
 	_ = cw.Write([]string{
 		"名称", "服务商", "位置", "分组", "操作系统", "到期日", "剩余天数",
@@ -109,11 +122,11 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 		})
 	}
 	_ = cw.Write([]string{"合计", "", "", "", "", "", "", "", "", f2(monthSum), "", "", "", "", ""})
+	flushCSV(w, "rollcall-assets", buf, cw)
 }
 
 func (s *Server) exportAlerts(w http.ResponseWriter) {
-	cw := csvWriter(w, "rollcall-alerts")
-	defer cw.Flush()
+	buf, cw := csvBuffer()
 
 	_ = cw.Write([]string{
 		"开始时间", "恢复时间", "状态", "级别", "规则", "节点", "当前值", "说明",
@@ -130,6 +143,7 @@ func (s *Server) exportAlerts(w http.ResponseWriter) {
 			csvSafe(a.RuleName), csvSafe(a.NodeName), f1(a.Value), csvSafe(a.Message),
 		})
 	}
+	flushCSV(w, "rollcall-alerts", buf, cw)
 }
 
 func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
@@ -157,8 +171,7 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cw := csvWriter(w, "rollcall-metrics-"+sanitize(node.Name))
-	defer cw.Flush()
+	buf, cw := csvBuffer()
 
 	_ = cw.Write([]string{
 		"时间", "unix", "CPU%", "负载1", "负载5", "负载15",
@@ -178,6 +191,7 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 			strconv.Itoa(p.TCPConn), strconv.Itoa(p.Procs), strconv.FormatUint(p.Uptime, 10),
 		})
 	}
+	flushCSV(w, "rollcall-metrics-"+sanitize(node.Name), buf, cw)
 }
 
 // ---------- Prometheus ----------
@@ -291,36 +305,45 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 服务探测
+	// 历史只读取一次：旧实现每个指标都复制一遍整段环形缓冲。
+	type svcData struct {
+		sv   *model.Service
+		ok   bool
+		has  bool
+		lat  int
+		cert int
+		up   float64
+		upOK bool
+	}
+	svcRows := make([]svcData, 0, len(svcs))
+	for _, sv := range svcs {
+		_, lat, ok, cert, has := s.st.ServiceLastFull(sv.ID)
+		if !has {
+			ok, lat, cert = false, 0, -1
+		}
+		up, upOK := serviceUptime24(s.st.ServiceSeries(sv.ID), now)
+		svcRows = append(svcRows, svcData{sv: sv, ok: ok, has: has, lat: lat, cert: cert, up: up, upOK: upOK})
+	}
+
 	svcMetrics := []struct {
-		name string
-		help string
-		get  func(ok bool, lat int, cert int, up float64) float64
+		name       string
+		help       string
+		needUptime bool
+		get        func(ok bool, lat, cert int, up float64) float64
 	}{
-		{"rollcall_service_up", "1 if last probe succeeded.", func(ok bool, lat, cert int, up float64) float64 { return b2f(ok) }},
-		{"rollcall_service_latency_milliseconds", "Last probe latency in ms.", func(ok bool, lat, cert int, up float64) float64 { return float64(lat) }},
-		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", func(ok bool, lat, cert int, up float64) float64 { return float64(cert) }},
-		{"rollcall_service_uptime_percent_24h", "24h availability percent.", func(ok bool, lat, cert int, up float64) float64 { return up }},
+		{"rollcall_service_up", "1 if last probe succeeded.", false, func(ok bool, lat, cert int, up float64) float64 { return b2f(ok) }},
+		{"rollcall_service_latency_milliseconds", "Last probe latency in ms.", false, func(ok bool, lat, cert int, up float64) float64 { return float64(lat) }},
+		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", false, func(ok bool, lat, cert int, up float64) float64 { return float64(cert) }},
+		{"rollcall_service_uptime_percent_24h", "24h availability percent.", true, func(ok bool, lat, cert int, up float64) float64 { return up }},
 	}
 	for _, m := range svcMetrics {
 		help(m.name, m.help, "gauge")
-		for _, sv := range svcs {
-			_, lat, ok, cert, has := s.st.ServiceLastFull(sv.ID)
-			hist := s.st.ServiceSeries(sv.ID)
-			upN, tot := 0, 0
-			for _, h := range hist {
-				tot++
-				if h[2] == 1 {
-					upN++
-				}
+		for _, d := range svcRows {
+			// 没有任何 24h 内样本时跳过该 gauge，避免输出误导性的 0%
+			if m.needUptime && !d.upOK {
+				continue
 			}
-			up := 0.0
-			if tot > 0 {
-				up = float64(upN) / float64(tot) * 100
-			}
-			if !has {
-				ok, lat, cert = false, 0, -1
-			}
-			gauge(m.name, []string{"id=" + q(sv.ID), "name=" + q(sv.Name)}, m.get(ok, lat, cert, up))
+			gauge(m.name, []string{"id=" + q(d.sv.ID), "name=" + q(d.sv.Name)}, m.get(d.ok, d.lat, d.cert, d.up))
 		}
 	}
 

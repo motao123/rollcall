@@ -4,7 +4,7 @@ package web
 //
 // 设计约束：
 //
-//	· 自包含（内联 CSS/JS），无任何外部资源请求
+//	· 内联 CSS + 同源 status.js，不请求任何第三方资源
 //	· 只读，不暴露任何管理入口与敏感字段
 //	· 每 30 秒自动刷新数据
 const statusPageHTML = `<!DOCTYPE html>
@@ -93,6 +93,7 @@ footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);
     <span class="sub" id="stamp">加载中…</span>
   </header>
   <div id="banner"></div>
+  <noscript><div class="banner bad"><span class="dot bad"></span>需要启用 JavaScript 才能显示实时状态。</div></noscript>
   <div id="services"></div>
   <div id="nodes"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
   <footer>

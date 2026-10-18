@@ -57,10 +57,13 @@
     var sh = '';
     if (sv.length) {
       sh = '<div class="group"><h2 class="group-title">服务</h2>' + sv.map(function (s) {
-        return '<div class="svc"><span class="dot ' + (s.ok ? 'ok' : 'bad') + '"></span>' +
+        var has = s.has !== false;
+        var dot = has ? (s.ok ? 'ok' : 'bad') : 'off';
+        var pct = has ? s.uptime.toFixed(1) + '%' : '—';
+        return '<div class="svc"><span class="dot ' + dot + '"></span>' +
           '<span class="name">' + esc(s.name) + '</span>' +
-          '<span class="pct ' + upCls(s.uptime) + '" style="font-size:12px">' + s.uptime.toFixed(1) + '%</span>' +
-          '<span class="lat mono">' + (s.latencyMs ? s.latencyMs + 'ms' : '—') + '</span></div>';
+          '<span class="pct ' + (has ? upCls(s.uptime) : '') + '" style="font-size:12px">' + pct + '</span>' +
+          '<span class="lat mono">' + (has && s.latencyMs ? s.latencyMs + 'ms' : '—') + '</span></div>';
       }).join('') + '</div>';
     }
     document.getElementById('services').innerHTML = sh;

@@ -6,27 +6,27 @@ package collect
 
 import (
 	"runtime"
+	"sync"
 
 	"github.com/motao/rollcall/internal/model"
 )
 
 type Collector struct {
+	hostOnce sync.Once
 	host     model.HostInfo
-	hostOnce bool
 }
 
 func New() *Collector { return &Collector{} }
 
 func (c *Collector) Host() model.HostInfo {
-	if !c.hostOnce {
+	c.hostOnce.Do(func() {
 		c.host = model.HostInfo{
 			Hostname: "dev-host",
 			OS:       runtime.GOOS + " (demo)",
 			Arch:     runtime.GOARCH,
 			Cores:    runtime.NumCPU(),
 		}
-		c.hostOnce = true
-	}
+	})
 	return c.host
 }
 

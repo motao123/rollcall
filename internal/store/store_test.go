@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/motao/rollcall/internal/model"
@@ -87,6 +88,81 @@ func TestRingDedupSameSecond(t *testing.T) {
 	}
 }
 
+// TestLoadCorruptSnapshotIsolated 校验损坏快照不会被静默当成空库。
+func TestLoadCorruptSnapshotIsolated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := New(dir)
+	if st.LoadErr() == nil {
+		t.Fatal("损坏快照应返回 LoadErr")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); !os.IsNotExist(err) {
+		t.Error("损坏文件应被移走，避免下次启动重复失败")
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "state.json.corrupt-*"))
+	if len(matches) != 1 {
+		t.Errorf("应生成一份隔离备份，实际 %d 份", len(matches))
+	}
+}
+
+// TestRingDropsOlderSamples 时间倒退的采样点必须丢弃，否则升序假设被破坏。
+func TestRingDropsOlderSamples(t *testing.T) {
+	r := NewRing(4)
+	r.Add(model.Metrics{TS: 200, CPUPct: 2})
+	r.Add(model.Metrics{TS: 100, CPUPct: 1}) // 迟到样本
+	got := r.Slice()
+	if len(got) != 1 || got[0].TS != 200 {
+		t.Fatalf("迟到样本应被丢弃: %+v", got)
+	}
+}
+
+// TestOpenAlertKeepsUnresolvedWhenTrimming 容量淘汰只能删除已恢复记录。
+func TestOpenAlertKeepsUnresolvedWhenTrimming(t *testing.T) {
+	st := New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n", Token: "t"})
+	st.UpsertRule(&model.AlertRule{ID: "r1", Name: "r", Enabled: true})
+
+	for i := 0; i < 520; i++ {
+		st.OpenAlert(&model.Alert{
+			ID: NewID("a"), RuleID: "r1", NodeID: "n1", StartedAt: int64(i + 1), ResolvedAt: int64(i + 2),
+		})
+	}
+	if created, ok := st.OpenAlert(&model.Alert{
+		ID: "active", RuleID: "r1", NodeID: "n1", StartedAt: 9999,
+	}); !created || !ok {
+		t.Fatalf("未恢复告警写入失败: created=%v ok=%v", created, ok)
+	}
+	for i := 0; i < 50; i++ {
+		st.OpenAlert(&model.Alert{
+			ID: NewID("a"), RuleID: "r1", NodeID: "n1", StartedAt: int64(10000 + i), ResolvedAt: int64(10001 + i),
+		})
+	}
+	if got := st.ActiveAlertCount(); got != 1 {
+		t.Fatalf("淘汰后未恢复告警应保留，实际 active=%d", got)
+	}
+	if len(st.Alerts(0)) > 500 {
+		t.Fatalf("告警历史不应超过 500 条，实际 %d", len(st.Alerts(0)))
+	}
+}
+
+// TestOpenAlertRejectsDeletedTargets 并发删除节点后不得再写入僵尸告警。
+func TestOpenAlertRejectsDeletedTargets(t *testing.T) {
+	st := New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n", Token: "t"})
+	st.UpsertRule(&model.AlertRule{ID: "r1", Name: "r", Enabled: true})
+	st.DeleteNode("n1")
+
+	created, ok := st.OpenAlert(&model.Alert{ID: "a1", RuleID: "r1", NodeID: "n1"})
+	if created || ok {
+		t.Fatalf("节点已删除仍写入了告警: created=%v ok=%v", created, ok)
+	}
+	if st.ActiveAlertCount() != 0 {
+		t.Fatal("不应留下未恢复告警")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -94,4 +170,45 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestConcurrentSaveProducesValidSnapshot 回归测试：
+// 并发 Save 共用固定 .tmp 路径，未串行化时会互相截断，
+// 落盘可能变成半截 JSON，重启即判定快照损坏。
+func TestConcurrentSaveProducesValidSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	st.UpsertNode(&model.Node{ID: "n_save1", Name: "n1", Token: "tok-1"})
+	st.SetSetting("k", "v")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				if err := st.Save(); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("并发 Save 失败: %v", err)
+	}
+
+	re := New(dir)
+	if err := re.LoadErr(); err != nil {
+		t.Fatalf("快照应可恢复: %v", err)
+	}
+	if got := len(re.Nodes()); got != 1 {
+		t.Fatalf("节点数 = %d，期望 1", got)
+	}
+	if got, ok := re.Node("n_save1"); !ok || got.Token != "tok-1" {
+		t.Fatalf("令牌未正确恢复: %+v", got)
+	}
 }

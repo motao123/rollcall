@@ -2,8 +2,10 @@ package alert
 
 import (
 	"testing"
+	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/store"
 )
 
@@ -133,6 +135,41 @@ func TestDescribeRespectsOp(t *testing.T) {
 		if containsStr(got, c.badSub) {
 			t.Errorf("op=%s 文案错误: %q 误含 %q", c.op, got, c.badSub)
 		}
+	}
+}
+
+// TestRestartDoesNotDuplicateActiveAlertNotification 是回归测试：
+// 引擎重启后必须从持久化告警恢复 active 状态，否则首轮评估会把
+// 仍在持续的告警当成新告警再通知一遍（每次重启都骚扰一次）。
+func TestRestartDoesNotDuplicateActiveAlertNotification(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	st.UpsertRule(&model.AlertRule{
+		ID: "r_off", Name: "节点失联", Metric: "offline", Op: "gt",
+		Duration: 0, Severity: "critical", Enabled: true,
+	})
+	now := time.Now().Unix()
+	created, ok := st.OpenAlert(&model.Alert{
+		ID: "a_old", RuleID: "r_off", NodeID: "n1", NodeName: "节点一",
+		RuleName: "节点失联", Severity: "critical", StartedAt: now - 300,
+	})
+	if !created || !ok || st.ActiveAlertCount() != 1 {
+		t.Fatal("前置条件失败：未写入未恢复告警")
+	}
+
+	e := New(st) // 模拟重启：构造新引擎
+	var sent []notify.Message
+	e.SetNotifier(func(m notify.Message) { sent = append(sent, m) })
+	e.Evaluate()
+	if len(sent) != 0 {
+		t.Fatalf("重启后不应重复发送进行中的告警，实际发送 %d 条", len(sent))
+	}
+
+	// 节点恢复上报后，应正常发送一条恢复通知
+	st.AddMetrics("n1", model.HostInfo{Hostname: "h"}, model.Metrics{TS: time.Now().Unix()})
+	e.Evaluate()
+	if len(sent) != 1 || !sent[0].Resolved {
+		t.Fatalf("恢复时应发送 1 条恢复通知，实际 %+v", sent)
 	}
 }
 

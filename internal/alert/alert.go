@@ -16,6 +16,7 @@ import (
 
 type Engine struct {
 	st     *store.Store
+	evalMu sync.Mutex // 保证 Evaluate 单飞
 	mu     sync.Mutex
 	since  map[string]int64        // ruleID|nodeID -> 首次越界时间
 	active map[string]*model.Alert // 已在告警中的条目
@@ -26,12 +27,23 @@ type Engine struct {
 }
 
 func New(st *store.Store) *Engine {
-	return &Engine{
+	e := &Engine{
 		st:     st,
 		since:  map[string]int64{},
 		active: map[string]*model.Alert{},
 		lastAt: map[string]int64{},
 	}
+	// 从持久化的未恢复告警恢复引擎状态：
+	// 否则重启后首轮评估会把这些告警当成"新告警"再通知一遍。
+	// lastAt 设为当前时间，让重复提醒从重启时刻重新计时。
+	now := time.Now().Unix()
+	for _, a := range st.ActiveAlerts() {
+		key := a.RuleID + "|" + a.NodeID
+		e.active[key] = a
+		e.since[key] = a.StartedAt
+		e.lastAt[key] = now
+	}
+	return e
 }
 
 // SetNotifier 注入通知投递回调。
@@ -97,6 +109,9 @@ func (e *Engine) Start(every time.Duration) {
 
 // Evaluate 执行一轮评估。
 func (e *Engine) Evaluate() {
+	e.evalMu.Lock()
+	defer e.evalMu.Unlock()
+
 	nodes := e.st.Nodes()
 	rules := e.st.Rules()
 	now := time.Now().Unix()
@@ -135,8 +150,8 @@ func (e *Engine) Evaluate() {
 				delete(e.active, key)
 				e.mu.Unlock()
 
-				e.st.ResolveAlert(rule.ID, n.ID)
-				if wasActive {
+				resolved := e.st.ResolveAlert(rule.ID, n.ID)
+				if wasActive || resolved {
 					e.send(&model.Alert{
 						RuleID: rule.ID, RuleName: rule.Name,
 						NodeID: n.ID, NodeName: n.Name,
@@ -171,17 +186,27 @@ func (e *Engine) Evaluate() {
 				Message:   describe(rule, n.Name, val),
 				StartedAt: first,
 			}
-			isNew := e.st.OpenAlert(a)
+			isNew, exists := e.st.OpenAlert(a)
+			if !exists {
+				// 节点或规则在评估期间被删除，跳过，避免留下僵尸告警
+				continue
+			}
 
-			// 通知：新告警立即发，已在告警中的按 repeat 间隔重发
+			// 通知：新告警立即发，已在告警中的按 repeat 间隔重发。
+			// 重启后 Store 里仍有未恢复告警、但内存 active 为空时，
+			// 只恢复跟踪状态，不能当成新告警重复通知。
 			e.mu.Lock()
 			_, tracked := e.active[key]
 			last := e.lastAt[key]
 			repeat := e.repeat
+			if !tracked && !isNew {
+				e.active[key] = a
+				e.lastAt[key] = now
+			}
 			e.mu.Unlock()
 
-			fire := isNew || !tracked
-			if !fire && repeat > 0 && now-last >= int64(repeat) {
+			fire := isNew
+			if tracked && !fire && repeat > 0 && now-last >= int64(repeat) {
 				fire = true
 			}
 			if fire {
@@ -190,10 +215,6 @@ func (e *Engine) Evaluate() {
 				e.lastAt[key] = now
 				e.mu.Unlock()
 				e.send(a, false)
-			} else if !tracked {
-				e.mu.Lock()
-				e.active[key] = a
-				e.mu.Unlock()
 			}
 		}
 	}

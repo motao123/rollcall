@@ -12,7 +12,7 @@ type Node struct {
 	Group    string  `json:"group"`    // 分组：prod / test / probe
 	Note     string  `json:"note"`
 	ExpireAt string  `json:"expireAt"` // YYYY-MM-DD，到期日
-	Price    float64 `json:"price"`    // 续费价格
+	Price    float64 `json:"price"`    // 年付续费价格（月成本按 /12 估算）
 	Currency string  `json:"currency"` // USD / CNY
 	Weight   int     `json:"weight"`   // 排序权重，越小越靠前
 	Token    string  `json:"-"`        // 上报凭证，永不下发给前端
@@ -74,7 +74,7 @@ type ServiceResult struct {
 	TS        int64  `json:"ts"`
 	OK        bool   `json:"ok"`
 	LatencyMs int    `json:"latencyMs"`
-	CertDays  int    `json:"certDays"` // TLS 证书剩余天数，非 https 为 -1
+	CertDays  int    `json:"certDays"` // TLS 证书剩余天数：-1=非 TLS，0=已过期，>0=剩余天数（不足一天按 1 计）
 	Status    int    `json:"status"`   // HTTP 状态码，TCP 为 0
 	Detail    string `json:"detail"`
 }

@@ -4,7 +4,7 @@
 //   - 不 import os/exec        → 无法执行任何命令
 //   - 不监听任何端口            → 无入站攻击面
 //   - 不接收服务端指令          → 协议为单向上报
-//   - 只读 /proc 与 statfs      → 不触碰用户数据
+//   - 只读 /proc、/etc/os-release 与 statfs → 不触碰用户数据
 //
 // 验证方式见 internal/collect/collect_linux.go 顶部注释与 README 第一节。
 // 要点：用 `go list -deps ./cmd/agent` 看依赖、用**未剥离**二进制的
@@ -15,9 +15,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/motao/rollcall/internal/collect"
@@ -43,12 +48,17 @@ func loadConfig(path string) (*config, error) {
 	if c.Interval <= 0 {
 		c.Interval = 30
 	}
+	// 上限防止 time.Duration 乘法溢出成负数，触发 NewTicker panic
+	if c.Interval > 86400 {
+		return nil, fmt.Errorf("interval 不能超过 86400 秒")
+	}
 	return &c, nil
 }
 
 func main() {
 	cfgPath := flag.String("config", "./agent.json", "配置文件路径")
 	once := flag.Bool("once", false, "只采集并上报一次（用于验证连通性）")
+	allowInsecure := flag.Bool("allow-insecure", false, "允许用明文 HTTP 连接非本机服务端（节点令牌会明文传输）")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
@@ -59,6 +69,11 @@ func main() {
 		log.Fatal("配置缺少 server / nodeId / token")
 	}
 
+	endpoint, err := reportEndpoint(cfg.Server, *allowInsecure)
+	if err != nil {
+		log.Fatalf("配置错误: %v", err)
+	}
+
 	c := collect.New()
 	host := c.Host()
 	log.Printf("节点 %s（%s / %s，%d 核）→ %s", cfg.NodeID, host.Hostname, host.OS, host.Cores, cfg.Server)
@@ -67,8 +82,13 @@ func main() {
 	c.Collect()
 	time.Sleep(time.Duration(cfg.Interval) * time.Second)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	endpoint := cfg.Server + "/api/report"
+	// 上报接口不需要重定向：拒绝跟随可确保 X-Node-Token 绝不会被转发到其他主机
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 
 	send := func() {
 		m := c.Collect()
@@ -105,12 +125,50 @@ func main() {
 		return
 	}
 
+	// 上报异步执行：慢网络下同步 send 会堵住 ticker，
+	// 且 time.Ticker 只缓冲一个 tick，后续 tick 会被静默丢弃。
+	// 用单飞标记保证同一时刻最多一个请求，不堆积 goroutine。
+	var sending atomic.Bool
+	trigger := func() {
+		if !sending.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer sending.Store(false)
+			send()
+		}()
+	}
 	t := time.NewTicker(time.Duration(cfg.Interval) * time.Second)
 	defer t.Stop()
-	send()
+	trigger()
 	for range t.C {
-		send()
+		trigger()
 	}
+}
+
+// reportEndpoint 校验并归一化服务端地址。
+// 非本机服务端默认必须使用 HTTPS，否则节点令牌会以明文穿越网络。
+func reportEndpoint(server string, allowInsecure bool) (string, error) {
+	server = strings.TrimRight(strings.TrimSpace(server), "/")
+	u, err := url.Parse(server)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("server 地址无效: %q", server)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("server 仅支持 http/https: %q", server)
+	}
+	if u.Scheme == "http" && !allowInsecure && !isLoopbackHost(u.Hostname()) {
+		return "", fmt.Errorf("server 使用明文 HTTP 会泄露节点令牌，请改用 https 或显式加 -allow-insecure")
+	}
+	return server + "/api/report", nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func pct(used, total uint64) float64 {

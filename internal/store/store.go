@@ -7,8 +7,12 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +24,11 @@ import (
 
 // RingSize 是每节点保留的采样点数。30s × 2880 = 24h。
 const RingSize = 2880
+
+// ServiceRingSize 是每服务保留的探测点数。
+// 默认 60s 间隔时覆盖 48h，确保公开页/导出引用的「24h 可用率」有足够历史；
+// 即使间隔调到 30s，也仍能覆盖 24h。
+const ServiceRingSize = 2880
 
 // OnlineWindow 内收到上报即视为在线。
 const OnlineWindow = 120 // 秒
@@ -37,11 +46,15 @@ func NewRing(size int) *Ring {
 }
 
 func (r *Ring) Add(m model.Metrics) {
-	// 同一秒内的重复上报覆盖，避免 Agent 重启产生重复点
+	// 同一秒内的重复上报覆盖，避免 Agent 重启产生重复点；
+	// 时间倒退的点直接丢弃，否则 Slice/Since 的升序假设会被破坏。
 	if r.n > 0 {
 		last := (r.head - 1 + r.size) % r.size
 		if r.buf[last].TS == m.TS {
 			r.buf[last] = m
+			return
+		}
+		if m.TS < r.buf[last].TS {
 			return
 		}
 	}
@@ -94,9 +107,14 @@ type Store struct {
 	settings map[string]string
 	path     string
 	dirty    bool
+	loadErr  error
+	saveMu   sync.Mutex
 }
 
 // New 创建并尝试从磁盘恢复状态。
+//
+// 快照损坏时不会静默以空状态启动（那会让全部节点与令牌凭空消失），
+// 而是把损坏文件改名隔离，并通过 LoadErr 报告，由调用方决定是否退出。
 func New(dataDir string) *Store {
 	s := &Store{
 		nodes:    map[string]*model.Node{},
@@ -108,10 +126,16 @@ func New(dataDir string) *Store {
 		settings: map[string]string{},
 		path:     filepath.Join(dataDir, "state.json"),
 	}
-	_ = os.MkdirAll(dataDir, 0o750)
-	s.load()
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		s.loadErr = fmt.Errorf("创建数据目录 %s: %w", dataDir, err)
+		return s
+	}
+	s.loadErr = s.load()
 	return s
 }
+
+// LoadErr 返回初始化时载入快照的错误（文件不存在不算错误）。
+func (s *Store) LoadErr() error { return s.loadErr }
 
 // ---------- 快照结构 ----------
 
@@ -130,18 +154,28 @@ type snapshot struct {
 	SavedAt  int64             `json:"savedAt"`
 }
 
-func (s *Store) load() {
+func (s *Store) load() error {
 	b, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return
+		return fmt.Errorf("读取快照 %s: %w", s.path, err)
 	}
 	var snap snapshot
-	if json.Unmarshal(b, &snap) != nil {
-		return
+	if err := json.Unmarshal(b, &snap); err != nil {
+		bak := s.path + ".corrupt-" + time.Now().Format("20060102-150405")
+		if renameErr := os.Rename(s.path, bak); renameErr != nil {
+			return fmt.Errorf("快照损坏且无法隔离 %s: %w", s.path, err)
+		}
+		return fmt.Errorf("快照损坏，已备份到 %s: %w", bak, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, v := range snap.Nodes {
+		if v == nil {
+			continue
+		}
 		if tok, ok := snap.Tokens[k]; ok {
 			v.Token = tok // 还原上报令牌
 		}
@@ -151,6 +185,7 @@ func (s *Store) load() {
 		s.hosts[k] = v
 	}
 	for k, pts := range snap.Series {
+		sort.Slice(pts, func(i, j int) bool { return pts[i].TS < pts[j].TS })
 		r := NewRing(RingSize)
 		for _, p := range pts {
 			r.Add(p)
@@ -158,22 +193,34 @@ func (s *Store) load() {
 		s.series[k] = r
 	}
 	for k, v := range snap.Services {
+		if v == nil {
+			continue
+		}
 		s.services[k] = v
 	}
 	for k, pts := range snap.SvcRes {
-		r := NewRing(720)
+		sort.Slice(pts, func(i, j int) bool { return pts[i].TS < pts[j].TS })
+		r := NewRing(ServiceRingSize)
 		for _, p := range pts {
 			r.Add(p)
 		}
 		s.svcRes[k] = r
 	}
 	for k, v := range snap.Rules {
+		if v == nil {
+			continue
+		}
 		s.rules[k] = v
 	}
-	s.alerts = snap.Alerts
+	for _, a := range snap.Alerts {
+		if a != nil {
+			s.alerts = append(s.alerts, a)
+		}
+	}
 	if snap.Settings != nil {
 		s.settings = snap.Settings
 	}
+	return nil
 }
 
 // Save 将内存状态写入磁盘。
@@ -238,6 +285,9 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
+	// 串行化磁盘写入：固定 temp 路径下，两个并发 Save 会互相截断/覆盖。
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
@@ -251,7 +301,9 @@ func (s *Store) StartAutoSave(every time.Duration) {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for range t.C {
-			_ = s.Save()
+			if err := s.Save(); err != nil {
+				log.Printf("自动保存失败: %v", err)
+			}
 		}
 	}()
 }
@@ -260,14 +312,18 @@ func (s *Store) StartAutoSave(every time.Duration) {
 
 func NewID(prefix string) string {
 	b := make([]byte, 6)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand 失败: " + err.Error())
+	}
 	return prefix + "_" + hex.EncodeToString(b)
 }
 
 // NewToken 生成节点上报令牌（24 字节随机，hex 编码）。
 func NewToken() string {
 	b := make([]byte, 24)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand 失败: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -332,7 +388,11 @@ func (s *Store) NodeByToken(token, id string) (*model.Node, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	n, ok := s.nodes[id]
-	if !ok || n.Token != token || token == "" {
+	if !ok || n.Token == "" || token == "" {
+		return nil, false
+	}
+	// 常量时间比较，避免通过响应耗时逐字节猜测令牌
+	if subtle.ConstantTimeCompare([]byte(n.Token), []byte(token)) != 1 {
 		return nil, false
 	}
 	cp := *n
@@ -391,7 +451,7 @@ func (s *Store) UpsertService(sv *model.Service) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.svcRes[sv.ID] == nil {
-		s.svcRes[sv.ID] = NewRing(720)
+		s.svcRes[sv.ID] = NewRing(ServiceRingSize)
 	}
 	s.services[sv.ID] = sv
 }
@@ -419,7 +479,7 @@ func (s *Store) AddServiceResult(sr model.ServiceResult) {
 	defer s.mu.Unlock()
 	r := s.svcRes[sr.ServiceID]
 	if r == nil {
-		r = NewRing(720)
+		r = NewRing(ServiceRingSize)
 		s.svcRes[sr.ServiceID] = r
 	}
 	// 复用 Metrics.TS 存时间戳，CPUPct 存延迟（压缩存储）
@@ -504,34 +564,81 @@ func (s *Store) Alerts(limit int) []*model.Alert {
 	return out
 }
 
-// OpenAlert 断言/维持一条告警；返回是否为新建。
-func (s *Store) OpenAlert(a *model.Alert) bool {
+// ActiveAlerts 返回所有未恢复告警的副本（用于引擎重启后恢复告警状态）。
+func (s *Store) ActiveAlerts() []*model.Alert {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.Alert, 0)
+	for _, a := range s.alerts {
+		if a.ResolvedAt == 0 {
+			cp := *a
+			out = append(out, &cp)
+		}
+	}
+	return out
+}
+
+// OpenAlert 断言/维持一条告警；返回是否为新建、以及节点与规则是否仍然存在。
+//
+// 存在性必须与写入在同一把锁内确认：否则「评估时节点还在、写入前被删除」
+// 会留下一条永远无法自愈的未恢复告警。
+func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if a.ResolvedAt == 0 {
+		if _, exists := s.nodes[a.NodeID]; !exists {
+			return false, false
+		}
+		if _, exists := s.rules[a.RuleID]; !exists {
+			return false, false
+		}
+	}
 	for _, ex := range s.alerts {
 		if ex.RuleID == a.RuleID && ex.NodeID == a.NodeID && ex.ResolvedAt == 0 {
 			ex.Value = a.Value
 			ex.Message = a.Message
-			return false
+			return false, true
 		}
 	}
 	s.alerts = append(s.alerts, a)
 	if len(s.alerts) > 500 {
-		s.alerts = s.alerts[len(s.alerts)-500:]
+		// 只淘汰已恢复的旧记录：未恢复告警必须保留，
+		// 否则会把仍在进行的告警从历史里抹掉。
+		kept := make([]*model.Alert, 0, 500)
+		unresolved := make([]*model.Alert, 0, len(s.alerts))
+		for _, ex := range s.alerts {
+			if ex.ResolvedAt == 0 {
+				unresolved = append(unresolved, ex)
+			}
+		}
+		kept = append(kept, unresolved...)
+		for i := len(s.alerts) - 1; i >= 0 && len(kept) < 500; i-- {
+			if s.alerts[i].ResolvedAt != 0 {
+				kept = append(kept, s.alerts[i])
+			}
+		}
+		sort.Slice(kept, func(i, j int) bool { return kept[i].StartedAt < kept[j].StartedAt })
+		s.alerts = kept
 	}
-	return true
+	return true, true
 }
 
 // ResolveAlert 关闭匹配的未恢复告警。
-func (s *Store) ResolveAlert(ruleID, nodeID string) {
+// ResolveAlert 关闭指定规则/节点的未恢复告警，返回是否确实关闭了记录。
+// 返回值用于区分「内存追踪状态丢失」与「持久化告警仍在进行中」，
+// 让重启后的恢复通知也能正常发出。
+func (s *Store) ResolveAlert(ruleID, nodeID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
+	resolved := false
 	for _, a := range s.alerts {
 		if a.RuleID == ruleID && a.NodeID == nodeID && a.ResolvedAt == 0 {
 			a.ResolvedAt = now
+			resolved = true
 		}
 	}
+	return resolved
 }
 
 // ActiveAlertCount 统计未恢复告警数。

@@ -2,20 +2,26 @@ package notify
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/motao/rollcall/internal/netguard"
 )
 
 // sevRank 用于 MinSeverity 过滤。
@@ -140,16 +146,48 @@ func Parse(raw string) (*Config, error) {
 				},
 			})
 		}
+		c.normalize()
 		return c, nil
 	}
 
 	if err := json.Unmarshal([]byte(raw), c); err != nil {
 		return nil, err
 	}
-	if c.MinSeverity == "" {
+	c.normalize()
+	return c, nil
+}
+
+// normalize 修正越界/非法的配置值，避免 MinSeverity 拼错后阈值失效。
+func (c *Config) normalize() {
+	if _, ok := sevRank[c.MinSeverity]; !ok {
 		c.MinSeverity = "warn"
 	}
-	return c, nil
+	if c.RepeatInterval < 0 {
+		c.RepeatInterval = 0
+	}
+	if c.RepeatInterval > 7*86400 {
+		c.RepeatInterval = 7 * 86400
+	}
+}
+
+// Normalize 修正越界/非法的配置值。供管理 API 直接解码后调用。
+func (c *Config) Normalize() { c.normalize() }
+
+// Validate 校验通道类型与 ID，避免保存拼错类型或重复 ID 的配置。
+func (c *Config) Validate() error {
+	seen := make(map[string]bool, len(c.Channels))
+	for i, ch := range c.Channels {
+		if _, ok := defOf(ch.Type); !ok {
+			return fmt.Errorf("第 %d 个通道类型无效：%s", i+1, ch.Type)
+		}
+		if ch.ID != "" {
+			if seen[ch.ID] {
+				return fmt.Errorf("通道 ID 重复：%s", ch.ID)
+			}
+			seen[ch.ID] = true
+		}
+	}
+	return nil
 }
 
 // Redacted 返回脱敏副本（敏感字段以掩码替换），用于下发前端。
@@ -249,6 +287,12 @@ func missingRequired(ch ChannelConfig) string {
 			return f.Label
 		}
 	}
+	// 发件人留空时回退到用户名；两者都没有则配置不完整。
+	if ch.Type == "email" &&
+		strings.TrimSpace(ch.Options["from"]) == "" &&
+		strings.TrimSpace(ch.Options["username"]) == "" {
+		return "发件人或用户名"
+	}
 	return ""
 }
 
@@ -257,12 +301,42 @@ func (c *Config) ShouldSend(severity string) bool {
 	if !c.Enabled {
 		return false
 	}
-	return sevRank[severity] >= sevRank[c.MinSeverity]
+	min := sevRank[c.MinSeverity]
+	if min == 0 {
+		min = sevRank["warn"]
+	}
+	return sevRank[severity] >= min
 }
 
 // ---------- 投递 ----------
 
-var httpClient = &http.Client{Timeout: 12 * time.Second}
+// allowPrivateNotify 控制通知目标是否允许访问回环/私网/CGNAT。
+// 默认拒绝；自建 Gotify/Bark/Webhook 位于内网时由服务端显式开启。
+var allowPrivateNotify atomic.Bool
+
+// SetAllowPrivateTargets 设置通知通道是否允许私网目标（仅启动时调用）。
+func SetAllowPrivateTargets(v bool) { allowPrivateNotify.Store(v) }
+
+func currentNotifyPolicy() netguard.Policy {
+	return netguard.Policy{AllowPrivate: allowPrivateNotify.Load()}
+}
+
+// notifyDialContext 在拨号时读取当前策略；策略可在进程启动阶段调整。
+func notifyDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return currentNotifyPolicy().DialContext(ctx, network, addr)
+}
+
+// httpClient 不跟随重定向：避免鉴权头/消息内容被 3xx 带到其他主机。
+var httpClient = &http.Client{
+	Timeout: 12 * time.Second,
+	Transport: &http.Transport{
+		DialContext:       notifyDialContext,
+		DisableKeepAlives: true,
+	},
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // Send 向所有启用的通道投递，返回逐通道结果。
 func Send(cfg *Config, m Message) []Result {
@@ -300,8 +374,10 @@ func errStr(e error) string {
 		return ""
 	}
 	s := e.Error()
-	if len(s) > 220 {
-		return s[:220]
+	// 按 rune 截断，避免把中文切成半个字符
+	r := []rune(s)
+	if len(r) > 120 {
+		return string(r[:120]) + "…"
 	}
 	return s
 }
@@ -358,6 +434,9 @@ func dispatch(ch ChannelConfig, subject, body string, m Message) error {
 }
 
 func postJSON(urlStr string, payload any) ([]byte, error) {
+	if err := checkNotifyURL(urlStr); err != nil {
+		return nil, err
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -367,17 +446,50 @@ func postJSON(urlStr string, payload any) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "motao-rollcall/1.0")
+	req.Header.Set("User-Agent", "motao-rollcall/1.1")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, netErr(err)
 	}
 	defer resp.Body.Close()
-	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 	if resp.StatusCode >= 300 {
-		return rb, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+		// 不回显远端响应体：通知地址由用户配置，响应内容不可信
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return rb, nil
+}
+
+// checkNotifyURL 校验通知地址协议与地址范围。
+func checkNotifyURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("通知地址无效: %w", err)
+	}
+	return currentNotifyPolicy().CheckURL(u)
+}
+
+// netErr 剥掉 url.Error 中携带的完整 URL。
+// Telegram 的 Bot Token 在路径里，通用 Webhook 的密钥常写在查询串，
+// 原样返回会把凭据带进 API 响应或日志。
+func netErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
+}
+
+// decodeResult 严格解析远端返回的 JSON。
+// 早期实现把 Unmarshal 失败当作成功，导致配错地址也会显示「发送成功」。
+func decodeResult(rb []byte, v any) error {
+	if len(bytes.TrimSpace(rb)) == 0 {
+		return fmt.Errorf("通知接口返回空响应")
+	}
+	if err := json.Unmarshal(rb, v); err != nil {
+		return fmt.Errorf("通知接口响应不是合法 JSON")
+	}
+	return nil
 }
 
 // ---------- 企业微信 ----------
@@ -395,7 +507,10 @@ func sendWecom(o map[string]string, subject, body string) error {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
-	if json.Unmarshal(rb, &r) == nil && r.ErrCode != 0 {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("wecom: %w", err)
+	}
+	if r.ErrCode != 0 {
 		return fmt.Errorf("wecom: %s (errcode %d)", r.ErrMsg, r.ErrCode)
 	}
 	return nil
@@ -427,7 +542,10 @@ func sendDingtalk(o map[string]string, subject, body string) error {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
-	if json.Unmarshal(rb, &r) == nil && r.ErrCode != 0 {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("dingtalk: %w", err)
+	}
+	if r.ErrCode != 0 {
 		return fmt.Errorf("dingtalk: %s (errcode %d)", r.ErrMsg, r.ErrCode)
 	}
 	return nil
@@ -455,7 +573,10 @@ func sendLark(o map[string]string, subject, body string) error {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if json.Unmarshal(rb, &r) == nil && r.Code != 0 {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("lark: %w", err)
+	}
+	if r.Code != 0 {
 		return fmt.Errorf("lark: %s (code %d)", r.Msg, r.Code)
 	}
 	return nil
@@ -477,7 +598,10 @@ func sendTelegram(o map[string]string, subject, body string) error {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	if json.Unmarshal(rb, &r) == nil && !r.OK {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("telegram: %w", err)
+	}
+	if !r.OK {
 		return fmt.Errorf("telegram: %s", r.Description)
 	}
 	return nil
@@ -508,7 +632,10 @@ func sendBark(o map[string]string, subject, body string) error {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	}
-	if json.Unmarshal(rb, &r) == nil && r.Code != 0 && r.Code != 200 {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("bark: %w", err)
+	}
+	if r.Code != 0 && r.Code != 200 {
 		return fmt.Errorf("bark: %s (code %d)", r.Message, r.Code)
 	}
 	return nil
@@ -518,10 +645,11 @@ func sendBark(o map[string]string, subject, body string) error {
 
 func sendServerchan(o map[string]string, subject, body string) error {
 	key := strings.TrimSpace(o["sendKey"])
-	u := "https://sctapi.ftqq.com/" + key + ".send"
-	if strings.HasPrefix(key, "http") {
-		u = key // 允许直接填完整地址
+	// sendKey 只接受令牌本身；曾经允许填完整 URL，等于绕过了地址策略
+	if key == "" || strings.ContainsAny(key, "/\\?#") {
+		return fmt.Errorf("serverchan: sendKey 格式无效")
 	}
+	u := "https://sctapi.ftqq.com/" + key + ".send"
 	rb, err := postJSON(u, map[string]any{"title": subject, "desp": body})
 	if err != nil {
 		return err
@@ -530,7 +658,10 @@ func sendServerchan(o map[string]string, subject, body string) error {
 		Code int    `json:"code"`
 		Msg  string `json:"message"`
 	}
-	if json.Unmarshal(rb, &r) == nil && r.Code != 0 {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("serverchan: %w", err)
+	}
+	if r.Code != 0 {
 		return fmt.Errorf("serverchan: %s (code %d)", r.Msg, r.Code)
 	}
 	return nil
@@ -556,7 +687,10 @@ func sendPushplus(o map[string]string, subject, body string) error {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if json.Unmarshal(rb, &r) == nil && r.Code != 200 {
+	if err := decodeResult(rb, &r); err != nil {
+		return fmt.Errorf("pushplus: %w", err)
+	}
+	if r.Code != 200 {
 		return fmt.Errorf("pushplus: %s (code %d)", r.Msg, r.Code)
 	}
 	return nil
@@ -575,7 +709,11 @@ func sendGotify(o map[string]string, subject, body string) error {
 	b, _ := json.Marshal(map[string]any{
 		"title": subject, "message": body, "priority": prio,
 	})
-	req, err := http.NewRequest(http.MethodPost, server+"/message", bytes.NewReader(b))
+	u := server + "/message"
+	if err := checkNotifyURL(u); err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
@@ -583,12 +721,11 @@ func sendGotify(o map[string]string, subject, body string) error {
 	req.Header.Set("Authorization", "Bearer "+o["token"])
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return netErr(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -600,23 +737,26 @@ func sendWebhook(o map[string]string, m Message) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, o["url"], bytes.NewReader(b))
+	u := strings.TrimSpace(o["url"])
+	if err := checkNotifyURL(u); err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "motao-rollcall/1.0")
+	req.Header.Set("User-Agent", "motao-rollcall/1.1")
 	if s := o["secret"]; s != "" {
 		req.Header.Set("X-Rollcall-Secret", s)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return netErr(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -624,31 +764,49 @@ func sendWebhook(o map[string]string, m Message) error {
 // ---------- 邮件 ----------
 
 func sendEmail(o map[string]string, subject, body string) error {
-	host := o["smtpHost"]
+	host := strings.TrimSpace(o["smtpHost"])
+	if host == "" || strings.ContainsAny(host, " \r\n\t/") {
+		return fmt.Errorf("SMTP 主机无效")
+	}
 	port := 465
 	if v := strings.TrimSpace(o["smtpPort"]); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			port = n
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("SMTP 端口无效")
 		}
+		port = n
 	}
-	from := o["from"]
-	if from == "" {
-		from = o["username"]
+	rawFrom := strings.TrimSpace(o["from"])
+	if rawFrom == "" {
+		rawFrom = strings.TrimSpace(o["username"])
 	}
-	var to []string
+	fromAddr, err := mail.ParseAddress(rawFrom)
+	if err != nil {
+		return fmt.Errorf("发件人地址无效: %w", err)
+	}
+
+	var toAddrs []*mail.Address
+	var toHdr []string
 	for _, x := range strings.Split(o["to"], ",") {
-		if s := strings.TrimSpace(x); s != "" {
-			to = append(to, s)
+		x = strings.TrimSpace(x)
+		if x == "" {
+			continue
 		}
+		a, err := mail.ParseAddress(x)
+		if err != nil {
+			return fmt.Errorf("收件人地址无效 %q: %w", x, err)
+		}
+		toAddrs = append(toAddrs, a)
+		toHdr = append(toHdr, a.String())
 	}
-	if len(to) == 0 {
+	if len(toAddrs) == 0 {
 		return fmt.Errorf("收件人为空")
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	var msg bytes.Buffer
-	fmt.Fprintf(&msg, "From: %s\r\n", from)
-	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(to, ", "))
+	fmt.Fprintf(&msg, "From: %s\r\n", fromAddr.String())
+	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(toHdr, ", "))
 	fmt.Fprintf(&msg, "Subject: %s\r\n", encodeHeader(subject))
 	fmt.Fprintf(&msg, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintf(&msg, "MIME-Version: 1.0\r\n")
@@ -661,35 +819,62 @@ func sendEmail(o map[string]string, subject, body string) error {
 		auth = smtp.PlainAuth("", o["username"], o["password"], host)
 	}
 
+	const smtpTimeout = 60 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	rawConn, err := currentNotifyPolicy().DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("SMTP 连接失败: %w", err)
+	}
+	defer rawConn.Close()
+	_ = rawConn.SetDeadline(time.Now().Add(smtpTimeout))
+
 	if port == 465 {
-		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 12 * time.Second},
-			"tcp", addr, &tls.Config{ServerName: host})
-		if err != nil {
+		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return fmt.Errorf("TLS 连接失败: %w", err)
 		}
-		defer conn.Close()
-		cli, err := smtp.NewClient(conn, host)
+		cli, err := smtp.NewClient(tlsConn, host)
 		if err != nil {
 			return err
 		}
 		defer cli.Close()
-		return smtpSend(cli, auth, from, to, msg.Bytes())
+		return smtpSend(cli, auth, fromAddr.Address, toAddrs, msg.Bytes())
 	}
 
-	cli, err := smtp.Dial(addr)
+	cli, err := smtp.NewClient(rawConn, host)
 	if err != nil {
-		return fmt.Errorf("SMTP 连接失败: %w", err)
+		return err
 	}
 	defer cli.Close()
-	if ok, _ := cli.Extension("STARTTLS"); ok {
+	ok, _ := cli.Extension("STARTTLS")
+	if ok {
 		if err := cli.StartTLS(&tls.Config{ServerName: host}); err != nil {
 			return fmt.Errorf("STARTTLS 失败: %w", err)
 		}
+		_ = rawConn.SetDeadline(time.Now().Add(smtpTimeout))
+	} else {
+		// 没有 STARTTLS 时，凭据和告警内容都会明文过网。
+		// 本地中继可接受，其余情况一律拒绝，避免静默降级。
+		if auth != nil {
+			return fmt.Errorf("SMTP 服务器不支持 STARTTLS，拒绝明文发送凭据")
+		}
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("SMTP 服务器不支持 STARTTLS，拒绝明文发送邮件；请改用 465 端口或启用 STARTTLS")
+		}
 	}
-	return smtpSend(cli, auth, from, to, msg.Bytes())
+	return smtpSend(cli, auth, fromAddr.Address, toAddrs, msg.Bytes())
 }
 
-func smtpSend(cli *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func smtpSend(cli *smtp.Client, auth smtp.Auth, from string, to []*mail.Address, msg []byte) error {
 	if auth != nil {
 		if err := cli.Auth(auth); err != nil {
 			return fmt.Errorf("SMTP 认证失败: %w", err)
@@ -699,7 +884,7 @@ func smtpSend(cli *smtp.Client, auth smtp.Auth, from string, to []string, msg []
 		return err
 	}
 	for _, t := range to {
-		if err := cli.Rcpt(t); err != nil {
+		if err := cli.Rcpt(t.Address); err != nil {
 			return err
 		}
 	}
@@ -716,8 +901,9 @@ func smtpSend(cli *smtp.Client, auth smtp.Auth, from string, to []string, msg []
 	return cli.Quit()
 }
 
-// encodeHeader 处理非 ASCII 主题（RFC 2047）。
+// encodeHeader 处理非 ASCII 主题（RFC 2047），并清除 CR/LF 防止头注入。
 func encodeHeader(s string) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 	ascii := true
 	for _, r := range s {
 		if r > 127 {

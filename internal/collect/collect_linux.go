@@ -4,7 +4,7 @@
 //
 // ★ 安全约束（本项目的核心设计）★
 //
-//	· 只读 /proc 与 statfs，不读取用户数据
+//	· 只读 /proc、/etc/os-release 与 statfs，不读取用户数据
 //	· 不 import os/exec —— 无法执行任何命令
 //	· 不 import net 的监听相关能力 —— 不开放任何端口
 //	· 不做任何持久化（除自身配置文件）
@@ -45,52 +45,51 @@ import (
 
 // Collector 持有上一次 CPU 采样，用于计算区间使用率。
 type Collector struct {
-	mu       sync.Mutex
+	cpuMu    sync.Mutex
 	prevIdle uint64
 	prevTot  uint64
+	hostOnce sync.Once
 	host     model.HostInfo
-	hostOnce bool
 }
 
 func New() *Collector { return &Collector{} }
 
 // Host 返回静态硬件信息（仅首次真正读取）。
+// 用 sync.Once 而非与 CPU 采样共用锁：Host 会读多个文件，
+// 不应把文件 IO 串行到每次指标采集之前。
 func (c *Collector) Host() model.HostInfo {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.hostOnce {
-		return c.host
-	}
-	h := model.HostInfo{}
-	if hn, err := os.Hostname(); err == nil {
-		h.Hostname = hn
-	}
-	h.Arch = runtime.GOARCH
-	h.Cores = runtime.NumCPU()
-	if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
-		h.Kernel = strings.TrimSpace(string(b))
-	}
-	if b, err := os.ReadFile("/etc/os-release"); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(line, "PRETTY_NAME=") {
-				h.OS = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
-			}
+	c.hostOnce.Do(func() {
+		h := model.HostInfo{}
+		if hn, err := os.Hostname(); err == nil {
+			h.Hostname = hn
 		}
-	}
-	if b, err := os.ReadFile("/proc/cpuinfo"); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(line, "model name") {
-				if i := strings.Index(line, ":"); i > 0 {
-					h.CPUModel = strings.TrimSpace(line[i+1:])
+		h.Arch = runtime.GOARCH
+		h.Cores = runtime.NumCPU()
+		if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+			h.Kernel = strings.TrimSpace(string(b))
+		}
+		if b, err := os.ReadFile("/etc/os-release"); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				if strings.HasPrefix(line, "PRETTY_NAME=") {
+					h.OS = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
 				}
-				break
 			}
 		}
-	}
-	// 虚拟化类型：KVM / VMware / 物理机
-	h.Virt = detectVirt()
-	c.host, c.hostOnce = h, true
-	return h
+		if b, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				if strings.HasPrefix(line, "model name") {
+					if i := strings.Index(line, ":"); i > 0 {
+						h.CPUModel = strings.TrimSpace(line[i+1:])
+					}
+					break
+				}
+			}
+		}
+		// 虚拟化类型：KVM / VMware / 物理机
+		h.Virt = detectVirt()
+		c.host = h
+	})
+	return c.host
 }
 
 func detectVirt() string {
@@ -116,9 +115,11 @@ func detectVirt() string {
 func (c *Collector) Collect() model.Metrics {
 	m := model.Metrics{TS: now()}
 
-	// CPU：读两次 /proc/stat 差值由调用方间隔决定
+	// CPU：读两次 /proc/stat 差值由调用方间隔决定。
+	// 读取与基线更新必须同锁完成，否则并发 Collect 可能让较旧的样本
+	// 覆盖较新的基线，算出错误的区间使用率。
+	c.cpuMu.Lock()
 	if idle, tot, ok := readCPU(); ok {
-		c.mu.Lock()
 		if c.prevTot > 0 && tot > c.prevTot {
 			dTot := float64(tot - c.prevTot)
 			dIdle := float64(idle - c.prevIdle)
@@ -127,8 +128,8 @@ func (c *Collector) Collect() model.Metrics {
 			}
 		}
 		c.prevIdle, c.prevTot = idle, tot
-		c.mu.Unlock()
 	}
+	c.cpuMu.Unlock()
 
 	// 负载
 	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
@@ -217,6 +218,14 @@ func readCPU() (uint64, uint64, bool) {
 		if i == 3 || i == 4 { // idle + iowait 视为空闲
 			idle += v
 		}
+	}
+	// guest / guest_nice 已包含在 user / nice 中，直接求和会重复计算，
+	// 在虚拟机上虚增 total、压低使用率。
+	if len(vals) > 8 {
+		total -= vals[8]
+	}
+	if len(vals) > 9 {
+		total -= vals[9]
 	}
 	return idle, total, true
 }

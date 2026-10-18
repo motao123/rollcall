@@ -9,15 +9,17 @@
 # 二进制
 /rollcall-server
 /rollcall-agent
-rollcall-server.exe
-rollcall-agent.exe
-probe-server
-probe-agent
-probe-server.exe
-probe-agent.exe
+/rollcall-server.exe
+/rollcall-agent.exe
+/probe-server
+/probe-agent
+/probe-server.exe
+/probe-agent.exe
 
 # 运行时数据（含管理令牌与节点上报令牌，不可入库）
 /data/
+/cmd/server/data/
+/cmd/agent/data/
 
 # 编辑器备份与日志
 *~

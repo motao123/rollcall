@@ -8,9 +8,10 @@ Type=simple
 User=rollcall
 Group=rollcall
 WorkingDirectory=/opt/rollcall
-# 默认只监听回环：对外访问请经反向代理，或改绑 0.0.0.0 并同时启用 -auth。
-# ⚠ 直接改绑 0.0.0.0 而不加 -auth，会把管理界面暴露到公网
-#   （管理 API 有 X-Admin-Token 保护，但 Web UI 本身无任何认证）。
+# 默认只监听回环：对外访问请经反向代理。
+# 若要直接改绑 0.0.0.0，必须同时启用 -auth 与内置 TLS（-tls-cert/-tls-key），
+# 否则服务会拒绝启动；匿名公开只读面板需显式加 -allow-public，
+# 明文 HTTP 暴露需显式加 -allow-insecure。
 ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data
 Restart=always
 RestartSec=5s

@@ -425,7 +425,7 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">位置</span><span class="info-v">${esc(n.region || '—')}</span></div>
             <div class="info-row"><span class="info-k">分组</span><span class="info-v">${esc(n.group || '—')}</span></div>
             <div class="info-row"><span class="info-k">到期日</span><span class="info-v mono">${esc(n.expireAt || '—')}</span></div>
-            <div class="info-row"><span class="info-k">续费价</span><span class="info-v mono">${n.price ? (n.currency === 'CNY' ? '¥' : '$') + n.price : '—'}</span></div>
+            <div class="info-row"><span class="info-k">年付价</span><span class="info-v mono">${n.price ? (n.currency === 'CNY' ? '¥' : '$') + n.price : '—'}</span></div>
           </div>
         </div>
       </div>
@@ -451,9 +451,11 @@ async function viewServices() {
           const spark = (s.spark || []).slice(-120).map((p) => p[1]);
           const up = s.uptime || 0;
           const cd = s.certDays;
-          const certCell = cd > 0
-            ? `<span class="badge ${cd <= 14 ? 'crit' : cd <= 30 ? 'warn' : 'mute'}">${cd} 天</span>`
-            : '—';
+          const certCell = cd === 0
+            ? '<span class="badge crit">已过期</span>'
+            : cd > 0
+              ? `<span class="badge ${cd <= 14 ? 'crit' : cd <= 30 ? 'warn' : 'mute'}">${cd} 天</span>`
+              : '—';
           return `<tr>
             <td><span class="dot ${s.ok ? 'ok' : 'crit'}"></span></td>
             <td class="strong">${esc(s.name)}</td>
@@ -475,7 +477,7 @@ async function viewAlerts() {
   const [d, rules, meta] = await Promise.all([
     api('/api/alerts'),
     api('/api/rules').catch(() => []),
-    api('/api/admin/rule-meta').catch(() => ({ metrics: [], severities: [], durations: [] })),
+    adminApi('/api/admin/rule-meta').catch(() => ({ metrics: [], severities: [], durations: [] })),
   ]);
   const items = d.items || [];
   $('#navAlertCount').hidden = d.active === 0;
@@ -915,7 +917,7 @@ async function viewSettings() {
           ${field('位置', 'region', '', { placeholder: '美国 / 香港 …' })}
           ${field('分组', 'group', '', { placeholder: 'prod / test' })}
           ${field('到期日', 'expireAt', '', { placeholder: '2027-06-01' })}
-          ${field('续费价', 'price', '', { type: 'number', placeholder: '11.00' })}
+          ${field('年付价', 'price', '', { type: 'number', placeholder: '11.00' })}
           <div class="form-actions"><button class="btn primary" type="submit">创建并获取令牌</button></div>
         </form>
       </details>
@@ -1343,14 +1345,15 @@ function applyTheme(t) {
 function boot() {
   const params = new URLSearchParams(location.search);
 
-  // 首次访问引导：?admin=<令牌> 写入 localStorage 后立即从地址栏移除，
-  // 便于命令行/脚本一次性完成配置，避免令牌长期留在 URL 中。
-  const bootTok = params.get('admin');
+  // 首次访问引导：只接受 URL 片段 #admin=<令牌>。
+  // 片段不会发送给服务器，因此不会落入反向代理/网关的访问日志。
+  const hashParams = new URLSearchParams(location.hash.slice(1));
+  const bootTok = hashParams.get('admin');
   if (bootTok) {
     lsSet(LS_TOKEN, LS_TOKEN_LEGACY, bootTok);
-    params.delete('admin');
-    const q = params.toString();
-    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+    hashParams.delete('admin');
+    const h = hashParams.toString();
+    history.replaceState(null, '', location.pathname + location.search + (h ? '#' + h : ''));
   }
 
   const qTheme = params.get('theme');

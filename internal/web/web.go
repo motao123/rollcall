@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/motao/rollcall/internal/alert"
@@ -33,6 +35,11 @@ type Server struct {
 	authUser   string
 	authPass   string
 	panelLink  string
+	limiter    *authFailureLimiter
+	notifyErr  error
+
+	testMu   sync.Mutex
+	lastTest time.Time
 }
 
 // Config 是服务端的运行参数。
@@ -46,13 +53,18 @@ type Config struct {
 func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server {
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
-		panelLink: cfg.PanelLink}
+		panelLink: cfg.PanelLink, limiter: newAuthFailureLimiter()}
 	// 载入已保存的通知配置并挂到告警引擎
-	if nc, err := notify.Parse(st.GetSetting("notify")); err == nil {
+	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
+		srv.notifyErr = err
+	} else {
 		srv.applyNotifyConfig(nc)
 	}
 	return srv
 }
+
+// NotifyErr 返回启动时通知配置的解析错误，供 main 记录日志。
+func (s *Server) NotifyErr() error { return s.notifyErr }
 
 // applyNotifyConfig 把通知配置同步到告警引擎。
 func (s *Server) applyNotifyConfig(cfg *notify.Config) {
@@ -112,7 +124,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
-	return withCommon(withAuth(mux, s))
+	return withCommon(s.withAuthGuard(withAuth(mux, s)))
 }
 
 // withAuth 对浏览器访问启用 Basic Auth；Agent 上报走自己的 token，不受影响。
@@ -120,10 +132,17 @@ func withAuth(h http.Handler, s *Server) http.Handler {
 	if s.authUser == "" {
 		return h
 	}
+	// 用户名已配置但密码为空属于配置错误，必须整体拒绝而不是放行空密码
+	if s.authPass == "" {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "server auth misconfigured", http.StatusInternalServerError)
+		})
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Agent 上报用 X-Node-Token 自行鉴权；/status 与 /api/status 为公开页
+		// Agent 上报用 X-Node-Token 自行鉴权；/status 与 /api/status 为公开页，
+		// /status.js 是公开页依赖的静态脚本，必须一并放行，否则页面会卡在骨架屏。
 		switch r.URL.Path {
-		case "/api/report", "/healthz", "/status", "/api/status":
+		case "/api/report", "/healthz", "/status", "/api/status", "/status.js":
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -143,9 +162,12 @@ func withCommon(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		// 本项目无外部资源依赖，可直接上严格 CSP
+		w.Header().Set("X-Frame-Options", "DENY")
+		// 本项目无外部资源依赖，可直接上严格 CSP；同时禁止被第三方 iframe 嵌入。
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'")
+			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'")
+		// 明文 HTTP 下浏览器会忽略该头；反向代理终止 TLS 时同样能生效。
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		} else {
@@ -219,8 +241,12 @@ func (s *Server) buildNodeViews() []model.NodeView {
 			spark = append(spark, model.Point{T: p.TS, V: p.CPUPct})
 		}
 
+		// 视图不携带上报令牌：即使未来有非 JSON 序列化路径也无法泄露。
+		// adminNodeView 会显式附加自己需要的 token 字段。
+		cp := *n
+		cp.Token = ""
 		out = append(out, model.NodeView{
-			Node:     *n,
+			Node:     cp,
 			Host:     s.st.Host(n.ID),
 			Latest:   m,
 			Online:   online,
@@ -253,9 +279,11 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		} else {
 			ov.Offline++
 		}
+		// 成本只取决于价格，与是否登记到期日无关；
+		// 否则未填到期日的资产会在总览里凭空消失。
+		ov.MonthlyCost += monthly(v.Price, v.Currency)
 		if v.ExpireAt != "" {
-			ov.MonthlyCost += monthly(v.Price, v.Currency)
-			if days, ok := daysUntil(v.ExpireAt); ok && days <= 30 {
+			if days, ok := daysUntil(v.ExpireAt); ok && days >= 0 && days <= 30 {
 				ov.Expiring = append(ov.Expiring, v)
 			}
 		}
@@ -385,25 +413,28 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		Currency string  `json:"currency"`
 		Monthly  float64 `json:"monthly"`
 		OS       string  `json:"os"`
+		hasExp   bool
 	}
 	rows := make([]row, 0, len(nodes))
 	var monthSum float64
 	for _, n := range nodes {
-		d, _ := daysUntil(n.ExpireAt)
+		d, hasExp := daysUntil(n.ExpireAt)
 		mv := monthly(n.Price, n.Currency)
 		monthSum += mv
 		rows = append(rows, row{
 			ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
 			ExpireAt: n.ExpireAt, Days: d, Price: n.Price, Currency: n.Currency,
-			Monthly: mv, OS: s.st.Host(n.ID).OS,
+			Monthly: mv, OS: s.st.Host(n.ID).OS, hasExp: hasExp,
 		})
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Days == 0 {
-			return false
+	// 有到期日的排在前面，按剩余天数升序（已过期/今天到期的 Days<=0 最靠前）；
+	// 不能用 Days == 0 判断“无到期日”，否则今天到期的资产会被排到最后。
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].hasExp != rows[j].hasExp {
+			return rows[i].hasExp
 		}
-		if rows[j].Days == 0 {
-			return true
+		if !rows[i].hasExp {
+			return false
 		}
 		return rows[i].Days < rows[j].Days
 	})
@@ -421,26 +452,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	views := s.buildNodeViews()
 	svcs := s.st.Services()
 
-	type bar struct {
-		TS int64 `json:"t"`
-		OK bool  `json:"ok"`
-	}
 	type pub struct {
-		Name     string  `json:"name"`
-		Group    string  `json:"group"` // 仅分组名，用于公开页归类展示
-		Online   bool    `json:"online"`
-		CPU      float64 `json:"cpu"`
-		Mem      float64 `json:"mem"`
-		Disk     float64 `json:"disk"`
-		Up       uint64  `json:"uptime"`
-		Uptime24 float64 `json:"uptime24"` // 24 小时在线率（由采样点推算）
-		Bars     []bar   `json:"bars"`     // 24h 分段可用性（每段 30 分钟）
+		Name     string      `json:"name"`
+		Group    string      `json:"group"` // 仅分组名，用于公开页归类展示
+		Online   bool        `json:"online"`
+		CPU      float64     `json:"cpu"`
+		Mem      float64     `json:"mem"`
+		Disk     float64     `json:"disk"`
+		Up       uint64      `json:"uptime"`
+		Uptime24 float64     `json:"uptime24"` // 24 小时在线率（由采样点推算）
+		Bars     []statusBar `json:"bars"`     // 24h 分段可用性（每段 30 分钟）
 	}
 
 	// 服务公开视图：仅名称 + 最近状态 + 24h 可用率
 	type svcPub struct {
 		Name    string  `json:"name"`
 		OK      bool    `json:"ok"`
+		Has     bool    `json:"has"` // 是否已有探测数据
 		Uptime  float64 `json:"uptime"`
 		Latency int     `json:"latencyMs"`
 	}
@@ -455,60 +483,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			Up:   v.Latest.Uptime,
 		}
 
-		// 24h 可用率与分段色块：基于采样点是否落在在线窗口内推算
+		// 24h 可用率与分段色块：按"采样点覆盖的在线时长"计算，
+		// 不能简单用 成功点数/总点数 —— 那样只要节点还在上报就永远 100%。
 		now := time.Now().Unix()
-		series := s.st.Series(v.ID, now-86400)
-		const segSec = 1800 // 30 分钟一段 → 48 段
-		segOK := make([]bool, 48)
-		segSeen := make([]bool, 48)
-		okPts, totPts := 0, 0
-		for _, m := range series {
-			idx := int((now - m.TS) / segSec)
-			if idx < 0 || idx >= 48 {
-				continue
-			}
-			totPts++
-			segSeen[47-idx] = true
-			if m.TS > 0 {
-				okPts++
-				segOK[47-idx] = true
-			}
-		}
-		if v.Online {
-			// 当前段若尚无采样但节点在线，标记为可用
-			segSeen[47] = true
-			segOK[47] = true
-			if totPts == 0 {
-				okPts, totPts = 1, 1
-			}
-		}
-		if totPts > 0 {
-			p.Uptime24 = round1(float64(okPts) / float64(totPts) * 100)
-		}
-		for i := 0; i < 48; i++ {
-			if segSeen[i] {
-				p.Bars = append(p.Bars, bar{TS: now - int64(47-i)*segSec, OK: segOK[i]})
-			}
-		}
+		p.Uptime24, p.Bars = uptime24(s.st.Series(v.ID, now-86400), now, v.Online)
 		out = append(out, p)
 	}
 
+	now := time.Now().Unix()
 	svcOut := make([]svcPub, 0, len(svcs))
 	for _, sv := range svcs {
 		_, lat, ok, has := s.st.ServiceLast(sv.ID)
-		hist := s.st.ServiceSeries(sv.ID)
-		up, tot := 0, 0
-		for _, h := range hist {
-			tot++
-			if h[2] == 1 {
-				up++
-			}
-		}
-		rate := 0.0
-		if tot > 0 {
-			rate = float64(up) / float64(tot) * 100
-		}
-		sp := svcPub{Name: sv.Name, Uptime: round1(rate)}
+		rate, _ := serviceUptime24(s.st.ServiceSeries(sv.ID), now)
+		sp := svcPub{Name: sv.Name, Uptime: round1(rate), Has: has}
 		if has {
 			sp.OK = ok
 			sp.Latency = lat
@@ -524,7 +511,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	svcDown := 0
 	for _, sp := range svcOut {
-		if !sp.OK {
+		if sp.Has && !sp.OK {
 			svcDown++
 		}
 	}
@@ -563,6 +550,130 @@ func pctF(used, total uint64) float64 {
 	return float64(used) / float64(total) * 100
 }
 
+// statusBar 是 24h 可用性的 30 分钟色块。
+type statusBar struct {
+	TS int64 `json:"t"`
+	OK bool  `json:"ok"`
+}
+
+// uptime24 按采样点覆盖的在线时长计算 24h 可用率。
+//
+// 每个采样点只在其后 store.OnlineWindow 秒内被视为在线，
+// 超出窗口的空白时段计入分母 —— 否则"只要还在上报就 100%"，
+// 无法反映真实中断。统计起点取 max(24h 前, 首个采样点)。
+func uptime24(series []model.Metrics, now int64, onlineNow bool) (float64, []statusBar) {
+	const segSec int64 = 1800 // 30 分钟 × 48 段
+	const nseg = 48
+	winStart := now - 86400
+	if len(series) == 0 {
+		if onlineNow {
+			return 100, nil
+		}
+		return 0, nil
+	}
+
+	segOnline := make([]int64, nseg)
+	segObserved := make([]int64, nseg)
+	addSpan := func(dst []int64, from, to int64) {
+		if from < winStart {
+			from = winStart
+		}
+		if to > now {
+			to = now
+		}
+		for from < to {
+			idx := int((from - winStart) / segSec)
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= nseg {
+				break
+			}
+			segEnd := winStart + int64(idx+1)*segSec
+			next := segEnd
+			if next > to {
+				next = to
+			}
+			dst[idx] += next - from
+			from = next
+		}
+	}
+
+	obsStart := series[0].TS
+	if obsStart < winStart {
+		obsStart = winStart
+	}
+	for i, m := range series {
+		if m.TS > now {
+			break
+		}
+		from := m.TS
+		if from < obsStart {
+			from = obsStart
+		}
+		to := now
+		if i+1 < len(series) {
+			to = series[i+1].TS
+		}
+		if to > now {
+			to = now
+		}
+		if to <= from {
+			continue
+		}
+		addSpan(segObserved, from, to)
+		onlineTo := from + store.OnlineWindow
+		if onlineTo > to {
+			onlineTo = to
+		}
+		addSpan(segOnline, from, onlineTo)
+	}
+
+	var totalObs, totalOnline int64
+	bars := make([]statusBar, 0, nseg)
+	for i := 0; i < nseg; i++ {
+		totalObs += segObserved[i]
+		totalOnline += segOnline[i]
+		if segObserved[i] > 0 {
+			// TS 取该段的结束时刻，与前端 (now-TS)/1800 的映射保持一致
+			bars = append(bars, statusBar{
+				TS: winStart + int64(i+1)*segSec,
+				OK: segOnline[i]*2 >= segObserved[i],
+			})
+		}
+	}
+	if totalObs <= 0 {
+		if onlineNow {
+			return 100, bars
+		}
+		return 0, bars
+	}
+	up := float64(totalOnline) / float64(totalObs) * 100
+	if up > 100 {
+		up = 100
+	}
+	return round1(up), bars
+}
+
+// serviceUptime24 只统计最近 24 小时的探测结果。
+func serviceUptime24(hist [][3]int64, now int64) (float64, bool) {
+	since := now - 86400
+	up, tot := 0, 0
+	for _, h := range hist {
+		if h[0] < since {
+			continue
+		}
+		tot++
+		if h[2] == 1 {
+			up++
+		}
+	}
+	if tot == 0 {
+		return 0, false
+	}
+	return float64(up) / float64(tot) * 100, true
+}
+
 func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
 
 func monthly(price float64, cur string) float64 {
@@ -577,11 +688,17 @@ func daysUntil(date string) (int, bool) {
 	if date == "" {
 		return 0, false
 	}
-	t, err := time.Parse("2006-01-02", date)
+	// 按本地日历日计算：直接 Parse（UTC）再减去当前时刻，
+	// 会在非 UTC 时区把天数算偏，且 int() 截断会让“今天到期”和
+	// “还有 23 小时”都变成 0。
+	t, err := time.ParseInLocation("2006-01-02", date, time.Local)
 	if err != nil {
 		return 0, false
 	}
-	return int(time.Until(t).Hours() / 24), true
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	target := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+	return int(math.Round(target.Sub(today).Hours() / 24)), true
 }
 
 // itoa 供外部小工具使用（避免引入 strconv 到多处）。
@@ -731,9 +848,16 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.Type = typ
-		if strings.TrimSpace(in.Target) == "" {
+		in.Target = strings.TrimSpace(in.Target)
+		if in.Target == "" {
 			fail(w, 400, "target is required")
 			return
+		}
+		if s.runner != nil {
+			if err := s.runner.ValidateService(in); err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
 		}
 		if in.ID == "" {
 			in.ID = store.NewID("s")
@@ -743,6 +867,10 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.Interval < 10 {
 			fail(w, 400, "interval 不能小于 10 秒")
+			return
+		}
+		if in.Interval > 86400 {
+			fail(w, 400, "interval 不能超过 86400 秒")
 			return
 		}
 		s.st.UpsertService(&in)
@@ -803,8 +931,17 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "bad json: "+err.Error())
 			return
 		}
+		in.Normalize()
+		if err := in.Validate(); err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
 		// 还原前端回传的脱敏占位符
-		old, _ := notify.Parse(s.st.GetSetting("notify"))
+		old, err := notify.Parse(s.st.GetSetting("notify"))
+		if err != nil {
+			fail(w, 409, "已保存的通知配置已损坏，请重新填写所有密钥后再保存")
+			return
+		}
 		in.MergeSecrets(old)
 
 		raw, err := json.Marshal(&in)
@@ -831,6 +968,17 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		fail(w, 405, "method not allowed")
 		return
 	}
+	// 测试通知会真实外发，限制频率避免被拿来当扫描器或刷屏。
+	s.testMu.Lock()
+	if wait := 3*time.Second - time.Since(s.lastTest); wait > 0 && !s.lastTest.IsZero() {
+		s.testMu.Unlock()
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		fail(w, 429, "测试通知过于频繁，请稍后再试")
+		return
+	}
+	s.lastTest = time.Now()
+	s.testMu.Unlock()
+
 	// 可选：只测某个通道（body 里带 channelId）
 	var req struct {
 		ChannelID string `json:"channelId"`
@@ -890,8 +1038,12 @@ type ruleMetric struct {
 	NoVal bool   `json:"noVal"`
 }
 
-// handleRuleMeta 下发规则表单的元数据（无需令牌，纯静态字典）。
+// handleRuleMeta 下发规则表单的元数据。虽为静态字典，仍与同前缀管理路由保持一致要求令牌。
 func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(r) {
+		fail(w, 401, "invalid admin token")
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"metrics": []ruleMetric{
 			{Value: "offline", Label: "节点失联", Unit: "秒", Op: "gt", NoVal: true,
@@ -1102,6 +1254,15 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 		if updated.Metric == "offline" {
 			updated.Threshold = 0
 			updated.Op = "gt"
+		} else {
+			// 只改 metric 时也要用最终合并后的规则重新校验阈值。
+			// 否则 offline（阈值 0）切到 cpu/mem/disk 后会保留 0，
+			// 变成“所有采样都越界”的持续误报。
+			lo, hi := thresholdRange(updated.Metric)
+			if updated.Threshold < lo || updated.Threshold > hi {
+				fail(w, 400, fmt.Sprintf("切换 metric 后 threshold %v 超出范围 %v – %v，请同时提供新的 threshold", updated.Threshold, lo, hi))
+				return
+			}
 		}
 
 		s.st.UpsertRule(&updated)

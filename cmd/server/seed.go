@@ -151,13 +151,13 @@ func seedDemo(st *store.Store) {
 		st.UpsertRule(r)
 	}
 
-	// 历史告警记录（用于展示已恢复的条目）
-	nowTS := now
+	// 历史告警记录（用于展示已恢复的条目）。
+	// 规则 ID 必须指向真实存在的规则，否则筛选与统计会出现孤儿引用。
 	st.OpenAlert(&model.Alert{
-		ID: "al_hist_1", RuleID: "r_net", RuleName: "服务不可用",
-		NodeID: "n15", NodeName: "武汉-独服", Severity: "warn",
-		Value: 0, Message: "MySQL 3306 探测失败：connection refused",
-		StartedAt: nowTS - 8600, ResolvedAt: nowTS - 6000,
+		ID: "al_hist_1", RuleID: "r_offline", RuleName: "节点失联",
+		NodeID: "n08", NodeName: "racknerd-纽约", Severity: "warn",
+		Value: 900, Message: "演示：节点失联 15 分钟后恢复",
+		StartedAt: now - 8600, ResolvedAt: now - 6000,
 	})
 }
 

@@ -5,7 +5,11 @@
 package probe
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,29 +18,69 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/netguard"
 )
+
+// Config 控制探测的出站行为。
+type Config struct {
+	// AllowPrivate 允许探测回环/私网目标（默认拒绝，防止 SSRF）。
+	AllowPrivate bool
+	// InsecureTLS 跳过 HTTPS 证书链校验（仅用于自签名目标）。
+	// 默认开启校验：证书过期、自签名或域名不匹配都会导致探测失败。
+	// 跳过校验时 CertDays 仍取自叶子证书，仅作展示，不代表链可信。
+	InsecureTLS bool
+}
 
 // Runner 负责按间隔执行探测。
 type Runner struct {
 	client *http.Client
+	policy netguard.Policy
 }
 
-func NewRunner() *Runner {
-	return &Runner{
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return http.ErrUseLastResponse
-				}
-				return nil
-			},
-			Transport: &http.Transport{
-				TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, // 探测用途：证书有效性单独评估
-				DisableKeepAlives:     true,
-				ResponseHeaderTimeout: 8 * time.Second,
-			},
+func NewRunner(cfg Config) *Runner {
+	policy := netguard.Policy{AllowPrivate: cfg.AllowPrivate}
+	transport := &http.Transport{
+		DialContext:           policy.DialContext,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.InsecureTLS},
+		DisableKeepAlives:     true,
+		ResponseHeaderTimeout: 8 * time.Second,
+	}
+	r := &Runner{policy: policy}
+	r.client = &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("重定向次数过多")
+			}
+			// 每一跳都重新校验，阻止 3xx 跳转到内网或非 HTTP 协议
+			return r.policy.CheckURL(req.URL)
 		},
+	}
+	return r
+}
+
+// ValidateService 在入库前校验探测目标，返回用户可读的错误。
+func (r *Runner) ValidateService(sv model.Service) error {
+	switch strings.ToLower(sv.Type) {
+	case "http", "https":
+		u, err := url.Parse(strings.TrimSpace(sv.Target))
+		if err != nil || u.Host == "" {
+			return errors.New("HTTP 目标需为完整 URL，例如 https://example.com/health")
+		}
+		if err := r.policy.CheckURL(u); err != nil {
+			return err
+		}
+		return nil
+	case "tcp":
+		addr, err := parseTCPTarget(sv.Target)
+		if err != nil {
+			return err
+		}
+		host, _, _ := net.SplitHostPort(addr)
+		return r.policy.CheckHost(host)
+	default:
+		return fmt.Errorf("不支持的类型 %q，可选 http/https/tcp", sv.Type)
 	}
 }
 
@@ -60,13 +104,25 @@ func (r *Runner) Do(sv model.Service) model.ServiceResult {
 }
 
 func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
+	u, err := url.Parse(strings.TrimSpace(sv.Target))
+	if err != nil || u.Host == "" {
+		res.Detail = "bad url"
+		return
+	}
+	if err := r.policy.CheckURL(u); err != nil {
+		res.Detail = "blocked: " + trimErr(err)
+		return
+	}
+
 	start := time.Now()
-	req, err := http.NewRequest(http.MethodGet, sv.Target, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		res.Detail = "bad url"
 		return
 	}
-	req.Header.Set("User-Agent", "motao-rollcall/1.0 (+availability check)")
+	req.Header.Set("User-Agent", "motao-rollcall/1.1 (+availability check)")
 
 	resp, err := r.client.Do(req)
 	res.LatencyMs = int(time.Since(start).Milliseconds())
@@ -77,26 +133,43 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 	defer resp.Body.Close()
 
 	res.Status = resp.StatusCode
-	// 2xx/3xx 视为健康；401/403 说明服务在线但需授权，也计入在线
-	res.OK = resp.StatusCode < 400 || resp.StatusCode == 401 || resp.StatusCode == 403
+	// 仅 2xx 视为健康；401/403 说明服务在线但需授权，也计入在线。
+	// 3xx 不再默认健康：跳转已在客户端逐跳校验，最终仍返回 3xx 视为异常。
+	res.OK = (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
+		resp.StatusCode == 401 || resp.StatusCode == 403
 	if !res.OK {
 		res.Detail = "status " + strconv.Itoa(resp.StatusCode)
 	}
 
-	// TLS 证书剩余天数
+	// TLS 证书剩余天数。默认握手已校验证书链，能走到这里说明链有效；
+	// 仅在显式开启 InsecureTLS 时链未验证，此时天数只作展示。
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		exp := resp.TLS.PeerCertificates[0].NotAfter
-		res.CertDays = int(time.Until(exp).Hours() / 24)
+		res.CertDays = certDaysLeft(resp.TLS.PeerCertificates[0].NotAfter)
 	}
 }
 
+// certDaysLeft 返回证书剩余天数：不足一天按 1 天计（向上取整），
+// 已过期返回 0；非 TLS 服务由调用方使用 -1 哨兵值。
+// 早期实现直接 int(hours/24)，即将过期与刚过期都可能落到 0/-1，
+// 与“非 TLS”混淆。
+func certDaysLeft(exp time.Time) int {
+	days := int(math.Ceil(time.Until(exp).Hours() / 24))
+	if days < 0 {
+		return 0
+	}
+	return days
+}
+
 func (r *Runner) doTCP(sv model.Service, res *model.ServiceResult) {
-	target := sv.Target
-	if u, err := url.Parse("tcp://" + target); err == nil && u.Host != "" {
-		target = u.Host
+	target, err := parseTCPTarget(sv.Target)
+	if err != nil {
+		res.Detail = err.Error()
+		return
 	}
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", target, 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	conn, err := r.policy.DialContext(ctx, "tcp", target)
 	res.LatencyMs = int(time.Since(start).Milliseconds())
 	if err != nil {
 		res.Detail = trimErr(err)
@@ -106,14 +179,44 @@ func (r *Runner) doTCP(sv model.Service, res *model.ServiceResult) {
 	res.OK = true
 }
 
-// trimErr 压缩网络错误信息，避免把完整堆栈写进数据库。
-func trimErr(err error) string {
-	s := err.Error()
-	if i := strings.Index(s, ": "); i > 0 && len(s) > 90 {
-		return s[:i]
+// parseTCPTarget 接受 host:port 或 tcp://host:port，拒绝路径、缺端口与非法端口。
+func parseTCPTarget(target string) (string, error) {
+	t := strings.TrimSpace(target)
+	if strings.HasPrefix(strings.ToLower(t), "tcp://") {
+		t = t[len("tcp://"):]
 	}
-	if len(s) > 90 {
-		return s[:90]
+	if t == "" || strings.ContainsAny(t, "/?#") {
+		return "", errors.New("TCP 目标需为 host:port，不能包含路径")
+	}
+	host, port, err := net.SplitHostPort(t)
+	if err != nil {
+		return "", errors.New("TCP 目标需为 host:port，例如 1.2.3.4:443")
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return "", errors.New("TCP 目标缺少主机名")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", errors.New("TCP 端口必须在 1–65535 之间")
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// trimErr 压缩网络错误信息，避免把完整堆栈写进数据库。
+// *url.Error 的 Error() 形如 `Get "https://host/": 真实原因`，
+// 直接截断会把最有用的原因切掉，这里先解包只保留底层错误。
+func trimErr(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	s := strings.ReplaceAll(err.Error(), "\n", " ")
+	s = strings.TrimSpace(s)
+	// 按 rune 截断，避免把中文或转义序列切成半个字符
+	r := []rune(s)
+	if len(r) > 160 {
+		return string(r[:160]) + "…"
 	}
 	return s
 }

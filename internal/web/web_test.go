@@ -6,10 +6,107 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/store"
 )
+
+// TestUptime24UsesDurationNotSampleCount 是回归测试：
+// 旧实现把「收到的采样点数」同时当分子分母，只要节点还在上报就恒为 100%。
+func TestUptime24UsesDurationNotSampleCount(t *testing.T) {
+	const now int64 = 1_700_000_000
+
+	var series []model.Metrics
+	for ts := now - 3600; ts <= now; ts += 30 {
+		series = append(series, model.Metrics{TS: ts})
+	}
+	if up, _ := uptime24(series, now, true); up != 100 {
+		t.Errorf("连续上报应得 100%%，实际 %.1f", up)
+	}
+
+	// 10 分钟前一个点，然后中断到当前：只有 OnlineWindow(120s) 算在线
+	sparse := []model.Metrics{{TS: now - 600}, {TS: now}}
+	up, _ := uptime24(sparse, now, true)
+	if up > 25 || up < 15 {
+		t.Errorf("中断后的可用率应约 20%%，实际 %.1f", up)
+	}
+
+	if up, _ := uptime24(nil, now, true); up != 100 {
+		t.Errorf("无历史但当前在线应显示 100%%，实际 %.1f", up)
+	}
+	if up, _ := uptime24(nil, now, false); up != 0 {
+		t.Errorf("无历史且离线应为 0%%，实际 %.1f", up)
+	}
+}
+
+func TestServiceUptime24FiltersOldSamples(t *testing.T) {
+	const now int64 = 1_700_000_000
+	var hist [][3]int64
+	// 25 小时前的失败样本不应计入 24h
+	hist = append(hist, [3]int64{now - 90000, 0, 0})
+	for i := int64(0); i < 10; i++ {
+		hist = append(hist, [3]int64{now - i*60, 10, 1})
+	}
+	up, has := serviceUptime24(hist, now)
+	if !has || up != 100 {
+		t.Errorf("24h 可用率应忽略陈旧样本: up=%.1f has=%v", up, has)
+	}
+	if _, has := serviceUptime24(nil, now); has {
+		t.Error("无探测数据时 has 应为 false")
+	}
+}
+
+// TestAdminAuthRateLimit 验证连续 401 后返回 429，避免无限爆破。
+func TestAdminAuthRateLimit(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+
+	var last *httptest.ResponseRecorder
+	for i := 0; i < 11; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/nodes", nil)
+		req.Header.Set("X-Admin-Token", "wrong")
+		last = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(last, req)
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("连续失败后应返回 429，实际 %d", last.Code)
+	}
+	if last.Header().Get("Retry-After") == "" {
+		t.Error("429 应带 Retry-After")
+	}
+}
+
+func TestRuleMetaRequiresAdminToken(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/rule-meta", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("无令牌访问 rule-meta 应 401，实际 %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/rule-meta", nil)
+	req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("带令牌访问 rule-meta 应 200，实际 %d", w.Code)
+	}
+}
+
+func TestEmptyBasicAuthPasswordFailsClosed(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890", AuthUser: "admin"})
+	req := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("空密码配置应整体拒绝，实际 %d", w.Code)
+	}
+}
 
 func TestCSVSafeBlocksFormulaInjection(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -144,5 +241,48 @@ func TestAssetsExportEscapesHostOS(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(out), []byte("'=cmd")) {
 		t.Errorf("未见转义后的安全形式:\n%s", out)
+	}
+}
+
+// TestDaysUntilUsesLocalCalendar 固定“本地日历日”语义：
+// 不能用 UTC 解析 + 时间差截断，否则东八区早上会把“今天到期”算成 -1。
+func TestDaysUntilUsesLocalCalendar(t *testing.T) {
+	now := time.Now()
+	f := func(d time.Time) string { return d.Format("2006-01-02") }
+	cases := []struct {
+		date string
+		want int
+	}{
+		{f(now), 0},
+		{f(now.AddDate(0, 0, 1)), 1},
+		{f(now.AddDate(0, 0, 30)), 30},
+		{f(now.AddDate(0, 0, -1)), -1},
+	}
+	for _, c := range cases {
+		got, ok := daysUntil(c.date)
+		if !ok || got != c.want {
+			t.Errorf("daysUntil(%s) = %d,%v，期望 %d,true", c.date, got, ok, c.want)
+		}
+	}
+	if _, ok := daysUntil("2026-13-99"); ok {
+		t.Error("非法日期应返回 ok=false")
+	}
+	if _, ok := daysUntil(""); ok {
+		t.Error("空日期应返回 ok=false")
+	}
+}
+
+// TestPublicNodeViewDoesNotCarryToken 防止视图层携带上报令牌：
+// json:"-" 只挡住标准 JSON，内存中的副本也不应保留秘密。
+func TestPublicNodeViewDoesNotCarryToken(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "secret-token"})
+	srv := New(st, nil, nil, Config{})
+	views := srv.buildNodeViews()
+	if len(views) != 1 {
+		t.Fatalf("视图数 = %d，期望 1", len(views))
+	}
+	if views[0].Token != "" {
+		t.Errorf("公开节点视图不应携带令牌，实际 %q", views[0].Token)
 	}
 }
