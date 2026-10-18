@@ -338,15 +338,33 @@ func isLoopbackHost(host string) bool {
 }
 
 // stripFlag 去掉指定开关，避免回滚后 re-exec 再次触发回滚。
+//
+// Go 的 flag 包把 -name 与 --name 视为同一个开关（也接受 =value 形式），
+// 因此必须先归一化前导横线再比较。早期实现只精确匹配 "-rollback"：
+// 用 `rollcall-agent --rollback` 启动时该参数不会被剥离，re-exec 后的进程
+// 再次执行回滚并再次 re-exec，形成无限回滚 / 重启循环。
 func stripFlag(args []string, name string) []string {
+	want := strings.TrimLeft(name, "-")
 	out := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == name || strings.HasPrefix(a, name+"=") {
+		if flagKey(a) == want {
 			continue
 		}
 		out = append(out, a)
 	}
 	return out
+}
+
+// flagKey 归一化参数名：去掉前导横线与 =value 部分；非开关参数返回空串。
+func flagKey(arg string) string {
+	if !strings.HasPrefix(arg, "-") {
+		return ""
+	}
+	s := strings.TrimLeft(arg, "-")
+	if i := strings.IndexByte(s, '='); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 func pct(used, total uint64) float64 {
