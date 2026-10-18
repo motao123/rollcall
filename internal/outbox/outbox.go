@@ -58,6 +58,11 @@ type Manager struct {
 	loopWG   sync.WaitGroup
 	workWG   sync.WaitGroup
 
+	// startMu 串行化 Start/Stop：保证 loopWG.Add 不会与 Wait 并发
+	// （计数为 0 时二者并发属于 WaitGroup 误用，会 panic），
+	// 同时让「已 Stop 后再 Start」被明确拒绝。
+	startMu sync.Mutex
+
 	mu       sync.Mutex
 	inFlight int
 	started  atomic.Bool
@@ -156,19 +161,33 @@ func (m *Manager) Enqueue(msg notify.Message) {
 	}
 }
 
-// Start 启动调度循环。
+// Start 启动调度循环。已经 Stop 的 Manager 不会被重新启动：
+// 否则关停后又开始 claim 任务，而 Stop 已返回、没人再等待这些 worker。
 func (m *Manager) Start() {
-	if !m.started.CompareAndSwap(false, true) {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+	if m.started.Load() {
 		return
 	}
+	select {
+	case <-m.stop:
+		return
+	default:
+	}
 	m.loopWG.Add(1)
+	m.started.Store(true)
 	go m.loop()
 }
 
 // Stop 停止调度并等待在途投递完成（最多 20 秒）。
 // 未完成的任务保持 pending，重启后会继续重试。
 func (m *Manager) Stop() {
+	// 持 startMu 关闭 stop：与 Start 的 Add 互斥，
+	// 避免「Add 与 Wait 并发且计数为 0」的 WaitGroup 误用。
+	m.startMu.Lock()
 	m.stopOnce.Do(func() { close(m.stop) })
+	m.startMu.Unlock()
+
 	m.loopWG.Wait()
 	done := make(chan struct{})
 	go func() {
@@ -200,6 +219,9 @@ func (m *Manager) loop() {
 	defer prune.Stop()
 
 	m.st.PruneNotify(time.Now().Unix())
+	if m.stopped() {
+		return
+	}
 	m.dispatch()
 
 	for {
@@ -229,7 +251,23 @@ func (m *Manager) loop() {
 		if timer != nil {
 			timer.Stop()
 		}
+		// select 在多个 case 同时就绪时随机选择：stop 关闭后仍可能走完本轮。
+		// 不复查就会在 Stop 返回后继续 claim 任务并起 worker，
+		// 而这些 worker 已无人等待，可能边关停边继续外发。
+		if m.stopped() {
+			return
+		}
 		m.dispatch()
+	}
+}
+
+// stopped 报告是否已进入关停状态。
+func (m *Manager) stopped() bool {
+	select {
+	case <-m.stop:
+		return true
+	default:
+		return false
 	}
 }
 
