@@ -49,5 +49,8 @@ clean:
 	rm -rf dist
 
 # 显式清空运行时数据，仅在确认要丢弃监控历史与令牌时使用。
+# 用绝对路径 + 二次确认，避免 `make -C` 或误触时删到别处的目录。
 clean-data:
-	rm -rf data
+	@test "$(CONFIRM)" = "yes" || { echo "拒绝执行：请使用 make clean-data CONFIRM=yes"; exit 1; }
+	@echo "将删除 $(CURDIR)/data（监控历史与令牌）"
+	rm -rf "$(CURDIR)/data"

@@ -178,8 +178,10 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 		// 旧 schema 桶没有绝对用量总和：用当时的总量把平均值补成总和，
 		// 之后继续累计本期样本，避免 sum/count 把旧样本漏掉。
 		if b.Count > 0 {
-			b.MemUsedSum = pctBytes(b.MemTotal, float64(b.MemAvg)) * uint64(b.Count)
-			b.DiskUsedSum = pctBytes(b.DiskTotal, float64(b.DiskAvg)) * uint64(b.Count)
+			// Count 与总量都直接来自 JSON，普通乘法可能 uint64 溢出后
+			// 回绕成一个极小的值，让历史聚合看起来「用量骤降」。
+			b.MemUsedSum = satMul(pctBytes(b.MemTotal, float64(b.MemAvg)), uint64(b.Count))
+			b.DiskUsedSum = satMul(pctBytes(b.DiskTotal, float64(b.DiskAvg)), uint64(b.Count))
 		}
 		b.UsageOK = true
 	}
@@ -379,7 +381,8 @@ func (s *Store) loadHistory() error {
 	if decodeErr != nil {
 		bak := s.historyPath + ".corrupt-" + time.Now().Format("20060102-150405")
 		if renameErr := os.Rename(s.historyPath, bak); renameErr != nil {
-			return fmt.Errorf("历史快照损坏且无法隔离 %s: %w", s.historyPath, decodeErr)
+			// 隔离失败才是当前故障，包装 renameErr；decodeErr 另有日志。
+			return fmt.Errorf("历史快照损坏且无法隔离 %s: %w", s.historyPath, renameErr)
 		}
 		log.Printf("历史快照损坏，已备份到 %s，将从 24h 原始数据重建: %v", bak, decodeErr)
 		s.mu.Lock()
@@ -591,6 +594,18 @@ func pctBytes(total uint64, p float64) uint64 {
 		return 0
 	}
 	return uint64(float64(total) * p / 100)
+}
+
+// satMul 是饱和乘法：溢出时返回 uint64 上限而不是回绕。
+// 历史回填的 Count / 总量都来自持久化 JSON，属不可信输入。
+func satMul(a, b uint64) uint64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > ^uint64(0)/b {
+		return ^uint64(0)
+	}
+	return a * b
 }
 
 // HistoryCounts 返回某节点各级别当前的桶数量（供测试与运维观测）。

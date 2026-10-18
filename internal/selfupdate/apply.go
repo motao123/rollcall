@@ -160,12 +160,19 @@ func Apply(exe, downloaded, newVersion string) error {
 		return errors.New("更新包必须与可执行文件位于同一目录")
 	}
 	fi, err := os.Stat(exe)
-	if err != nil || !fi.Mode().IsRegular() {
+	if err != nil {
 		return fmt.Errorf("当前可执行文件不可用: %w", err)
 	}
+	if !fi.Mode().IsRegular() {
+		// err 为 nil 时 %w 会渲染成 %!w(<nil>)，掩盖真实原因。
+		return fmt.Errorf("当前可执行文件不是普通文件: %s", exe)
+	}
 	nf, err := os.Stat(downloaded)
-	if err != nil || !nf.Mode().IsRegular() {
+	if err != nil {
 		return fmt.Errorf("更新包不可用: %w", err)
+	}
+	if !nf.Mode().IsRegular() {
+		return fmt.Errorf("更新包不是普通文件: %s", downloaded)
 	}
 	if err := checkELF(downloaded); err != nil {
 		return err
@@ -192,9 +199,13 @@ func Apply(exe, downloaded, newVersion string) error {
 		return fmt.Errorf("写入更新标记失败: %w", err)
 	}
 	if err := os.Chmod(downloaded, perm); err != nil {
+		// 启动标记已落盘但替换未完成：不清掉的话，下次启动会被判定为
+		// 「新版本启动未稳定」，触发一次没有意义的回滚。
+		_ = os.Remove(StatePath(exe))
 		return fmt.Errorf("设置新版本权限失败: %w", err)
 	}
 	if err := os.Rename(downloaded, exe); err != nil {
+		_ = os.Remove(StatePath(exe))
 		return fmt.Errorf("替换可执行文件失败: %w", err)
 	}
 	syncDir(dir)
