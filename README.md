@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.5.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.6.0**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -129,7 +129,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
   逐通道错误保留在任务 `lastError` 中
 - **通知静默**：支持全局或单规则静默（1 小时 / 6 小时 / 24 小时 / 7 天，可填备注）。
   静默期间告警仍正常记录与恢复，仅拦截外发；到期自动恢复
-- 队列深度、送达/失败/重试/静默拦截与最近成功时间均可在告警页与 `/metrics` 查看
+- 队列深度、送达/失败/重试/静默拦截/队列满拒绝与最近成功时间均可在告警页与 `/metrics` 查看
 
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
@@ -143,11 +143,22 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 
 访问 `/status` 得到一个**完全公开、只读**的状态页，可直接挂到域名下：
 
-- 顶部横幅：全部正常 / N 个节点离线、N 个服务异常
+- 顶部横幅：全部正常 / N 个节点离线、N 个节点数据延迟、N 个节点待接入、N 个服务异常
 - 服务区：名称 + 24h 可用率（配色按可用率方向：≥99.5 绿 / ≥95 琥珀 / 更低红）+ 延迟
 - 节点区：按分组展示，每节点含 CPU/内存/磁盘/运行时长 + **48 段 24h 可用性色块**
 - 30 秒自动刷新；跟随系统深浅色；移动端单列自适应
 - 自包含（内联 CSS + 外部 status.js），零外部资源请求
+
+**节点状态语义**（仪表盘与公开页一致）：
+
+| 状态 | 条件 | 展示 |
+|---|---|---|
+| `online` | 最后上报 ≤ 120 秒 | 在线 |
+| `stale` | 最后上报 120–300 秒 | 数据延迟（琥珀色） |
+| `offline` | 最后上报 > 300 秒 | 离线 |
+| `no_data` | 节点已登记但 Agent 从未上报 | 待接入；指标显示 `—` 而非 0 |
+
+告警引擎的 `offline` 规则仍以 120 秒为判定窗口，不受展示层 `stale` 影响。
 
 **脱敏原则**（公开页可被任何人访问）：
 不含 IP、服务商、价格、到期日、备注、主机名、内核、架构、节点 ID、上报令牌。
@@ -277,8 +288,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
 > 使用前需要构建机安装 `make`。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.5.0`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.6.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
+>
+> 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
 
 ### 2. 预览 UI（可选）
 
@@ -441,6 +454,10 @@ runuser -u rollcall-agent -- \
 令牌首次启动时自动生成到 `data/admin.token`（0600），也可用 `-admin-token` 显式指定。
 `/api/` 下的 JSON 与 CSV 响应在客户端支持时自动 gzip 压缩：365 天曲线从约 2.5MB 降到约 300KB，慢速链路下也能正常打开。
 
+所有路由的鉴权级别集中声明在服务端路由表中（`public` / `node-token` / `panel` /
+`readonly` / `admin` / `metrics`）；新增路由若漏填级别，服务端会在启动时直接失败，
+不再依赖易漏改的路径白名单。`/status.js` 单独登记为公开，因此启用 `-auth` 后公开状态页仍可正常加载。
+
 仪表盘只读接口（包含主机名、内核、服务商、价格、到期日等资产信息，不再匿名开放）：
 
 | 方法 | 路径 | 说明 |
@@ -597,18 +614,23 @@ scrape_configs:
 ```
 
 暴露的指标族（节点/服务指标带 `id`/`name` 标签）：
-`rollcall_build_info`、`rollcall_nodes_total/online`、`rollcall_alerts_active`、
-`rollcall_services_total/down`、`rollcall_node_{online,cpu_percent,memory_percent,
+`rollcall_build_info`、`rollcall_nodes_total/online/stale/offline/no_data`、`rollcall_alerts_active`、
+`rollcall_services_total/down`、`rollcall_node_state{state=...}`、`rollcall_node_{online,cpu_percent,memory_percent,
 disk_percent,load1/5/15,uptime_seconds,tcp_connections,processes,
 network_receive_bytes_total,network_transmit_bytes_total,
 last_report_age_seconds}`、`rollcall_service_{up,latency_milliseconds,
 certificate_days_remaining,uptime_percent_24h}`
 
+落盘与历史分层指标：
+`rollcall_save_total`、`rollcall_save_failures_total`、`rollcall_save_duration_seconds`、
+`rollcall_save_last_success_timestamp_seconds`、
+`rollcall_history_points{id,name,resolution}`（1m/5m/1h 各级别保留的桶数）
+
 通知队列指标：
 `rollcall_notify_queue_pending`、`rollcall_notify_sent_total`、
 `rollcall_notify_failed_total`、`rollcall_notify_retries_total`、
-`rollcall_notify_suppressed_total`、`rollcall_notify_last_success_timestamp_seconds`、
-`rollcall_notify_silences_active`
+`rollcall_notify_suppressed_total`、`rollcall_notify_rejected_total`、
+`rollcall_notify_last_success_timestamp_seconds`、`rollcall_notify_silences_active`
 
 ---
 

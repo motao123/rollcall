@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -72,6 +73,37 @@ func TestSaveRacesWithWrites(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// TestSaveStats 校验落盘计数与耗时统计，失败时只累计失败次数。
+func TestSaveStats(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	st := s.SaveStats()
+	if st.Count != 1 || st.Failures != 0 {
+		t.Fatalf("首次落盘统计异常: %+v", st)
+	}
+	if st.LastSuccess == 0 || st.LastDurationSeconds < 0 {
+		t.Fatalf("首次落盘缺少耗时/时间戳: %+v", st)
+	}
+
+	// 把 state.json 换成目录，使 rename 必然失败（root 也无法覆盖目录）
+	if err := os.Remove(filepath.Join(dir, "state.json")); err != nil {
+		t.Fatalf("移除快照: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "state.json"), 0o750); err != nil {
+		t.Fatalf("创建目录: %v", err)
+	}
+	if err := s.Save(); err == nil {
+		t.Fatal("目标为目录时 Save 应失败")
+	}
+	st = s.SaveStats()
+	if st.Count != 2 || st.Failures != 1 {
+		t.Fatalf("失败后统计异常: %+v", st)
+	}
 }
 
 // TestSavePersistsAllSections 确保深拷贝重构没有丢字段。

@@ -36,3 +36,17 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: make linux
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      # store 的并发快照回归测试在 -race 下会显著变慢（约 2 分钟），
+      # 单独成 job，避免拖慢常规 test 反馈。
+      - name: go test -race
+        run: go test -race ./...

@@ -49,7 +49,7 @@ h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
 .banner.ok{background:var(--ok-bg);color:var(--ok)}
 .banner.bad{background:var(--crit-bg);color:var(--crit)}
 .dot{width:9px;height:9px;border-radius:50%;flex:none}
-.dot.ok{background:var(--ok)} .dot.bad{background:var(--crit)} .dot.off{background:var(--fg3)}
+.dot.ok{background:var(--ok)} .dot.bad{background:var(--crit)} .dot.off{background:var(--fg3)} .dot.warn{background:var(--warn)}
 .group{margin-bottom:26px}
 .group-title{
   font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;

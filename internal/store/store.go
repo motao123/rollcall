@@ -36,6 +36,27 @@ const ServiceRingSize = 2880
 // OnlineWindow 内收到上报即视为在线。
 const OnlineWindow = 120 // 秒
 
+// StaleWindow 内仍有上报视为"数据延迟"：超过 OnlineWindow
+// 但尚未达到真正离线。它只影响展示语义，告警仍按 OnlineWindow 判定。
+const StaleWindow = 300 // 秒
+
+// NodeState 根据最后上报时间推导展示状态。
+// lastSeen <= 0 表示从未上报（no_data），与"曾在线后失联"区分开。
+func NodeState(lastSeen, now int64) string {
+	if lastSeen <= 0 {
+		return model.NodeStateNoData
+	}
+	age := now - lastSeen
+	switch {
+	case age <= OnlineWindow:
+		return model.NodeStateOnline
+	case age <= StaleWindow:
+		return model.NodeStateStale
+	default:
+		return model.NodeStateOffline
+	}
+}
+
 // Ring 是定长环形缓冲，用于保存单节点时序。
 type Ring struct {
 	buf  []model.Metrics
@@ -123,6 +144,17 @@ type Store struct {
 	loadErr error
 	saveMu  sync.Mutex
 	saveReq chan struct{}
+
+	saveStatMu sync.Mutex
+	saveStats  SaveStats
+}
+
+// SaveStats 是状态快照落盘的累计统计（进程生命周期内）。
+type SaveStats struct {
+	Count               int64   // 尝试次数（含失败）
+	Failures            int64   // 失败次数
+	LastDurationSeconds float64 // 最近一次成功落盘耗时
+	LastSuccess         int64   // 最近一次成功落盘的 unix 时间
 }
 
 // New 创建并尝试从磁盘恢复状态。
@@ -328,7 +360,10 @@ func (s *Store) load() error {
 // "fatal error: concurrent map iteration and map write"。
 // 该错误**不可 recover**，整个进程直接死亡；而 StartAutoSave 每 60 秒
 // 快照一次、40 节点每 30 秒上报一次，撞车是必然而非偶然。
-func (s *Store) Save() error {
+func (s *Store) Save() (err error) {
+	start := time.Now()
+	defer func() { s.recordSave(time.Since(start), err) }()
+
 	s.mu.RLock()
 	snap := snapshot{
 		SchemaVersion: SnapshotSchemaVersion,
@@ -410,6 +445,27 @@ func (s *Store) Save() error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+// recordSave 汇总落盘耗时，供 /metrics 与运维排查使用。
+// 失败时只累计次数，保留上一次成功的耗时作为参考。
+func (s *Store) recordSave(d time.Duration, err error) {
+	s.saveStatMu.Lock()
+	defer s.saveStatMu.Unlock()
+	s.saveStats.Count++
+	if err != nil {
+		s.saveStats.Failures++
+		return
+	}
+	s.saveStats.LastDurationSeconds = d.Seconds()
+	s.saveStats.LastSuccess = time.Now().Unix()
+}
+
+// SaveStats 返回落盘统计的副本。
+func (s *Store) SaveStats() SaveStats {
+	s.saveStatMu.Lock()
+	defer s.saveStatMu.Unlock()
+	return s.saveStats
 }
 
 // StartAutoSave 启动后台快照。
@@ -947,6 +1003,7 @@ func (s *Store) EnqueueNotifyJob(j *model.NotifyJob) bool {
 		s.pruneNotifyLocked(time.Now().Unix())
 	}
 	if len(s.notifyJobs) >= MaxNotifyJobs {
+		s.notifyStats.Rejected++
 		s.mu.Unlock()
 		log.Printf("通知队列已满（%d 条），拒绝新任务: %s", MaxNotifyJobs, j.Title)
 		return false

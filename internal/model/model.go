@@ -159,10 +159,20 @@ type NotifyStats struct {
 	Failed      int64 `json:"failed"`
 	Retries     int64 `json:"retries"`
 	Suppressed  int64 `json:"suppressed"`
+	Rejected    int64 `json:"rejected"` // 队列满且无法清理时拒绝的任务数
 	LastSuccess int64 `json:"lastSuccess"`
 }
 
 // ---------- 以下是直接下发给前端的视图模型 ----------
+
+// 节点状态。online/stale/offline 由最后上报时间推导；
+// no_data 表示节点已登记但 Agent 从未上报（与"曾在线后失联"不同）。
+const (
+	NodeStateNoData  = "no_data"
+	NodeStateOnline  = "online"
+	NodeStateStale   = "stale"
+	NodeStateOffline = "offline"
+)
 
 // NodeView 是节点列表项，合并台账、最新指标与状态。
 type NodeView struct {
@@ -170,6 +180,7 @@ type NodeView struct {
 	Host     HostInfo `json:"host"`
 	Latest   Metrics  `json:"latest"`
 	Online   bool     `json:"online"`
+	State    string   `json:"state"`
 	LastSeen int64    `json:"lastSeen"`
 	Alerts   int      `json:"alerts"`
 	Spark    []Point  `json:"spark"` // 首页迷你曲线
@@ -203,7 +214,9 @@ type HistoryPoint struct {
 type Overview struct {
 	Nodes       int        `json:"nodes"`
 	Online      int        `json:"online"`
+	Stale       int        `json:"stale"`
 	Offline     int        `json:"offline"`
+	NoData      int        `json:"noData"`
 	ActiveAlert int        `json:"activeAlert"`
 	AvgCPU      float64    `json:"avgCpu"`
 	AvgMem      float64    `json:"avgMem"`

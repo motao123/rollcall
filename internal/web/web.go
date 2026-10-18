@@ -96,63 +96,249 @@ func (s *Server) applyNotifyConfig(cfg *notify.Config) {
 	s.engine.SetNotifier(nil)
 }
 
+// authLevel 声明一条路由的鉴权边界。
+//
+// 路由表是唯一的鉴权来源：所有接口都必须在 routes 中登记级别，
+// 漏填（零值）或填写未知级别会让 Handler 在启动时 panic，
+// 避免"新增接口却忘了鉴权"。
+type authLevel int
+
+const (
+	authUnclassified authLevel = iota // 零值：故意非法，用于启动校验
+	authPublic                        // 完全公开（健康检查、公开状态页）
+	authNodeToken                     // handler 内校验 X-Node-Token（Agent 上报）
+	authPanel                         // 启用 -auth 时要求面板 Basic 凭据
+	authReadonly                      // 管理令牌，或已登录面板用户（只读仪表盘）
+	authAdmin                         // 仅 X-Admin-Token（管理写操作、CSV 导出）
+	authMetrics                       // 管理令牌或面板凭据（Prometheus 抓取）
+)
+
+func (l authLevel) valid() bool { return l > authUnclassified && l <= authMetrics }
+
+func (l authLevel) String() string {
+	switch l {
+	case authPublic:
+		return "public"
+	case authNodeToken:
+		return "node-token"
+	case authPanel:
+		return "panel"
+	case authReadonly:
+		return "readonly"
+	case authAdmin:
+		return "admin"
+	case authMetrics:
+		return "metrics"
+	default:
+		return "unclassified"
+	}
+}
+
+// protected 表示该级别下 2xx 响应能否证明请求持有有效凭证，
+// 用于清零鉴权失败限速计数。公开页与 Agent 上报不能清零。
+func (l authLevel) protected(authConfigured bool) bool {
+	switch l {
+	case authReadonly, authAdmin, authMetrics:
+		return true
+	case authPanel:
+		return authConfigured
+	default:
+		return false
+	}
+}
+
+// route 是路由表的一项。
+type route struct {
+	pattern string
+	level   authLevel
+	handler http.Handler
+}
+
+// routes 返回全部路由及其鉴权级别。
+//
+// 静态资源挂在 "/" 上，启用 -auth 时整站要求 Basic；
+// 公开状态页只依赖 /status.js，因此必须单独提前登记为公开，
+// 否则 ServeMux 会把它落到受保护的 "/" 上，页面卡在骨架屏。
+func (s *Server) routes(static http.Handler) []route {
+	return []route{
+		// 公开端点
+		{"/healthz", authPublic, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "ok")
+		})},
+		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
+		{"/status.js", authPublic, static},
+		{"/api/status", authPublic, http.HandlerFunc(s.handleStatus)},
+
+		// Agent 上报：handler 内校验 X-Node-Token
+		{"/api/report", authNodeToken, http.HandlerFunc(s.handleReport)},
+
+		// 仪表盘只读数据包含主机名、内核、服务商、价格等资产信息，
+		// 不能像公开状态页那样匿名下发。
+		{"/api/overview", authReadonly, http.HandlerFunc(s.handleOverview)},
+		{"/api/nodes", authReadonly, http.HandlerFunc(s.handleNodes)},
+		{"/api/nodes/", authReadonly, http.HandlerFunc(s.handleNodeDetail)},
+		{"/api/services", authReadonly, http.HandlerFunc(s.handleServices)},
+		{"/api/alerts", authReadonly, http.HandlerFunc(s.handleAlerts)},
+		{"/api/rules", authReadonly, http.HandlerFunc(s.handleRules)},
+		{"/api/assets", authReadonly, http.HandlerFunc(s.handleAssets)},
+
+		// 管理写操作与运营数据导出：仅 X-Admin-Token
+		{"/api/admin/nodes", authAdmin, http.HandlerFunc(s.handleAdminNodes)},
+		{"/api/admin/nodes/", authAdmin, http.HandlerFunc(s.handleAdminNodeByID)},
+		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
+		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
+		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
+		{"/api/admin/test-notify", authAdmin, http.HandlerFunc(s.handleTestNotify)},
+		{"/api/admin/rules", authAdmin, http.HandlerFunc(s.handleAdminRules)},
+		{"/api/admin/rules/", authAdmin, http.HandlerFunc(s.handleAdminRuleByID)},
+		{"/api/admin/rule-meta", authAdmin, http.HandlerFunc(s.handleRuleMeta)},
+		{"/api/admin/silences", authAdmin, http.HandlerFunc(s.handleAdminSilences)},
+		{"/api/admin/silences/", authAdmin, http.HandlerFunc(s.handleAdminSilenceByScope)},
+		{"/api/export/", authAdmin, http.HandlerFunc(s.handleExport)},
+		{"/metrics", authMetrics, http.HandlerFunc(s.handleMetrics)},
+
+		// 面板静态资源
+		{"/", authPanel, static},
+	}
+}
+
+// validateRoutes 校验路由表并返回 pattern → 级别索引。
+// 任何未分类、重复或缺 handler 的登记项都会让进程启动失败。
+func validateRoutes(routes []route) (map[string]authLevel, error) {
+	levels := make(map[string]authLevel, len(routes))
+	for _, rt := range routes {
+		if rt.pattern == "" {
+			return nil, fmt.Errorf("route with empty pattern")
+		}
+		if !strings.HasPrefix(rt.pattern, "/") {
+			return nil, fmt.Errorf("route %q must start with /", rt.pattern)
+		}
+		if rt.handler == nil {
+			return nil, fmt.Errorf("route %q has no handler", rt.pattern)
+		}
+		if !rt.level.valid() {
+			return nil, fmt.Errorf("route %q has no valid auth level (got %s)", rt.pattern, rt.level)
+		}
+		if _, dup := levels[rt.pattern]; dup {
+			return nil, fmt.Errorf("duplicate route %q", rt.pattern)
+		}
+		levels[rt.pattern] = rt.level
+	}
+	if _, ok := levels["/"]; !ok {
+		return nil, fmt.Errorf(`missing "/" catch-all route`)
+	}
+	return levels, nil
+}
+
 // Handler 返回配置好的路由。
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
+	// 用户名已配置但密码为空属于配置错误，必须整体拒绝而不是放行空密码
+	if s.authUser != "" && s.authPass == "" {
+		return withCommon(withGzip(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "server auth misconfigured", http.StatusInternalServerError)
+		})))
+	}
 
-	// 仪表盘只读数据也包含主机名、内核、服务商、价格等资产信息，
-	// 不能像公开状态页那样匿名下发。统一要求管理令牌或已通过 Basic Auth 的面板用户。
-	mux.HandleFunc("/api/overview", s.requireAdmin(s.handleOverview))
-	mux.HandleFunc("/api/nodes", s.requireAdmin(s.handleNodes))
-	mux.HandleFunc("/api/nodes/", s.requireAdmin(s.handleNodeDetail))
-	mux.HandleFunc("/api/services", s.requireAdmin(s.handleServices))
-	mux.HandleFunc("/api/alerts", s.requireAdmin(s.handleAlerts))
-	mux.HandleFunc("/api/rules", s.requireAdmin(s.handleRules))
-	mux.HandleFunc("/api/assets", s.requireAdmin(s.handleAssets))
-	mux.HandleFunc("/api/report", s.handleReport)
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/status", s.handleStatusPage)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	})
-
-	// 管理 API（需 X-Admin-Token）
-	mux.HandleFunc("/api/admin/nodes", s.handleAdminNodes)
-	mux.HandleFunc("/api/admin/nodes/", s.handleAdminNodeByID)
-	mux.HandleFunc("/api/admin/services", s.handleAdminServices)
-	mux.HandleFunc("/api/admin/services/", s.handleAdminServiceByID)
-	mux.HandleFunc("/api/admin/settings", s.handleAdminSettings)
-	mux.HandleFunc("/api/admin/test-notify", s.handleTestNotify)
-	mux.HandleFunc("/api/admin/rules", s.handleAdminRules)
-	mux.HandleFunc("/api/admin/rules/", s.handleAdminRuleByID)
-	mux.HandleFunc("/api/admin/rule-meta", s.handleRuleMeta)
-	mux.HandleFunc("/api/admin/silences", s.handleAdminSilences)
-	mux.HandleFunc("/api/admin/silences/", s.handleAdminSilenceByScope)
-	mux.HandleFunc("/api/export/", s.handleExport)
-	mux.HandleFunc("/metrics", s.handleMetrics)
-
-	// 静态资源
 	sub, err := fs.Sub(assets, "dist")
 	if err != nil {
 		panic(err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	static := http.FileServer(http.FS(sub))
 
-	return withCommon(withGzip(s.withAuthGuard(withAuth(mux, s))))
+	routes := s.routes(static)
+	levels, err := validateRoutes(routes)
+	if err != nil {
+		panic("rollcall: invalid route table: " + err.Error())
+	}
+
+	mux := http.NewServeMux()
+	for _, rt := range routes {
+		mux.Handle(rt.pattern, s.guard(rt.level, rt.handler))
+	}
+
+	// 用 ServeMux 自己的匹配结果反查鉴权级别，避免再维护一份路径白名单。
+	levelOf := func(r *http.Request) authLevel {
+		_, pattern := mux.Handler(r)
+		if l, ok := levels[pattern]; ok {
+			return l
+		}
+		// 仅路径清理重定向等无 pattern 的情况会到这里；
+		// 按非受保护处理，避免 3xx 错误地清零爆破计数。
+		return authPublic
+	}
+
+	return withCommon(withGzip(s.withAuthGuard(mux, levelOf)))
 }
 
-// requireAdmin 保护仪表盘只读接口。
+// guard 按路由表声明的级别包装 handler。
+func (s *Server) guard(level authLevel, h http.Handler) http.Handler {
+	switch level {
+	case authPublic, authNodeToken:
+		return h
+	case authPanel:
+		return s.requirePanel(h)
+	case authReadonly:
+		return s.requireReadonly(h)
+	case authAdmin:
+		return s.requireAdminToken(h)
+	case authMetrics:
+		return s.requireMetrics(h)
+	default:
+		// validateRoutes 已拦截；这里保留兜底，绝不静默放行
+		panic("rollcall: unclassified route")
+	}
+}
+
+// requirePanel 对面板静态资源启用 Basic Auth；未配置 -auth 时直接放行。
+func (s *Server) requirePanel(h http.Handler) http.Handler {
+	if s.authUser == "" {
+		return h
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.panelBasicOK(r) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall", charset="UTF-8"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+}
+
+// requireReadonly 保护仪表盘只读接口。
 //
 // 管理令牌优先；启用 -auth 时也接受面板 Basic 凭据，避免已登录用户
 // 为了查看只读页面还要再粘贴一次令牌。写操作仍只认 X-Admin-Token。
-func (s *Server) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (s *Server) requireReadonly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.adminTokenOK(r) || s.panelBasicOK(r) {
-			h(w, r)
+			h.ServeHTTP(w, r)
 			return
 		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	}
+	})
+}
+
+// requireAdminToken 保护管理写操作与导出，只认 X-Admin-Token。
+func (s *Server) requireAdminToken(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.adminOK(r) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		fail(w, http.StatusUnauthorized, "invalid admin token")
+	})
+}
+
+// requireMetrics 保护 Prometheus 端点，401 时返回 Basic 挑战方便抓取端配置。
+func (s *Server) requireMetrics(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.metricsAuthOK(r) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall metrics"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
 }
 
 // adminTokenOK 接受 X-Admin-Token，或 Basic 密码为管理令牌（用户名任意）。
@@ -180,62 +366,6 @@ func (s *Server) panelBasicOK(r *http.Request) bool {
 	}
 	return subtle.ConstantTimeCompare([]byte(u), []byte(s.authUser)) == 1 &&
 		subtle.ConstantTimeCompare([]byte(p), []byte(s.authPass)) == 1
-}
-
-// withAuth 对浏览器访问启用 Basic Auth；Agent 上报走自己的 token，不受影响。
-func withAuth(h http.Handler, s *Server) http.Handler {
-	if s.authUser == "" {
-		return h
-	}
-	// 用户名已配置但密码为空属于配置错误，必须整体拒绝而不是放行空密码
-	if s.authPass == "" {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "server auth misconfigured", http.StatusInternalServerError)
-		})
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Agent 上报用 X-Node-Token 自行鉴权；/status 与 /api/status 为公开页，
-		// /status.js 是公开页依赖的静态脚本，必须一并放行，否则页面会卡在骨架屏。
-		// 带自身鉴权的 API 也不能被 -auth 的 Basic 前置拦截：
-		//   · /metrics 由 metricsAuthOK 校验管理令牌（否则 README 的 Prometheus 配置恒 401）
-		//   · /api/admin/、/api/export/ 由 adminOK 校验 X-Admin-Token
-		//   · 仪表盘只读接口由 requireAdmin 接受管理令牌或面板 Basic 凭据
-		// 这样启用 -auth 后，API 脚本仍可只带令牌调用，不必再拼一层 Basic。
-		if pathNeedsNoBasic(r.URL.Path) {
-			h.ServeHTTP(w, r)
-			return
-		}
-		u, p, ok := r.BasicAuth()
-		if !ok ||
-			subtle.ConstantTimeCompare([]byte(u), []byte(s.authUser)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(p), []byte(s.authPass)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall", charset="UTF-8"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
-}
-
-// pathNeedsNoBasic 返回该路径是否已有独立鉴权（或本就公开），
-// 无需再经过 -auth 的 Basic 前置校验。
-func pathNeedsNoBasic(path string) bool {
-	switch path {
-	case "/api/report", "/healthz", "/status", "/api/status", "/status.js", "/metrics":
-		return true
-	}
-	switch {
-	case strings.HasPrefix(path, "/api/admin/"),
-		strings.HasPrefix(path, "/api/export/"),
-		strings.HasPrefix(path, "/api/overview"),
-		strings.HasPrefix(path, "/api/nodes"),
-		strings.HasPrefix(path, "/api/services"),
-		strings.HasPrefix(path, "/api/alerts"),
-		strings.HasPrefix(path, "/api/rules"),
-		strings.HasPrefix(path, "/api/assets"):
-		return true
-	}
-	return false
 }
 
 // withGzip 对 /api/ 下的 JSON/CSV 响应做透明压缩。
@@ -398,8 +528,8 @@ func (s *Server) buildNodeViews() []model.NodeView {
 	out := make([]model.NodeView, 0, len(nodes))
 
 	for _, n := range nodes {
-		m, ts, has := s.st.Latest(n.ID)
-		online := has && now-ts <= store.OnlineWindow
+		m, ts, _ := s.st.Latest(n.ID)
+		state := store.NodeState(ts, now)
 
 		// 迷你曲线：最近 30 个点的 CPU
 		series := s.st.Series(n.ID, now-1200)
@@ -419,7 +549,8 @@ func (s *Server) buildNodeViews() []model.NodeView {
 			Node:     cp,
 			Host:     s.st.Host(n.ID),
 			Latest:   m,
-			Online:   online,
+			Online:   state == model.NodeStateOnline,
+			State:    state,
 			LastSeen: ts,
 			Alerts:   alertByNode[n.ID],
 			Spark:    spark,
@@ -439,15 +570,20 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	var cnt int
 
 	for _, v := range views {
-		if v.Online {
+		switch v.State {
+		case model.NodeStateOnline:
 			ov.Online++
 			cpuSum += v.Latest.CPUPct
 			memSum += pctF(v.Latest.MemUsed, v.Latest.MemTotal)
 			ov.TrafficIn += v.Latest.NetRx
 			ov.TrafficOut += v.Latest.NetTx
 			cnt++
-		} else {
+		case model.NodeStateStale:
+			ov.Stale++
+		case model.NodeStateOffline:
 			ov.Offline++
+		case model.NodeStateNoData:
+			ov.NoData++
 		}
 		// 成本只取决于价格，与是否登记到期日无关；
 		// 否则未填到期日的资产会在总览里凭空消失。
@@ -515,13 +651,16 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now().Unix()
 	m, ts, _ := s.st.Latest(id)
+	state := store.NodeState(ts, now)
 	writeJSON(w, 200, map[string]any{
 		"node":     n,
 		"host":     s.st.Host(id),
 		"latest":   m,
 		"lastSeen": ts,
-		"online":   time.Now().Unix()-ts <= store.OnlineWindow,
+		"online":   state == model.NodeStateOnline,
+		"state":    state,
 	})
 }
 
@@ -658,6 +797,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Name     string      `json:"name"`
 		Group    string      `json:"group"` // 仅分组名，用于公开页归类展示
 		Online   bool        `json:"online"`
+		State    string      `json:"state"`
 		CPU      float64     `json:"cpu"`
 		Mem      float64     `json:"mem"`
 		Disk     float64     `json:"disk"`
@@ -678,7 +818,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	out := make([]pub, 0, len(views))
 	for _, v := range views {
 		p := pub{
-			Name: v.Name, Group: v.Group, Online: v.Online,
+			Name: v.Name, Group: v.Group, Online: v.Online, State: v.State,
 			CPU:  round1(v.Latest.CPUPct),
 			Mem:  round1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),
 			Disk: round1(pctF(v.Latest.DiskUsed, v.Latest.DiskTotal)),
@@ -705,10 +845,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		svcOut = append(svcOut, sp)
 	}
 
-	online := 0
+	counts := map[string]int{
+		model.NodeStateOnline:  0,
+		model.NodeStateStale:   0,
+		model.NodeStateOffline: 0,
+		model.NodeStateNoData:  0,
+	}
 	for _, p := range out {
-		if p.Online {
-			online++
+		if _, ok := counts[p.State]; ok {
+			counts[p.State]++
 		}
 	}
 	svcDown := 0
@@ -722,7 +867,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"site":        statusTitle,
 		"nodes":       out,
 		"services":    svcOut,
-		"online":      online,
+		"online":      counts[model.NodeStateOnline],
+		"stale":       counts[model.NodeStateStale],
+		"offline":     counts[model.NodeStateOffline],
+		"noData":      counts[model.NodeStateNoData],
 		"total":       len(out),
 		"svcDown":     svcDown,
 		"generatedAt": time.Now().Unix(),
@@ -956,10 +1104,6 @@ func validateNodeMeta(n *model.Node) string {
 }
 
 func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -1003,10 +1147,6 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/admin/nodes/")
 	rotate := strings.HasSuffix(id, "/rotate-token")
 	if rotate {
@@ -1099,10 +1239,6 @@ func (s *Server) handleRotateNodeToken(w http.ResponseWriter, id string) {
 // ---------- 服务探测管理 API ----------
 
 func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, 200, s.st.Services())
@@ -1177,10 +1313,6 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminServiceByID(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/admin/services/")
 	if id == "" {
 		fail(w, 400, "missing service id")
@@ -1200,10 +1332,6 @@ func (s *Server) handleAdminServiceByID(w http.ResponseWriter, r *http.Request) 
 // ---------- 通知设置 API ----------
 
 func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
 		cfg, err := notify.Parse(s.st.GetSetting("notify"))
@@ -1255,10 +1383,6 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 
 // handleTestNotify 发一条测试通知，验证通道配置是否正确。
 func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	if r.Method != http.MethodPost {
 		fail(w, 405, "method not allowed")
 		return
@@ -1335,10 +1459,6 @@ type ruleMetric struct {
 
 // handleRuleMeta 下发规则表单的元数据。虽为静态字典，仍与同前缀管理路由保持一致要求令牌。
 func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	writeJSON(w, 200, map[string]any{
 		"metrics": []ruleMetric{
 			{Value: "offline", Label: "节点失联", Unit: "秒", Op: "gt", NoVal: true,
@@ -1369,10 +1489,6 @@ func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminRules 列出 / 创建告警规则。
 func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, 200, s.st.Rules())
@@ -1468,10 +1584,6 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminRuleByID 修改 / 删除单条规则。
 func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/admin/rules/")
 	if id == "" {
 		fail(w, 400, "missing rule id")

@@ -393,6 +393,7 @@ body {
   box-shadow: var(--shadow-lg);
 }
 .node-card.offline { opacity: 0.62; }
+.node-card.stale { opacity: 0.82; }
 .node-card.alerting { border-left: 2px solid var(--crit); }
 
 .nc-head {
@@ -438,6 +439,7 @@ body {
 .dot.off { background: var(--fg-3); }
 .dot.warn { background: var(--warn); }
 .dot.crit { background: var(--crit); }
+.state-text { font-size: 11.5px; color: var(--fg-3); }
 
 .nc-bars {
   display: grid;

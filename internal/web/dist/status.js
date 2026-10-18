@@ -42,13 +42,15 @@
     document.getElementById('stamp').textContent =
       '更新于 ' + p(st.getMonth() + 1) + '-' + p(st.getDate()) + ' ' + p(st.getHours()) + ':' + p(st.getMinutes());
 
-    var down = (d.total - d.online);
+    var offline = d.offline != null ? d.offline : Math.max(0, d.total - d.online - (d.stale || 0) - (d.noData || 0));
     var b = document.getElementById('banner');
-    if (down === 0 && (d.svcDown || 0) === 0) {
+    if (offline === 0 && (d.stale || 0) === 0 && (d.noData || 0) === 0 && (d.svcDown || 0) === 0) {
       b.innerHTML = '<div class="banner ok"><span class="dot ok"></span>全部系统运行正常</div>';
     } else {
       var parts = [];
-      if (down > 0) parts.push(down + ' 个节点离线');
+      if (offline > 0) parts.push(offline + ' 个节点离线');
+      if (d.stale > 0) parts.push(d.stale + ' 个节点数据延迟');
+      if (d.noData > 0) parts.push(d.noData + ' 个节点待接入');
       if (d.svcDown > 0) parts.push(d.svcDown + ' 个服务异常');
       b.innerHTML = '<div class="banner bad"><span class="dot bad"></span>' + esc(parts.join('，')) + '</div>';
     }
@@ -80,15 +82,19 @@
       html += groups[g].map(function (n) {
         var up = n.uptime24;
         var cls = upCls(up || 0);
+        var state = n.state || (n.online ? 'online' : 'offline');
+        var dot = state === 'online' ? 'ok' : state === 'stale' ? 'warn' : state === 'no_data' ? 'off' : 'bad';
+        var label = state === 'online' ? '在线' : state === 'stale' ? '数据延迟' : state === 'no_data' ? '待接入' : '离线';
+        var hasData = state !== 'no_data';
         return '<div class="row">' +
-          '<div class="row-name"><span class="dot ' + (n.online ? 'ok' : 'off') + '"></span>' + esc(n.name) + '</div>' +
+          '<div class="row-name"><span class="dot ' + dot + '" title="' + label + '"></span>' + esc(n.name) + '</div>' +
           '<div style="text-align:right"><span class="pct ' + cls + '">' + (up ? up.toFixed(1) + '%' : '—') + '</span>' +
           '<div style="font-size:10.5px;color:var(--fg3)">24h 可用率</div></div>' +
           '<div class="row-meta">' +
-          '<span>CPU <b class="mono">' + n.cpu.toFixed(0) + '%</b></span>' +
-          '<span>内存 <b class="mono">' + n.mem.toFixed(0) + '%</b></span>' +
-          '<span>磁盘 <b class="mono">' + n.disk.toFixed(0) + '%</b></span>' +
-          '<span>运行 <b class="mono">' + dur(n.uptime) + '</b></span>' +
+          '<span>CPU <b class="mono">' + (hasData ? n.cpu.toFixed(0) + '%' : '—') + '</b></span>' +
+          '<span>内存 <b class="mono">' + (hasData ? n.mem.toFixed(0) + '%' : '—') + '</b></span>' +
+          '<span>磁盘 <b class="mono">' + (hasData ? n.disk.toFixed(0) + '%' : '—') + '</b></span>' +
+          '<span>运行 <b class="mono">' + (hasData ? dur(n.uptime) : '—') + '</b></span>' +
           '</div>' +
           bars(n) +
           '</div>';
@@ -96,7 +102,10 @@
       html += '</div>';
     });
     document.getElementById('nodes').innerHTML = html || '<div class="sub">暂无节点</div>';
-    document.getElementById('foot').textContent = d.online + ' / ' + d.total + ' 在线';
+    var footParts = [d.online + ' / ' + d.total + ' 在线'];
+    if (d.stale > 0) footParts.push(d.stale + ' 数据延迟');
+    if (d.noData > 0) footParts.push(d.noData + ' 待接入');
+    document.getElementById('foot').textContent = footParts.join(' · ');
   }
 
   function load() {

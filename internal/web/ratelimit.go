@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -93,32 +92,6 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// isProtectedPath 判断该路径的 2xx 是否可以证明持有有效凭证。
-// 公开页面/上报接口的成功访问不能用来清零爆破计数。
-func (s *Server) isProtectedPath(path string) bool {
-	switch {
-	case strings.HasPrefix(path, "/api/admin/"), path == "/api/admin":
-		return true
-	case strings.HasPrefix(path, "/api/export/"), path == "/metrics":
-		return true
-	case strings.HasPrefix(path, "/api/overview"),
-		strings.HasPrefix(path, "/api/nodes"),
-		strings.HasPrefix(path, "/api/services"),
-		strings.HasPrefix(path, "/api/alerts"),
-		strings.HasPrefix(path, "/api/rules"),
-		strings.HasPrefix(path, "/api/assets"):
-		return true
-	}
-	if s.authUser == "" {
-		return false
-	}
-	switch path {
-	case "/api/report", "/healthz", "/status", "/api/status", "/status.js":
-		return false
-	}
-	return true
-}
-
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -139,7 +112,8 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 }
 
 // withAuthGuard 在路由外层执行失败限速与审计日志。
-func (s *Server) withAuthGuard(h http.Handler) http.Handler {
+// levelOf 由路由表反查，只有受保护级别的 2xx 才会清零失败计数。
+func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authLevel) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		if ok, wait := s.limiter.allow(ip); !ok {
@@ -153,7 +127,7 @@ func (s *Server) withAuthGuard(h http.Handler) http.Handler {
 		case rec.status == http.StatusUnauthorized:
 			s.limiter.fail(ip)
 			log.Printf("鉴权失败 ip=%s method=%s path=%s", ip, r.Method, r.URL.Path)
-		case rec.status > 0 && rec.status < 400 && s.isProtectedPath(r.URL.Path):
+		case rec.status > 0 && rec.status < 400 && levelOf(r).protected(s.authUser != ""):
 			s.limiter.succeed(ip)
 		}
 	})

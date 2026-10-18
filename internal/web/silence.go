@@ -15,10 +15,6 @@ import (
 // scope 为 "global" 或规则 ID。
 
 func (s *Server) handleAdminSilences(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	if r.Method != http.MethodGet {
 		fail(w, 405, "method not allowed")
 		return
@@ -31,10 +27,6 @@ func (s *Server) handleAdminSilences(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminSilenceByScope(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	scope := strings.TrimPrefix(r.URL.Path, "/api/admin/silences/")
 	if scope == "" || strings.Contains(scope, "/") {
 		fail(w, 400, "invalid silence scope")

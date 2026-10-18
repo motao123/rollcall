@@ -65,6 +65,24 @@ function ago(ts) {
   return Math.floor(s / 86400) + ' 天前';
 }
 
+// 节点状态：后端 state 与 online 同时下发；旧数据缺少 state 时退回 online。
+function nodeState(n) {
+  const s = n.state || (n.online ? 'online' : 'offline');
+  const labels = {
+    online: { text: '在线', tone: 'ok' },
+    stale: { text: '数据延迟', tone: 'warn' },
+    offline: { text: '离线', tone: 'off' },
+    no_data: { text: '待接入', tone: 'off' },
+  };
+  const base = labels[s] || labels.offline;
+  if (s === 'online' && n.alerts > 0) return { text: `${n.alerts} 告警`, tone: 'crit' };
+  return base;
+}
+
+function hasNodeData(n) {
+  return (n.state || (n.online ? 'online' : 'offline')) !== 'no_data';
+}
+
 function clock(ts) {
   const d = new Date(ts * 1000);
   const p = (n) => String(n).padStart(2, '0');
@@ -174,6 +192,13 @@ function areaChart(values, color, opts = {}) {
 /* ---------------- 组件 ---------------- */
 
 function barRow(label, pctVal, warnAt = 75, critAt = 90) {
+  if (pctVal == null) {
+    return `<div class="nb-row">
+      <span class="nb-label">${label}</span>
+      <span class="nb-track"></span>
+      <span class="nb-val mono">—</span>
+    </div>`;
+  }
   const t = tone(pctVal, warnAt, critAt);
   const color = t === 'crit' ? 'var(--crit)' : t === 'warn' ? 'var(--warn)' : 'var(--accent)';
   return `<div class="nb-row">
@@ -192,32 +217,33 @@ function kpi(label, value, unit, foot) {
 }
 
 function nodeCard(n) {
-  const cpu = n.latest.cpuPct || 0;
-  const mem = pct(n.latest.memUsed, n.latest.memTotal);
-  const disk = pct(n.latest.diskUsed, n.latest.diskTotal);
+  const hasData = hasNodeData(n);
+  const cpu = hasData ? n.latest.cpuPct || 0 : null;
+  const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
+  const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
   const spark = (n.spark || []).map((p) => p.v);
-  const statusTone = !n.online ? 'off' : n.alerts > 0 ? 'crit' : 'ok';
-  const statusText = !n.online ? '离线' : n.alerts > 0 ? `${n.alerts} 告警` : '在线';
+  const st = nodeState(n);
+  const cardCls = n.state === 'offline' ? 'offline' : n.state === 'stale' ? 'stale' : '';
 
-  return `<article class="node-card ${n.online ? '' : 'offline'} ${n.alerts > 0 ? 'alerting' : ''}" data-node="${esc(n.id)}">
+  return `<article class="node-card ${cardCls} ${n.alerts > 0 ? 'alerting' : ''}" data-node="${esc(n.id)}">
     <div class="nc-head">
-      <span class="dot ${statusTone}"></span>
+      <span class="dot ${st.tone}"></span>
       <span class="nc-name">${esc(n.name)}</span>
       <span class="nc-tag">${esc(n.provider || '—')}</span>
-      <span class="nc-status">${statusText}</span>
+      <span class="nc-status">${st.text}</span>
     </div>
     <div class="nc-bars">
       ${barRow('CPU', cpu, 75, 90)}
       ${barRow('内存', mem, 80, 92)}
       ${barRow('磁盘', disk, 80, 90)}
     </div>
-    <div class="nc-spark">${sparkline(spark, statusTone === 'off' ? 'var(--fg-3)' : 'var(--accent)')}</div>
+    <div class="nc-spark">${sparkline(spark, st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)')}</div>
     <div class="nc-foot">
       <span class="mono">${esc(n.region || '—')}</span>
       <span class="sep">·</span>
-      <span class="mono">↑${bytes(n.latest.netTx)}</span>
+      <span class="mono">↑${hasData ? bytes(n.latest.netTx) : '—'}</span>
       <span class="sep">·</span>
-      <span class="mono">${dur(n.latest.uptime)}</span>
+      <span class="mono">${hasData ? dur(n.latest.uptime) : '—'}</span>
     </div>
   </article>`;
 }
@@ -231,10 +257,14 @@ async function viewOverview() {
   const expiring = ov.expiring || [];
   const lists = nodes.filter((n) => !state.search || n.name.toLowerCase().includes(state.search));
   const alerting = nodes.filter((n) => n.alerts > 0);
+  const countParts = [`在线 ${ov.online}`];
+  if (ov.stale) countParts.push(`数据延迟 ${ov.stale}`);
+  if (ov.offline) countParts.push(`离线 ${ov.offline}`);
+  if (ov.noData) countParts.push(`待接入 ${ov.noData}`);
 
   $('#view').innerHTML = `
     <div class="kpis">
-      ${kpi('节点总数', ov.nodes, '', `在线 ${ov.online} · 离线 ${ov.offline}`)}
+      ${kpi('节点总数', ov.nodes, '', countParts.join(' · '))}
       ${kpi('活跃告警', ov.activeAlert, '', ov.activeAlert > 0 ? '需关注' : '全部正常')}
       ${kpi('平均 CPU', ov.avgCpu.toFixed(1), '%', '在线节点均值')}
       ${kpi('平均内存', ov.avgMem.toFixed(1), '%', '在线节点均值')}
@@ -250,10 +280,12 @@ async function viewOverview() {
       </div>
       <div class="panel">
         ${alerting.map((n) => {
-          const sev = !n.online ? 'critical' : 'warn';
-          const detail = !n.online
-            ? `已失联 · 最后上报 ${ago(n.lastSeen)}`
-            : `CPU ${(n.latest.cpuPct || 0).toFixed(0)}% · 内存 ${pct(n.latest.memUsed, n.latest.memTotal).toFixed(0)}% · 磁盘 ${pct(n.latest.diskUsed, n.latest.diskTotal).toFixed(0)}%`;
+          const sev = n.state === 'offline' || n.state === 'no_data' ? 'critical' : 'warn';
+          const detail = n.state === 'stale'
+            ? `数据延迟 · 最后上报 ${ago(n.lastSeen)}`
+            : !n.online
+              ? `已失联 · 最后上报 ${ago(n.lastSeen)}`
+              : `CPU ${(n.latest.cpuPct || 0).toFixed(0)}% · 内存 ${pct(n.latest.memUsed, n.latest.memTotal).toFixed(0)}% · 磁盘 ${pct(n.latest.diskUsed, n.latest.diskTotal).toFixed(0)}%`;
           return `
           <div class="alert-item" style="cursor:pointer" data-node="${esc(n.id)}">
             <div class="alert-bar ${sev}"></div>
@@ -316,21 +348,24 @@ async function viewNodes() {
           <th class="num">负载</th><th class="num">运行时长</th><th class="num">流量</th>
         </tr></thead>
         <tbody>${list.map((n) => {
-          const cpu = n.latest.cpuPct || 0;
-          const mem = pct(n.latest.memUsed, n.latest.memTotal);
-          const disk = pct(n.latest.diskUsed, n.latest.diskTotal);
+          const hasData = hasNodeData(n);
+          const st = nodeState(n);
+          const cpu = hasData ? n.latest.cpuPct || 0 : null;
+          const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
+          const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
+          const dash = '—';
           return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
-            <td><span class="dot ${!n.online ? 'off' : n.alerts ? 'crit' : 'ok'}"></span></td>
+            <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
             <td class="strong">${esc(n.name)}</td>
             <td>${esc(n.provider || '—')}</td>
             <td>${esc(n.region || '—')}</td>
             <td style="font-size:11.5px">${esc(n.host?.os || '—')}</td>
-            <td class="num mono" style="color:${cpu > 85 ? 'var(--crit)' : 'inherit'}">${cpu.toFixed(0)}%</td>
-            <td class="num mono">${mem.toFixed(0)}%</td>
-            <td class="num mono" style="color:${disk > 88 ? 'var(--crit)' : 'inherit'}">${disk.toFixed(0)}%</td>
-            <td class="num mono">${(n.latest.load1 || 0).toFixed(2)}</td>
-            <td class="num mono">${dur(n.latest.uptime)}</td>
-            <td class="num mono">${bytes(n.latest.netRx)}</td>
+            <td class="num mono" style="color:${cpu > 85 ? 'var(--crit)' : 'inherit'}">${cpu == null ? dash : cpu.toFixed(0) + '%'}</td>
+            <td class="num mono">${mem == null ? dash : mem.toFixed(0) + '%'}</td>
+            <td class="num mono" style="color:${disk > 88 ? 'var(--crit)' : 'inherit'}">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
+            <td class="num mono">${hasData ? (n.latest.load1 || 0).toFixed(2) : dash}</td>
+            <td class="num mono">${hasData ? dur(n.latest.uptime) : dash}</td>
+            <td class="num mono">${hasData ? bytes(n.latest.netRx) : dash}</td>
           </tr>`;
         }).join('') || `<tr><td colspan="11"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
       </table></div>
@@ -346,6 +381,8 @@ async function viewNodeDetail(id) {
   const n = detail.node, host = detail.host || {};
   const pts = series.points || [];
   const resolution = series.resolution || 'raw';
+  const hasData = (detail.state || (detail.online ? 'online' : 'offline')) !== 'no_data';
+  const st = nodeState({ state: detail.state, online: detail.online, alerts: 0 });
   // 聚合区间返回桶内平均值与增量；原始区间仍是累计计数器。
   const bucketSec = { '1m': 60, '5m': 300, '1h': 3600 }[resolution] || 0;
   const cpuVals = pts.map((p) => p.cpuPct);
@@ -376,10 +413,11 @@ async function viewNodeDetail(id) {
       </button>
       <div style="flex:1">
         <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
-          <span class="dot ${detail.online ? 'ok' : 'off'}"></span>
+          <span class="dot ${st.tone}"></span>
           <h2 style="font-size:17px;font-weight:650;margin:0;letter-spacing:-.02em">${esc(n.name)}</h2>
           <span class="nc-tag">${esc(n.provider || '—')}</span>
           <span class="nc-tag">${esc(n.group || '—')}</span>
+          <span class="badge ${st.tone === 'off' ? 'mute' : st.tone}">${st.text}</span>
         </div>
         <p style="font-size:12px;color:var(--fg-3);margin:3px 0 0">
           ${esc(host.hostname || '—')} · ${esc(host.os || '—')} · ${esc(host.kernel || '')} · ${host.cores || '?'} 核
@@ -394,27 +432,27 @@ async function viewNodeDetail(id) {
       <div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">CPU 使用率</span>
-            <span class="chart-val mono" style="color:${(last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${(last.cpuPct || 0).toFixed(1)}%</span></div>
+            <span class="chart-val mono" style="color:${hasData && (last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—'}</span></div>
           ${areaChart(cpuVals, 'var(--accent)')}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">内存使用率</span>
-            <span class="chart-val mono">${pct(memUsed, memTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(memUsed)} / ${bytes(memTotal)}</span></span></div>
+            <span class="chart-val mono">${hasData ? `${pct(memUsed, memTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(memUsed)} / ${bytes(memTotal)}</span>` : '—'}</span></div>
           ${areaChart(memVals, 'var(--accent-2)')}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">磁盘使用率</span>
-            <span class="chart-val mono">${pct(diskUsed, diskTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(diskUsed)} / ${bytes(diskTotal)}</span></span></div>
+            <span class="chart-val mono">${hasData ? `${pct(diskUsed, diskTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(diskUsed)} / ${bytes(diskTotal)}</span>` : '—'}</span></div>
           ${areaChart(diskVals, 'var(--warn)')}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">网络吞吐速率</span>
-            <span class="chart-val mono" style="font-size:13px">↓${bytes(last.netRx)} ↑${bytes(last.netTx)} <span style="color:var(--fg-3);font-weight:400">累计</span></span></div>
+            <span class="chart-val mono" style="font-size:13px">${hasData ? `↓${bytes(last.netRx)} ↑${bytes(last.netTx)} <span style="color:var(--fg-3);font-weight:400">累计</span>` : '—'}</span></div>
           ${areaChart(netVals, 'var(--ok)', { height: 110, fmt: (v) => rate(v) })}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">1 分钟负载</span>
-            <span class="chart-val mono">${(last.load1 || 0).toFixed(2)}</span></div>
+            <span class="chart-val mono">${hasData ? (last.load1 || 0).toFixed(2) : '—'}</span></div>
           ${areaChart(loadVals, 'var(--fg-2)', { height: 100 })}
         </div>
       </div>
@@ -429,10 +467,10 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">架构</span><span class="info-v mono">${esc(host.arch || '—')}</span></div>
             <div class="info-row"><span class="info-k">CPU</span><span class="info-v" title="${esc(host.cpuModel || '')}">${esc((host.cpuModel || '—').slice(0, 22))}</span></div>
             <div class="info-row"><span class="info-k">虚拟化</span><span class="info-v mono">${esc(host.virt || '—')}</span></div>
-            <div class="info-row"><span class="info-k">负载 1/5/15</span><span class="info-v mono">${(last.load1 || 0).toFixed(2)} / ${(last.load5 || 0).toFixed(2)} / ${(last.load15 || 0).toFixed(2)}</span></div>
-            <div class="info-row"><span class="info-k">运行时长</span><span class="info-v mono">${dur(last.uptime)}</span></div>
-            <div class="info-row"><span class="info-k">TCP 连接</span><span class="info-v mono">${last.tcpConn || 0}</span></div>
-            <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${last.procs || 0}</span></div>
+            <div class="info-row"><span class="info-k">负载 1/5/15</span><span class="info-v mono">${hasData ? `${(last.load1 || 0).toFixed(2)} / ${(last.load5 || 0).toFixed(2)} / ${(last.load15 || 0).toFixed(2)}` : '—'}</span></div>
+            <div class="info-row"><span class="info-k">运行时长</span><span class="info-v mono">${hasData ? dur(last.uptime) : '—'}</span></div>
+            <div class="info-row"><span class="info-k">TCP 连接</span><span class="info-v mono">${hasData ? last.tcpConn || 0 : '—'}</span></div>
+            <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${hasData ? last.procs || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">最后上报</span><span class="info-v">${ago(detail.lastSeen)}</span></div>
           </div>
         </div>

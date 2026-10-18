@@ -441,6 +441,231 @@ func TestMetricsAuth(t *testing.T) {
 	})
 }
 
+// TestValidateRoutesFailsClosed 校验路由表本身不能出现"未分类"路由。
+// 新增接口若漏填级别，Handler 必须在启动时直接 panic，而不是默认放行。
+func TestValidateRoutesFailsClosed(t *testing.T) {
+	valid := []route{{"/", authPublic, http.NotFoundHandler()}}
+	if levels, err := validateRoutes(valid); err != nil || levels["/"] != authPublic {
+		t.Fatalf("合法路由表不应报错: levels=%v err=%v", levels, err)
+	}
+
+	cases := []struct {
+		name   string
+		routes []route
+	}{
+		{"零值级别", []route{
+			{"/", authPublic, http.NotFoundHandler()},
+			{"/api/x", authUnclassified, http.NotFoundHandler()},
+		}},
+		{"未知级别", []route{
+			{"/", authPublic, http.NotFoundHandler()},
+			{"/api/x", authLevel(99), http.NotFoundHandler()},
+		}},
+		{"空 pattern", []route{
+			{"", authPublic, http.NotFoundHandler()},
+			{"/", authPublic, http.NotFoundHandler()},
+		}},
+		{"pattern 不以 / 开头", []route{
+			{"api/x", authPublic, http.NotFoundHandler()},
+			{"/", authPublic, http.NotFoundHandler()},
+		}},
+		{"缺 handler", []route{
+			{"/api/x", authPublic, nil},
+			{"/", authPublic, http.NotFoundHandler()},
+		}},
+		{"重复 pattern", []route{
+			{"/", authPublic, http.NotFoundHandler()},
+			{"/", authPublic, http.NotFoundHandler()},
+		}},
+		{"缺兜底路由", []route{
+			{"/api/x", authPublic, http.NotFoundHandler()},
+		}},
+	}
+	for _, c := range cases {
+		if _, err := validateRoutes(c.routes); err == nil {
+			t.Errorf("%s: 应校验失败，实际通过", c.name)
+		}
+	}
+}
+
+// TestRouteAuthMatrix 对路由表逐项验证鉴权边界：
+// 公开端点不要求凭据；只读接口接受管理令牌或面板凭据；
+// 管理写操作只认管理令牌；/metrics 两种凭据都接受。
+func TestRouteAuthMatrix(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{
+		AdminToken: adminTok, AuthUser: "panel", AuthPass: "panel-password-123",
+	})
+	h := srv.Handler()
+
+	// 每次请求换一个来源 IP，避免 401 触发爆破限速后干扰后续断言
+	ipSeq := 0
+	do := func(method, path string, withAdmin, withPanel bool, body io.Reader) int {
+		ipSeq++
+		req := httptest.NewRequest(method, path, body)
+		req.RemoteAddr = "10.0.0." + strconv.Itoa(ipSeq) + ":1234"
+		if withAdmin {
+			req.Header.Set("X-Admin-Token", adminTok)
+		}
+		if withPanel {
+			req.SetBasicAuth("panel", "panel-password-123")
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	for _, rt := range srv.routes(http.NotFoundHandler()) {
+		path := rt.pattern
+		if strings.HasSuffix(path, "/") && path != "/" {
+			path += "probe"
+		}
+		switch rt.level {
+		case authPublic:
+			if code := do(http.MethodGet, path, false, false, nil); code == http.StatusUnauthorized {
+				t.Errorf("%s 应公开，实际 401", rt.pattern)
+			}
+		case authNodeToken:
+			if code := do(http.MethodPost, path, false, false, strings.NewReader("{}")); code != http.StatusUnauthorized {
+				t.Errorf("%s 无效节点令牌应 401，实际 %d", rt.pattern, code)
+			}
+		case authPanel:
+			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
+				t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, false, true, nil); code != http.StatusOK {
+				t.Errorf("%s 面板凭据应 200，实际 %d", rt.pattern, code)
+			}
+		case authReadonly:
+			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
+				t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, true, false, nil); code == http.StatusUnauthorized {
+				t.Errorf("%s 带管理令牌不应 401，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, false, true, nil); code == http.StatusUnauthorized {
+				t.Errorf("%s 带面板凭据不应 401，实际 %d", rt.pattern, code)
+			}
+		case authAdmin:
+			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
+				t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, false, true, nil); code != http.StatusUnauthorized {
+				t.Errorf("%s 面板凭据不应通过，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, true, false, nil); code == http.StatusUnauthorized {
+				t.Errorf("%s 带管理令牌不应 401，实际 %d", rt.pattern, code)
+			}
+		case authMetrics:
+			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
+				t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, true, false, nil); code != http.StatusOK {
+				t.Errorf("%s 带管理令牌应 200，实际 %d", rt.pattern, code)
+			}
+			if code := do(http.MethodGet, path, false, true, nil); code != http.StatusOK {
+				t.Errorf("%s 带面板凭据应 200，实际 %d", rt.pattern, code)
+			}
+		default:
+			t.Errorf("%s 出现未分类路由级别 %d", rt.pattern, rt.level)
+		}
+	}
+}
+
+// TestNodeStatesAPI 校验 no_data / online / stale / offline 在
+// 节点列表、总览和公开状态页上的语义与计数一致。
+func TestNodeStatesAPI(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	now := time.Now().Unix()
+	st := store.New(t.TempDir())
+	for _, n := range []struct{ id, token string }{
+		{"fresh", "tok-fresh"}, {"online", "tok-online"}, {"stale", "tok-stale"}, {"off", "tok-off"},
+	} {
+		st.UpsertNode(&model.Node{ID: n.id, Name: n.id, Token: n.token})
+	}
+	st.AddMetrics("online", model.HostInfo{}, model.Metrics{TS: now, CPUPct: 10})
+	st.AddMetrics("stale", model.HostInfo{}, model.Metrics{TS: now - store.OnlineWindow - 10, CPUPct: 20})
+	st.AddMetrics("off", model.HostInfo{}, model.Metrics{TS: now - store.StaleWindow - 10, CPUPct: 30})
+
+	srv := New(st, nil, nil, Config{AdminToken: adminTok})
+	h := srv.Handler()
+
+	get := func(path string, out any, admin bool) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if admin {
+			req.Header.Set("X-Admin-Token", adminTok)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s 应 200，实际 %d: %s", path, w.Code, w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), out); err != nil {
+			t.Fatalf("%s 响应不是 JSON: %v", path, err)
+		}
+	}
+
+	var views []model.NodeView
+	get("/api/nodes", &views, true)
+	got := make(map[string]model.NodeView, len(views))
+	for _, v := range views {
+		got[v.ID] = v
+	}
+	wantStates := map[string]string{
+		"fresh": model.NodeStateNoData, "online": model.NodeStateOnline,
+		"stale": model.NodeStateStale, "off": model.NodeStateOffline,
+	}
+	for id, want := range wantStates {
+		v, ok := got[id]
+		if !ok {
+			t.Fatalf("节点 %s 未出现在 /api/nodes", id)
+		}
+		if v.State != want {
+			t.Errorf("节点 %s state=%q，期望 %q", id, v.State, want)
+		}
+		if v.Online != (want == model.NodeStateOnline) {
+			t.Errorf("节点 %s online=%v，与 state=%q 不一致", id, v.Online, want)
+		}
+	}
+	if got["fresh"].Latest.TS != 0 {
+		t.Errorf("待接入节点不应带指标，实际 TS=%d", got["fresh"].Latest.TS)
+	}
+
+	var ov model.Overview
+	get("/api/overview", &ov, true)
+	if ov.Nodes != 4 || ov.Online != 1 || ov.Stale != 1 || ov.Offline != 1 || ov.NoData != 1 {
+		t.Errorf("总览计数不符: %+v", ov)
+	}
+
+	var pub struct {
+		Online  int `json:"online"`
+		Stale   int `json:"stale"`
+		Offline int `json:"offline"`
+		NoData  int `json:"noData"`
+		Total   int `json:"total"`
+		Nodes   []struct {
+			Name   string `json:"name"`
+			State  string `json:"state"`
+			Online bool   `json:"online"`
+		} `json:"nodes"`
+	}
+	get("/api/status", &pub, false)
+	if pub.Total != 4 || pub.Online != 1 || pub.Stale != 1 || pub.Offline != 1 || pub.NoData != 1 {
+		t.Errorf("公开状态页计数不符: %+v", pub)
+	}
+
+	var detail struct {
+		State  string `json:"state"`
+		Online bool   `json:"online"`
+	}
+	get("/api/nodes/fresh", &detail, true)
+	if detail.State != model.NodeStateNoData || detail.Online {
+		t.Errorf("待接入节点详情应为 no_data/offline，实际 %+v", detail)
+	}
+}
+
 // TestNodePUTUpdatesMetadataPreservesToken 校验台账编辑只改元数据，
 // ID 与上报令牌保持不变（否则一次改名会让 Agent 立即 401）。
 func TestNodePUTUpdatesMetadataPreservesToken(t *testing.T) {
@@ -714,15 +939,19 @@ func TestSilenceAPI(t *testing.T) {
 	}
 }
 
-// TestMetricsExposeNotifyQueue 验证通知队列与静默指标。
+// TestMetricsExposeNotifyQueue 验证通知队列、落盘、历史分层与状态指标。
 func TestMetricsExposeNotifyQueue(t *testing.T) {
 	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "tok"})
 	now := time.Now().Unix()
 	st.SetSilence(&model.Silence{Scope: "global", Until: now + 600})
 	st.EnqueueNotifyJob(&model.NotifyJob{
 		ID: "nj_m", Severity: "critical", Status: model.NotifyPending,
 		CreatedAt: now, NextAttemptAt: now,
 	})
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
@@ -737,12 +966,26 @@ func TestMetricsExposeNotifyQueue(t *testing.T) {
 		"rollcall_notify_failed_total 0",
 		"rollcall_notify_retries_total 0",
 		"rollcall_notify_suppressed_total 0",
+		"rollcall_notify_rejected_total 0",
 		"rollcall_notify_last_success_timestamp_seconds 0",
 		"rollcall_notify_silences_active 1",
+		"rollcall_save_total 1",
+		"rollcall_save_failures_total 0",
+		"rollcall_nodes_no_data 1",
+		`rollcall_node_state{id="n1",name="节点一",state="no_data"} 1`,
+		`rollcall_history_points{id="n1",name="节点一",resolution="1m"} 0`,
+		`rollcall_history_points{id="n1",name="节点一",resolution="5m"} 0`,
+		`rollcall_history_points{id="n1",name="节点一",resolution="1h"} 0`,
 	} {
 		if !bytes.Contains(w.Body.Bytes(), []byte(want)) {
 			t.Fatalf("指标缺失 %q:\n%s", want, w.Body.String())
 		}
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("rollcall_save_duration_seconds ")) {
+		t.Fatalf("缺少落盘耗时指标:\n%s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("rollcall_save_last_success_timestamp_seconds ")) {
+		t.Fatalf("缺少落盘时间戳指标:\n%s", w.Body.String())
 	}
 }
 

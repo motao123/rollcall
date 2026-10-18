@@ -24,10 +24,6 @@ import (
 //	GET /api/export/alerts.csv   告警历史
 //	GET /api/export/metrics.csv?node=<id>&range=1h|6h|24h|7d|30d|365d
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
-	if !s.adminOK(r) {
-		fail(w, 401, "invalid admin token")
-		return
-	}
 	kind := strings.TrimPrefix(r.URL.Path, "/api/export/")
 	switch kind {
 	case "assets.csv":
@@ -228,12 +224,6 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 //	    static_configs: [{ targets: ["host:19080"] }]
 //	    basic_auth: { username: rollcall, password: "<admin.token 内容>" }
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if !s.metricsAuthOK(r) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall metrics"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	var b strings.Builder
 	now := time.Now().Unix()
 
@@ -254,18 +244,42 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// 汇总
 	views := s.buildNodeViews()
-	online := 0
+	online, stale, offline, noData := 0, 0, 0, 0
 	for _, v := range views {
-		if v.Online {
+		switch v.State {
+		case model.NodeStateOnline:
 			online++
+		case model.NodeStateStale:
+			stale++
+		case model.NodeStateOffline:
+			offline++
+		case model.NodeStateNoData:
+			noData++
 		}
 	}
 	help("rollcall_nodes_total", "Total registered nodes.", "gauge")
 	gauge("rollcall_nodes_total", nil, float64(len(views)))
-	help("rollcall_nodes_online", "Nodes currently online.", "gauge")
+	help("rollcall_nodes_online", "Nodes reporting within the online window.", "gauge")
 	gauge("rollcall_nodes_online", nil, float64(online))
+	help("rollcall_nodes_stale", "Nodes whose last report is late but not yet offline.", "gauge")
+	gauge("rollcall_nodes_stale", nil, float64(stale))
+	help("rollcall_nodes_offline", "Nodes without a report past the stale window.", "gauge")
+	gauge("rollcall_nodes_offline", nil, float64(offline))
+	help("rollcall_nodes_no_data", "Registered nodes whose agent has never reported.", "gauge")
+	gauge("rollcall_nodes_no_data", nil, float64(noData))
 	help("rollcall_alerts_active", "Currently active alerts.", "gauge")
 	gauge("rollcall_alerts_active", nil, float64(s.st.ActiveAlertCount()))
+
+	// 状态快照落盘
+	ss := s.st.SaveStats()
+	help("rollcall_save_total", "State snapshot save attempts.", "counter")
+	gauge("rollcall_save_total", nil, float64(ss.Count))
+	help("rollcall_save_failures_total", "State snapshot saves that failed.", "counter")
+	gauge("rollcall_save_failures_total", nil, float64(ss.Failures))
+	help("rollcall_save_duration_seconds", "Duration of the last successful state snapshot save.", "gauge")
+	gauge("rollcall_save_duration_seconds", nil, ss.LastDurationSeconds)
+	help("rollcall_save_last_success_timestamp_seconds", "Unix timestamp of the last successful state save (0 = never).", "gauge")
+	gauge("rollcall_save_last_success_timestamp_seconds", nil, float64(ss.LastSuccess))
 
 	// 通知队列
 	ns := s.st.NotifyStats()
@@ -279,6 +293,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("rollcall_notify_retries_total", nil, float64(ns.Retries))
 	help("rollcall_notify_suppressed_total", "Notifications suppressed by silence or disabled config.", "counter")
 	gauge("rollcall_notify_suppressed_total", nil, float64(ns.Suppressed))
+	help("rollcall_notify_rejected_total", "Notifications rejected because the outbox queue was full.", "counter")
+	gauge("rollcall_notify_rejected_total", nil, float64(ns.Rejected))
 	help("rollcall_notify_last_success_timestamp_seconds", "Unix timestamp of the last successful delivery (0 = never).", "gauge")
 	gauge("rollcall_notify_last_success_timestamp_seconds", nil, float64(ns.LastSuccess))
 	help("rollcall_notify_silences_active", "Active notification silences (global or per-rule).", "gauge")
@@ -340,6 +356,21 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		help(m.name, m.help, m.typ)
 		for _, v := range views {
 			gauge(m.name, []string{"id=" + q(v.ID), "name=" + q(v.Name)}, m.get(v))
+		}
+	}
+
+	help("rollcall_node_state", "Current node display state (1 for the active state).", "gauge")
+	for _, v := range views {
+		gauge("rollcall_node_state", []string{"id=" + q(v.ID), "name=" + q(v.Name), "state=" + q(v.State)}, 1)
+	}
+
+	// 历史分层：每节点保留的桶数，用于观察降采样是否按预期累积
+	help("rollcall_history_points", "History buckets retained per node and resolution.", "gauge")
+	for _, n := range s.st.Nodes() {
+		counts := s.st.HistoryCounts(n.ID)
+		for _, res := range []string{store.HistoryResolution1m, store.HistoryResolution5m, store.HistoryResolution1h} {
+			gauge("rollcall_history_points",
+				[]string{"id=" + q(n.ID), "name=" + q(n.Name), "resolution=" + q(res)}, float64(counts[res]))
 		}
 	}
 

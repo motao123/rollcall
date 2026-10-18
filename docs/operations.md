@@ -1,6 +1,6 @@
 # 运维手册
 
-面向已按 README 完成部署的 Rollcall 实例（v1.3+）。覆盖日常备份、升级回滚、令牌轮换、开关配置与故障排查。
+面向已按 README 完成部署的 Rollcall 实例（v1.6+）。覆盖日常备份、升级回滚、令牌轮换、开关配置与故障排查。
 
 ---
 
@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.5.0
+make linux VERSION=v1.6.0
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -199,13 +199,16 @@ sudo systemctl restart rollcall-server
 
 ---
 
-## 7. 告警规则定向与通知并发
+## 7. 告警规则定向与通知投递
 
 - 规则支持 `nodeIds` 与 `groups`（界面在规则弹窗中配置），空表示对所有节点生效；两者同时存在时按「或」匹配。
 - 规则收紧或改向后，原先命中但已不在范围内的活跃告警会自动关闭。
 - 默认规则只在全新实例上播种一次；删光规则后重启不会复活（持久化标记 `rulesInitialized`）。
-- 通知投递并发上限为 **8**。告警风暴时超出的通知会被丢弃，并在服务端日志记录
-  `通知并发已达上限 8，丢弃一条 ...`。若频繁出现，说明通道响应慢或告警过于密集，应先修通道而不是调大并发。
+- 告警只负责把通知写入持久化 Outbox，由 **8** 个 worker 异步投递；任务随快照落盘，重启后继续投递。
+- Outbox 队列上限 **2000** 条。队列满且无法清理时新任务会被拒绝，服务端日志记录
+  `通知队列已满（2000 条），拒绝新任务: ...`，并累计到 `rollcall_notify_rejected_total`。
+  若该计数持续增长，说明通道响应慢或告警过于密集，应先修通道。
+- 队列深度、送达/失败/重试/静默拦截/队列满拒绝与最近成功时间见 `/metrics` 与告警页。
 
 ---
 
@@ -214,7 +217,7 @@ sudo systemctl restart rollcall-server
 | 现象 | 排查方向 |
 |---|---|
 | 浏览器一直要求令牌 / 401 | 管理接口需 `X-Admin-Token`；节点上报需 `X-Node-Token`，两者不可混用 |
-| 节点显示离线 | 服务端 120 秒未收到上报；检查 Agent 日志、时间同步、`interval ≤ 60` |
+| 节点显示离线 | 服务端超过 300 秒未收到上报；120–300 秒显示「数据延迟」，从未上报显示「待接入」。检查 Agent 日志、时间同步、`interval ≤ 60` |
 | Agent 拒绝启动（HTTP） | 非本机服务端默认必须 HTTPS；临时接受风险可加 `-allow-insecure` |
 | Agent 读取配置失败 | 确认 `/etc/rollcall` 属组 `rollcall-agent`(0750)、`agent.json` 为 `root:rollcall-agent 0640` |
 | 服务探测全部失败 | 目标是否为私网？需显式 `-allow-private-probes`；自签名证书需 `-insecure-probe-tls` |
@@ -229,6 +232,8 @@ curl -fsS http://127.0.0.1:19080/healthz          # ok
 curl -fsS http://127.0.0.1:19080/api/status | head # 公开状态数据
 curl -fsS http://127.0.0.1:19080/metrics \
   -H "X-Admin-Token: $(sudo cat /opt/rollcall/data/admin.token)" | head
+# 重点观察：rollcall_save_failures_total、rollcall_save_duration_seconds、
+# rollcall_history_points、rollcall_notify_rejected_total、rollcall_nodes_{stale,offline,no_data}
 ```
 
 ---
