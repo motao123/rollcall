@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -78,10 +79,28 @@ func flushCSV(w http.ResponseWriter, filename string, buf *bytes.Buffer, cw *csv
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="%s-%s.csv"`, filename, time.Now().Format("20060102-1504")))
+		contentDisposition(filename+"-"+time.Now().Format("20060102-1504")+".csv"))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	_, _ = w.Write(buf.Bytes())
+}
+
+// contentDisposition 生成兼容非 ASCII 文件名的下载头。
+//
+// 节点名普遍是中文（腾讯云-sg、武汉-独服），而 `filename="..."` 只允许
+// ASCII 可见字符：直接塞 UTF-8 会被部分浏览器截断成乱码或空文件名。
+// 按 RFC 6266/5987 同时给出 ASCII 回退名与 filename*=UTF-8” 形式。
+func contentDisposition(name string) string {
+	var ascii strings.Builder
+	for _, r := range name {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			ascii.WriteByte('_')
+			continue
+		}
+		ascii.WriteRune(r)
+	}
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s",
+		ascii.String(), url.PathEscape(name))
 }
 
 func (s *Server) exportAssets(w http.ResponseWriter) {
@@ -96,7 +115,12 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 	for _, v := range s.buildNodeViews() {
 		// 与仪表盘共用 daysUntil：它按本地日历日计算并四舍五入，
 		// 避免 UTC 解析 + 截断把「今天到期」和「还有 23 小时」都算成 0 天。
-		days, _ := daysUntil(v.ExpireAt)
+		// 无法解析时输出空值：填 0 会被读成「今天到期」。
+		days, daysOK := daysUntil(v.ExpireAt)
+		daysStr := ""
+		if daysOK {
+			daysStr = itoa(days)
+		}
 		mv := monthly(v.Price, v.Currency, s.cnyRate)
 		monthSum += mv
 		online := "否"
@@ -105,7 +129,7 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 		}
 		_ = cw.Write([]string{
 			csvSafe(v.Name), csvSafe(v.Provider), csvSafe(v.Region), csvSafe(v.Group),
-			csvSafe(v.Host.OS), v.ExpireAt, itoa(days),
+			csvSafe(v.Host.OS), v.ExpireAt, daysStr,
 			f2(v.Price), v.Currency, f2(mv), online,
 			f1(v.Latest.CPUPct),
 			f1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),

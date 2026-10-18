@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -94,6 +95,12 @@ func (s *Server) handleAdminSilenceByScope(w http.ResponseWriter, r *http.Reques
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
 			fail(w, 400, "bad json: "+err.Error())
+			return
+		}
+		// json.Decoder 只消费第一个值，`{"minutes":60}{"minutes":43200}`
+		// 这种请求体会被静默当成前者。尾随内容一律拒绝。
+		if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+			fail(w, 400, "请求体只能包含一个 JSON 对象")
 			return
 		}
 		if req.Minutes < 1 || req.Minutes > 30*24*60 {

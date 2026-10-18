@@ -83,6 +83,9 @@ func New(st *store.Store, cfg Config) *Manager {
 	if len(cfg.Backoff) == 0 {
 		cfg.Backoff = def.Backoff
 	}
+	// Config 是按值传入的，但 Backoff 是切片（只复制了头部）：
+	// 调用方之后修改自己的切片会改变投递时序，这里复制一份断开共享。
+	cfg.Backoff = append([]time.Duration(nil), cfg.Backoff...)
 	return &Manager{
 		st:   st,
 		cfg:  cfg,
@@ -299,7 +302,13 @@ func (m *Manager) work(job *model.NotifyJob) {
 
 	now := time.Now().Unix()
 	cfg := m.notifyCfg.Load()
-	if cfg == nil || !cfg.Enabled || len(cfg.EnabledChannels()) == 0 {
+	if cfg == nil {
+		// 配置尚未装载（启动早期或保存失败）：保持 pending。
+		// 不能像「明确停用」那样标记 suppressed —— 那会把这条告警永久丢弃，
+		// 而租约到期后任务本可以重新投递。
+		return
+	}
+	if !cfg.Enabled || len(cfg.EnabledChannels()) == 0 {
 		m.st.NotifyJobSuppressed(job.ID, "config", "通知配置已停用或没有可用通道", now)
 		return
 	}

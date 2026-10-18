@@ -10,6 +10,7 @@ func TestValidate(t *testing.T) {
 		{Mode: "dark"},
 		{Mode: "auto", Accent: "#000000"},
 	}
+
 	for _, th := range valid {
 		if err := th.Validate(); err != nil {
 			t.Fatalf("%+v 应通过校验: %v", th, err)
@@ -36,7 +37,9 @@ func TestValidate(t *testing.T) {
 
 func TestParseAndMarshal(t *testing.T) {
 	th, err := Parse("")
-	if err != nil || th != Default() {
+	// 主题含 *int 字段，不能直接用 == 比较（比较的是指针地址）。
+	def := Default()
+	if err != nil || th.Mode != def.Mode || th.Radius == nil || *th.Radius != DefaultRadius {
 		t.Fatalf("空值应返回默认主题: %+v %v", th, err)
 	}
 
@@ -63,5 +66,21 @@ func TestParseAndMarshal(t *testing.T) {
 	}
 	if _, err := Parse("not-json"); err == nil {
 		t.Fatal("损坏配置应报错")
+	}
+}
+
+// TestNormalizeFillsRadiusDefault 是回归测试。
+//
+// 字段注释写的是「nil = 默认 10」，但 Normalize 之前只补 Mode，
+// 于是前端表单、状态页、导出各自复刻这个默认值，已经出现不一致。
+func TestNormalizeFillsRadiusDefault(t *testing.T) {
+	got := Theme{}.Normalize()
+	if got.Radius == nil || *got.Radius != DefaultRadius {
+		t.Fatalf("nil radius 应归一化为 %d，实际 %+v", DefaultRadius, got.Radius)
+	}
+	// 显式值不能被覆盖
+	zero := 0
+	if got := (Theme{Radius: &zero}).Normalize(); got.Radius == nil || *got.Radius != 0 {
+		t.Fatalf("显式 0 不应被覆盖: %+v", got.Radius)
 	}
 }

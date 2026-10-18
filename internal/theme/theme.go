@@ -22,8 +22,12 @@ type Theme struct {
 
 // Default 返回默认主题（与内置样式一致）。
 func Default() Theme {
-	return Theme{Mode: "auto"}
+	r := DefaultRadius
+	return Theme{Mode: "auto", Radius: &r}
 }
+
+// DefaultRadius 是未指定圆角时使用的像素值，与内置 CSS 保持一致。
+const DefaultRadius = 10
 
 var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
@@ -55,6 +59,13 @@ func (t Theme) Validate() error {
 func (t Theme) Normalize() Theme {
 	if t.Mode == "" {
 		t.Mode = "auto"
+	}
+	if t.Radius == nil {
+		// 文档写的是「nil = 默认 10」，但之前没有在这里落地，
+		// 前端表单、状态页、导出各自复刻这个默认值，已经出现不一致。
+		// 统一在归一化阶段落成具体值。
+		r := DefaultRadius
+		t.Radius = &r
 	}
 	t.Accent = strings.ToLower(t.Accent)
 	t.AccentDark = strings.ToLower(t.AccentDark)

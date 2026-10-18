@@ -160,8 +160,8 @@ func TestSanitizeStripsHeaderInjection(t *testing.T) {
 // TestNodeUpdatePreservesToken 是回归测试。
 //
 // 曾经的缺陷：POST /api/admin/nodes 无条件 in.Token = store.NewToken()，
-// 于是带着已存在 ID 更新台账会**静默轮换令牌**，该节点 Agent 立即开始 401，
-// 与之前 json:"-" 令牌持久化 bug 同类（都是重启/更新后令牌失效）。
+// 于是带着已存在 ID 更新台账会**静默轮换令牌**，该节点 Agent 立即开始 401。
+// 现在 POST 只负责创建（重复 ID 返回 409），更新必须走 PUT，且不得触碰令牌。
 func TestNodeUpdatePreservesToken(t *testing.T) {
 	st := store.New(t.TempDir())
 	const adminTok = "test-admin-token-1234567890"
@@ -171,16 +171,26 @@ func TestNodeUpdatePreservesToken(t *testing.T) {
 	st.UpsertNode(n)
 
 	srv := New(st, nil, nil, Config{AdminToken: adminTok})
+	h := srv.Handler()
 
-	// 用同一 ID 更新台账（改名/改服务商），不应触碰令牌
+	// 用同一 ID 走 POST 必须被拒绝，而不是当成「更新」静默改写台账。
 	body, _ := json.Marshal(model.Node{ID: "n1", Name: "节点一改", Provider: "new"})
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/nodes", bytes.NewReader(body))
 	req.Header.Set("X-Admin-Token", adminTok)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("重复 ID 的 POST 应返回 409，实际 %d: %s", w.Code, w.Body.String())
+	}
 
-	if w.Code != 201 {
+	// 更新走 PUT：台账字段生效，令牌保持不变。
+	req = httptest.NewRequest(http.MethodPut, "/api/admin/nodes/n1", bytes.NewReader(body))
+	req.Header.Set("X-Admin-Token", adminTok)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
 		t.Fatalf("更新节点返回 %d: %s", w.Code, w.Body.String())
 	}
 	var got adminNodeView
@@ -278,8 +288,10 @@ func TestDaysUntilUsesLocalCalendar(t *testing.T) {
 	}
 }
 
-// TestPublicNodeViewDoesNotCarryToken 防止视图层携带上报令牌：
-// json:"-" 只挡住标准 JSON，内存中的副本也不应保留秘密。
+// TestPublicNodeViewDoesNotCarryToken 防止视图层携带上报令牌。
+//
+// 视图不再内嵌 model.Node，令牌字段在类型层面就不存在 —— 即使走非 JSON
+// 序列化路径（模板、%+v、未来的 msgpack）也不可能泄露。
 func TestPublicNodeViewDoesNotCarryToken(t *testing.T) {
 	st := store.New(t.TempDir())
 	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "secret-token"})
@@ -288,8 +300,15 @@ func TestPublicNodeViewDoesNotCarryToken(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("视图数 = %d，期望 1", len(views))
 	}
-	if views[0].Token != "" {
-		t.Errorf("公开节点视图不应携带令牌，实际 %q", views[0].Token)
+	raw, err := json.Marshal(views)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if strings.Contains(string(raw), "secret-token") {
+		t.Fatalf("公开节点视图泄露令牌: %s", raw)
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "token") {
+		t.Fatalf("公开节点视图含 token 字段: %s", raw)
 	}
 }
 

@@ -637,6 +637,11 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 		r = NewRing(RingSize)
 		s.series[nodeID] = r
 	}
+	// 主机静态信息先于去重逻辑更新：同一秒内的重复上报同样可能带上
+	// 新的 hostname/内核版本，原来那条 return 会让它永远写不进去。
+	if host.Hostname != "" {
+		s.hosts[nodeID] = host
+	}
 	var prev model.Metrics
 	hasPrev := false
 	if r.n > 0 {
@@ -650,9 +655,6 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 	}
 	r.Add(m)
 	s.addHistoryLocked(nodeID, m, &prev, hasPrev)
-	if host.Hostname != "" {
-		s.hosts[nodeID] = host
-	}
 }
 
 func (s *Store) Host(nodeID string) model.HostInfo {
@@ -854,6 +856,8 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 			ex.Message = a.Message
 			// 回填持久化告警的真实 ID，通知任务据此关联告警记录。
 			a.ID = ex.ID
+			// 值/文案已就地改写，必须落盘：否则重启后「当前值」回到旧数字。
+			s.RequestSave()
 			return false, true
 		}
 	}
@@ -877,6 +881,9 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 		sort.Slice(kept, func(i, j int) bool { return kept[i].StartedAt < kept[j].StartedAt })
 		s.alerts = kept
 	}
+	// 新告警必须落盘：否则重启后「进行中」的告警全部消失，
+	// 恢复通知也无从发出。
+	s.RequestSave()
 	return true, true
 }
 
@@ -894,6 +901,10 @@ func (s *Store) ResolveAlert(ruleID, nodeID string) bool {
 			a.ResolvedAt = now
 			resolved = true
 		}
+	}
+	if resolved {
+		// 恢复状态必须落盘，否则重启后已恢复的告警会「复活」。
+		s.RequestSave()
 	}
 	return resolved
 }
@@ -946,11 +957,17 @@ func (s *Store) DeleteService(id string) bool {
 // SetSetting 保存一段配置（JSON 字符串）。
 func (s *Store) SetSetting(key, value string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.settings == nil {
 		s.settings = map[string]string{}
 	}
+	changed := s.settings[key] != value
 	s.settings[key] = value
+	s.mu.Unlock()
+	// 设置项（主题、通知开关等）必须主动请求落盘：
+	// 只靠 60 秒自动快照时，「保存后立刻重启」会让设置静默回退。
+	if changed {
+		s.RequestSave()
+	}
 }
 
 // GetSetting 读取配置。
@@ -1003,6 +1020,11 @@ func (s *Store) ResolveRuleAlerts(ruleID string) []*model.Alert {
 			cp := *a
 			closed = append(closed, &cp)
 		}
+	}
+	if len(closed) > 0 {
+		// 与 ResolveAlert 同理：不落盘的话重启后这批告警会重新变成「进行中」，
+		// 而引擎已经不会为停用/删除的规则跑恢复分支，形成永不自愈的僵尸告警。
+		s.RequestSave()
 	}
 	return closed
 }

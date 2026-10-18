@@ -33,3 +33,20 @@ func TestPrereleaseOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestParseVersionRejectsEmptyPrerelease 是回归测试。
+//
+// `1.2.3-` 与 `1.2.3-+build` 去掉连字符后预发布标识为空。
+// 接受它们会让「有预发布后缀」这一判断成立，排序与升级判定都变得不可预期。
+func TestParseVersionRejectsEmptyPrerelease(t *testing.T) {
+	for _, bad := range []string{"1.2.3-", "1.2.3-+build", "v1.2.3-"} {
+		if _, ok := parseVersion(bad); ok {
+			t.Errorf("%q 应被拒绝", bad)
+		}
+	}
+	for _, good := range []string{"1.2.3", "1.2.3-alpha.1", "1.2.3+build.5"} {
+		if _, ok := parseVersion(good); !ok {
+			t.Errorf("%q 应被接受", good)
+		}
+	}
+}

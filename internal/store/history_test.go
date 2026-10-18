@@ -293,17 +293,27 @@ func TestHistoryCorruptFileQuarantined(t *testing.T) {
 
 func TestHistoryNewerSchemaRefused(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "history.json"),
-		[]byte(`{"schemaVersion":99,"nodes":{}}`), 0o600); err != nil {
+	path := filepath.Join(dir, "history.json")
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":99,"nodes":{}}`), 0o600); err != nil {
 		t.Fatalf("写入新版本文件: %v", err)
 	}
 	s := New(dir)
 	if s.LoadErr() == nil {
 		t.Fatal("更高 schema 版本应拒绝启动")
 	}
-	baks, _ := filepath.Glob(filepath.Join(dir, "history.json.newer-*"))
-	if len(baks) != 1 {
-		t.Fatalf("新版本文件未隔离: %v", baks)
+	// 文件必须原样保留：改名只能挡住一次启动，第二次启动会「找不到文件」
+	// 并用 24h 原始点重建覆盖，把新版本写入的历史永久丢掉。
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("新版本文件不应被移走: %v", err)
+	}
+	if baks, _ := filepath.Glob(filepath.Join(dir, "history.json.newer-*")); len(baks) != 0 {
+		t.Fatalf("不应改名备份: %v", baks)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":99,"nodes":{}}`), 0o600); err != nil {
+		t.Fatalf("重写新版本文件: %v", err)
+	}
+	if s2 := New(dir); s2.LoadErr() == nil {
+		t.Fatal("第二次启动也必须继续拒绝（防止降级覆盖）")
 	}
 }
 

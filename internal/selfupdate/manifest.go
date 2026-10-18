@@ -311,6 +311,11 @@ func parseVersion(s string) (version, bool) {
 	var v version
 	if i := strings.IndexByte(s, '-'); i >= 0 {
 		v.pre = s[i+1:]
+		if v.pre == "" {
+			// `1.2.3-`、`1.2.3-+build`：连字符后为空。
+			// 接受它会让排序把「有预发布后缀」当成有效版本，语义混乱。
+			return version{}, false
+		}
 		s = s[:i]
 	}
 	parts := strings.Split(s, ".")

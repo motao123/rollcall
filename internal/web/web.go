@@ -50,6 +50,11 @@ type Server struct {
 
 	testMu   sync.Mutex
 	lastTest time.Time
+
+	// notifySaveMu 串行化「写设置 + 应用配置」这一对操作。
+	// 两者是分开的两步：两个并发保存可能交错成「持久化的是 A、内存生效的是 B」，
+	// 重启后行为突然改变。
+	notifySaveMu sync.Mutex
 }
 
 // Config 是服务端的运行参数。
@@ -415,8 +420,12 @@ func acceptsGzip(header string) bool {
 		}
 		for _, p := range fields[1:] {
 			p = strings.TrimSpace(p)
-			if strings.HasPrefix(p, "q=") && strings.TrimPrefix(p, "q=") == "0" {
-				return false
+			// 只比较字面量 "0" 会漏掉 0.0 / 0.00 / 0.000 这几种等价写法，
+			// 而它们明确表示「不接受 gzip」。
+			if v, ok := strings.CutPrefix(p, "q="); ok {
+				if q, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && q <= 0 {
+					return false
+				}
 			}
 		}
 		return true
@@ -531,9 +540,50 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
-	s.st.AddMetrics(node.ID, rep.Host, rep.Metrics)
+	s.st.AddMetrics(node.ID, rep.Host, sanitizeMetrics(rep.Metrics))
 
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// sanitizeMetrics 在入库前修正异常指标。
+//
+// Agent 是可能被攻破的一端，它自报的数字会进入内存聚合、历史快照和
+// Prometheus 输出，因此不能直接信任：
+//   - NaN/Inf 无法被 JSON 编码，一份坏数据会让 history.json 永远写不出去
+//     （Save 持续失败），进而丢掉全部历史；
+//   - 用量大于总量会让 UI 显示 >100% 或负剩余量；
+//   - 负载为负数会污染图表纵轴。
+func sanitizeMetrics(m model.Metrics) model.Metrics {
+	m.CPUPct = clampRange(m.CPUPct, 0, 100)
+	m.Load1 = clampRange(m.Load1, 0, 1e6)
+	m.Load5 = clampRange(m.Load5, 0, 1e6)
+	m.Load15 = clampRange(m.Load15, 0, 1e6)
+	if m.MemUsed > m.MemTotal {
+		m.MemUsed = m.MemTotal
+	}
+	if m.DiskUsed > m.DiskTotal {
+		m.DiskUsed = m.DiskTotal
+	}
+	if m.SwapUsed > m.SwapTotal {
+		m.SwapUsed = m.SwapTotal
+	}
+	if m.TCPConn < 0 {
+		m.TCPConn = 0
+	}
+	if m.Procs < 0 {
+		m.Procs = 0
+	}
+	return m
+}
+
+func clampRange(v, lo, hi float64) float64 {
+	if math.IsNaN(v) || v < lo {
+		return lo
+	}
+	if math.IsInf(v, 1) || v > hi {
+		return hi
+	}
+	return v
 }
 
 // ---------- 视图 ----------
@@ -558,20 +608,17 @@ func (s *Server) buildNodeViews() []model.NodeView {
 			spark = append(spark, model.Point{T: p.TS, V: p.CPUPct})
 		}
 
-		// 视图不携带上报令牌：即使未来有非 JSON 序列化路径也无法泄露。
+		// 视图不携带上报令牌：NodeView 不含 Token 字段，这里只需复制台账字段。
 		// adminNodeView 会显式附加自己需要的 token 字段。
-		cp := *n
-		cp.Token = ""
-		out = append(out, model.NodeView{
-			Node:     cp,
-			Host:     s.st.Host(n.ID),
-			Latest:   m,
-			Online:   state == model.NodeStateOnline,
-			State:    state,
-			LastSeen: ts,
-			Alerts:   alertByNode[n.ID],
-			Spark:    spark,
-		})
+		v := model.NodeMeta(n)
+		v.Host = s.st.Host(n.ID)
+		v.Latest = m
+		v.Online = state == model.NodeStateOnline
+		v.State = state
+		v.LastSeen = ts
+		v.Alerts = alertByNode[n.ID]
+		v.Spark = spark
+		out = append(out, v)
 	}
 	return out
 }
@@ -1154,11 +1201,14 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 			in.ID = store.NewID("n")
 			// 全新节点：服务端生成上报令牌，不接受客户端指定，避免弱令牌
 			in.Token = store.NewToken()
-		} else if old, ok := s.st.Node(in.ID); ok {
-			// 更新已存在节点：**保留原令牌**，否则会静默轮换导致该节点 Agent 立即 401。
-			// 需要轮换时应显式走独立流程，不应由一次普通的台账更新触发。
-			in.Token = old.Token
 		} else {
+			// 客户端指定了 ID：只允许创建新节点。已存在的 ID 必须走 PUT，
+			// 否则一次 POST 会静默改写台账（含到期日、价格），
+			// 而调用方还以为自己只是「新建」。
+			if _, ok := s.st.Node(in.ID); ok {
+				fail(w, 409, "节点 ID 已存在，更新请使用 PUT /api/admin/nodes/"+in.ID)
+				return
+			}
 			in.Token = store.NewToken()
 		}
 		s.st.UpsertNode(&in)
@@ -1358,16 +1408,25 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		cfg, err := notify.Parse(s.st.GetSetting("notify"))
+		warn := ""
 		if err != nil {
-			fail(w, 500, "配置解析失败: "+err.Error())
-			return
+			// 已保存的配置损坏时不能把设置页锁死：GET 一直 500，
+			// 管理员既看不到表单也无法保存新配置，只能去改数据库文件。
+			// 返回空白配置并附上提示，让「重新填写并保存」成为可走的恢复路径。
+			cfg = &notify.Config{}
+			warn = "已保存的通知配置损坏，已回退为空白配置：" + err.Error()
+			log.Printf("通知配置解析失败，返回空白配置: %v", err)
 		}
-		writeJSON(w, 200, map[string]any{
+		out := map[string]any{
 			"notify":    cfg.Redacted(),
 			"channels":  cfg.EnabledChannels(),
 			"defs":      notify.Defs(),
 			"panelLink": s.panelLink,
-		})
+		}
+		if warn != "" {
+			out["warning"] = warn
+		}
+		writeJSON(w, 200, out)
 
 	case http.MethodPost:
 		body := http.MaxBytesReader(w, r.Body, 32<<10)
@@ -1382,11 +1441,12 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, err.Error())
 			return
 		}
-		// 还原前端回传的脱敏占位符
+		// 还原前端回传的脱敏占位符。旧配置损坏时按「首次配置」处理，
+		// 否则上面那条 500/409 会把损坏状态永久固化，再也无法覆盖。
 		old, err := notify.Parse(s.st.GetSetting("notify"))
 		if err != nil {
-			fail(w, 409, "已保存的通知配置已损坏，请重新填写所有密钥后再保存")
-			return
+			log.Printf("已保存的通知配置损坏，按首次配置覆盖: %v", err)
+			old = nil
 		}
 		in.MergeSecrets(old)
 
@@ -1395,8 +1455,11 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, "序列化失败")
 			return
 		}
+		// 落盘与生效必须作为整体：并发保存交错会让两者指向不同配置。
+		s.notifySaveMu.Lock()
 		s.st.SetSetting("notify", string(raw))
 		s.applyNotifyConfig(&in)
+		s.notifySaveMu.Unlock()
 		writeJSON(w, 200, map[string]any{"saved": true, "channels": in.EnabledChannels()})
 
 	default:
@@ -1411,6 +1474,8 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 测试通知会真实外发，限制频率避免被拿来当扫描器或刷屏。
+	// 注意这里只做检查、不记账：配额要在请求体与配置都解析通过后再扣，
+	// 否则一次畸形请求就能让真正的测试在三秒内被 429 挡回。
 	s.testMu.Lock()
 	if wait := 3*time.Second - time.Since(s.lastTest); wait > 0 && !s.lastTest.IsZero() {
 		s.testMu.Unlock()
@@ -1418,7 +1483,6 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, "测试通知过于频繁，请稍后再试")
 		return
 	}
-	s.lastTest = time.Now()
 	s.testMu.Unlock()
 
 	// 可选：只测某个通道（body 里带 channelId）
@@ -1456,6 +1520,10 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "没有可测试的通道，请先添加通道配置")
 		return
 	}
+	// 所有校验都通过，才扣减这 3 秒一次的配额。
+	s.testMu.Lock()
+	s.lastTest = time.Now()
+	s.testMu.Unlock()
 
 	results := notify.Send(testCfg, notify.Message{
 		Title:    "测试通知",
@@ -1675,12 +1743,23 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 			updated.Op = req.Op
 		}
 		if req.Threshold != nil {
-			lo, hi := thresholdRange(updated.Metric)
-			if *req.Threshold < lo || *req.Threshold > hi {
-				fail(w, 400, fmt.Sprintf("threshold 必须在 %v – %v 之间", lo, hi))
-				return
+			// offline 规则的阈值是「失联多少秒」，与 cpu/mem 的量纲无关。
+			// 原来这里借道 thresholdRange 拿到 (0,0)，导致前端整体回传规则时
+			// 被 400 拒绝；改为按秒数区间单独校验，并归一化为 0。
+			if updated.Metric == "offline" {
+				if *req.Threshold < 0 || *req.Threshold > 86400*7 {
+					fail(w, 400, "offline 规则的 threshold 是失联秒数，必须在 0 – 604800 之间")
+					return
+				}
+				updated.Threshold = 0
+			} else {
+				lo, hi := thresholdRange(updated.Metric)
+				if *req.Threshold < lo || *req.Threshold > hi {
+					fail(w, 400, fmt.Sprintf("threshold 必须在 %v – %v 之间", lo, hi))
+					return
+				}
+				updated.Threshold = *req.Threshold
 			}
-			updated.Threshold = *req.Threshold
 		}
 		if req.Duration != nil {
 			if *req.Duration < 0 || *req.Duration > 86400 {

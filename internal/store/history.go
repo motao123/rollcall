@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"time"
@@ -391,13 +392,12 @@ func (s *Store) loadHistory() error {
 		return nil
 	}
 	if snap.SchemaVersion > historySchemaVersion {
-		bak := s.historyPath + ".newer-" + time.Now().Format("20060102-150405")
-		if renameErr := os.Rename(s.historyPath, bak); renameErr != nil {
-			return fmt.Errorf("历史快照 schema 版本 %d 高于当前支持的 %d，且无法备份 %s: %w",
-				snap.SchemaVersion, historySchemaVersion, s.historyPath, renameErr)
-		}
-		return fmt.Errorf("历史快照 schema 版本 %d 高于当前支持的 %d，已备份到 %s；请升级服务端",
-			snap.SchemaVersion, historySchemaVersion, bak)
+		// 不要重命名：改名只能挡住一次启动。
+		// 首次启动改名后返回错误，第二次启动就「找不到文件」→ 用 24h 原始点
+		// 重建并覆盖，把新版本写入的历史永久丢掉。保持文件原样，
+		// 每次启动都拒绝，直到运维升级服务端。
+		return fmt.Errorf("历史快照 schema 版本 %d 高于当前支持的 %d（%s）；请升级服务端后再启动",
+			snap.SchemaVersion, historySchemaVersion, s.historyPath)
 	}
 
 	s.mu.Lock()
@@ -442,8 +442,48 @@ func (s *Store) loadBuckets(r *bucketRing, buckets []historyBucket) {
 	}
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Index < buckets[j].Index })
 	for _, b := range buckets {
-		r.appendLoaded(b)
+		r.appendLoaded(sanitizeBucket(b))
 	}
+}
+
+// maxBucketCount 是单个聚合桶允许的样本数上限。
+// 最细粒度是 1 分钟桶：即使每 30 秒上报一次也只有 2 个样本，
+// 留到百万级已经远超合理范围。
+const maxBucketCount = 1_000_000
+
+// sanitizeBucket 修正从磁盘读入的聚合桶。
+//
+// history.json 可能被手工编辑、被截断写入，或来自字段语义不同的旧版本：
+//   - Count 是增量平均的分母，为 0 时上一次计算的结果会被整体丢弃；
+//   - Count 也用于回填绝对用量总和，超大值经饱和乘法会顶到 uint64 上限；
+//   - 百分比为 NaN/Inf 时 JSON 无法编码，会让整份历史快照永远写不出去。
+func sanitizeBucket(b historyBucket) historyBucket {
+	if b.Count > maxBucketCount {
+		b.Count = maxBucketCount
+	}
+	b.CPUAvg = clampPct(b.CPUAvg)
+	b.CPUMax = clampPct(b.CPUMax)
+	b.MemAvg = clampPct(b.MemAvg)
+	b.DiskAvg = clampPct(b.DiskAvg)
+	if v := float64(b.Load1Avg); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		b.Load1Avg = 0
+	}
+	if b.MemUsedSum > 0 && b.MemTotal == 0 {
+		// 没有总量却有用量总和：无法再计算百分比，标记为不可用重新累计。
+		b.UsageOK = false
+	}
+	return b
+}
+
+func clampPct(v float32) float32 {
+	f := float64(v)
+	if math.IsNaN(f) || f < 0 {
+		return 0
+	}
+	if f > 100 {
+		return 100
+	}
+	return v
 }
 
 func (s *Store) rebuildHistoryFromRawLocked() {
