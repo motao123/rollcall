@@ -72,6 +72,11 @@ func (p Policy) CheckHost(host string) error {
 	if host == "" {
 		return errors.New("目标主机为空")
 	}
+	// IPv6 字面量可能带区域后缀（fe80::1%eth0，URL 中写作 %25eth0）。
+	// net.ParseIP 不认 zone，会把整串当成域名放行，从而绕过地址策略。
+	if i := strings.IndexByte(host, '%'); i >= 0 && strings.Contains(host, ":") {
+		host = host[:i]
+	}
 	if ip := net.ParseIP(host); ip != nil {
 		return p.CheckIP(ip)
 	}

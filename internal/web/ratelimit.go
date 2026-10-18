@@ -153,7 +153,11 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authLevel) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
-		if ok, wait := s.limiter.allow(ip); !ok {
+		// 按「来源 IP + 路由鉴权级别」分桶：否则只读面板或 /metrics 的
+		// 正常轮询成功后，会把同一 IP 上针对 admin token 的失败计数一并
+		// 清零，攻击者每轮试 9 次再等一次正常请求即可无限重试。
+		scope := ip + "|" + levelOf(r).String()
+		if ok, wait := s.limiter.allow(scope); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 			fail(w, http.StatusTooManyRequests, "鉴权失败次数过多，请稍后再试")
 			return
@@ -162,10 +166,10 @@ func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authL
 		h.ServeHTTP(rec, r)
 		switch {
 		case rec.status == http.StatusUnauthorized:
-			s.limiter.fail(ip)
-			log.Printf("鉴权失败 ip=%s method=%s path=%s", ip, r.Method, r.URL.Path)
+			s.limiter.fail(scope)
+			log.Printf("鉴权失败 ip=%s scope=%s method=%s path=%s", ip, scope, r.Method, r.URL.Path)
 		case rec.status > 0 && rec.status < 400 && levelOf(r).protected(s.authUser != ""):
-			s.limiter.succeed(ip)
+			s.limiter.succeed(scope)
 		}
 	})
 }

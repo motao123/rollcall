@@ -123,6 +123,36 @@ func LoadPlugins(dir string) error {
 	return nil
 }
 
+// normalizeField 校验并规范化单个插件字段。
+//
+// type=password 本身就是敏感字段：清单漏写 "secret": true 时
+// Config.Redacted() 不会脱敏，密钥会明文下发前端或写入日志，
+// 因此在这里强制标记。
+func normalizeField(idx int, f Field) (Field, error) {
+	f.Key = strings.TrimSpace(f.Key)
+	f.Label = strings.TrimSpace(f.Label)
+	if !pluginFieldRe.MatchString(f.Key) {
+		return f, fmt.Errorf("第 %d 个字段 key 无效", idx+1)
+	}
+	if f.Label == "" {
+		return f, fmt.Errorf("字段 %s 缺少 label", f.Key)
+	}
+	switch f.Type {
+	case "", "text":
+		f.Type = "text"
+	case "password":
+		f.Type = "password"
+		f.Secret = true
+	case "number", "url":
+	default:
+		return f, fmt.Errorf("字段 %s 的 type 无效: %s", f.Key, f.Type)
+	}
+	if len([]rune(f.Placeholder)) > 200 || len([]rune(f.Hint)) > 200 || len(f.Default) > 128 {
+		return f, fmt.Errorf("字段 %s 的提示文本过长", f.Key)
+	}
+	return f, nil
+}
+
 func loadPluginFile(root, path string) (*plugin, error) {
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -169,29 +199,15 @@ func loadPluginFile(root, path string) (*plugin, error) {
 	seen := map[string]bool{}
 	fields := make([]Field, 0, len(m.Fields))
 	for i, f := range m.Fields {
-		f.Key = strings.TrimSpace(f.Key)
-		f.Label = strings.TrimSpace(f.Label)
-		if !pluginFieldRe.MatchString(f.Key) {
-			return nil, fmt.Errorf("第 %d 个字段 key 无效", i+1)
+		nf, err := normalizeField(i, f)
+		if err != nil {
+			return nil, err
 		}
-		if f.Label == "" {
-			return nil, fmt.Errorf("字段 %s 缺少 label", f.Key)
+		if seen[nf.Key] {
+			return nil, fmt.Errorf("字段 key 重复: %s", nf.Key)
 		}
-		if seen[f.Key] {
-			return nil, fmt.Errorf("字段 key 重复: %s", f.Key)
-		}
-		seen[f.Key] = true
-		switch f.Type {
-		case "", "text":
-			f.Type = "text"
-		case "password", "number", "url":
-		default:
-			return nil, fmt.Errorf("字段 %s 的 type 无效: %s", f.Key, f.Type)
-		}
-		if len([]rune(f.Placeholder)) > 200 || len([]rune(f.Hint)) > 200 || len(f.Default) > 128 {
-			return nil, fmt.Errorf("字段 %s 的提示文本过长", f.Key)
-		}
-		fields = append(fields, f)
+		seen[nf.Key] = true
+		fields = append(fields, nf)
 	}
 
 	cmdPath, err := resolvePluginCommand(root, m.Command)
