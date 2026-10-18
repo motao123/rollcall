@@ -502,12 +502,36 @@ async function viewAlerts() {
   (meta.metrics || []).forEach((m) => { metricMap[m.value] = m; });
   const sevLabel = { critical: '严重', warn: '警告', info: '信息' };
 
+  const silences = d.silences || [];
+  const silenceMap = {};
+  silences.forEach((s) => { silenceMap[s.scope] = s; });
+  const globalSil = silenceMap.global;
+  const nq = d.notify || {};
+  const silLabel = (s) => `至 ${clock(s.until)}${s.reason ? ' · ' + s.reason : ''}`;
+
   $('#view').innerHTML = `
     <div class="kpis" style="margin-bottom:20px">
       ${kpi('活跃告警', d.active, '', d.active ? '需要处理' : '全部恢复')}
       ${kpi('启用规则', (rules || []).filter((r) => r.enabled).length, '', `共 ${(rules || []).length} 条`)}
       ${kpi('历史记录', items.length, '', '最近 200 条')}
+      ${kpi('待投递通知', nq.pending || 0, '条', `失败 ${nq.failed || 0} · 静默拦截 ${nq.suppressed || 0}`)}
     </div>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">通知投递</h2>
+        <span class="section-meta">告警始终记录；静默仅拦截通知</span>
+      </div>
+      <div class="panel panel-pad" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <span class="badge ${globalSil ? 'warn' : 'ok'}">${globalSil ? '全局静默 ' + esc(silLabel(globalSil)) : '全局通知正常'}</span>
+        <span class="section-meta">队列：待投递 ${nq.pending || 0} · 已送达 ${nq.sent || 0} · 失败 ${nq.failed || 0} · 重试 ${nq.retries || 0}</span>
+        <span class="section-meta">${nq.lastSuccess ? '最近成功 ' + clock(nq.lastSuccess) : '尚无成功记录'}</span>
+        ${canManage ? `<div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn tiny" id="globalSilenceBtn">${globalSil ? '调整全局静默' : '全局静默'}</button>
+          ${globalSil ? '<button class="btn tiny danger" id="globalUnsilenceBtn">取消静默</button>' : ''}
+        </div>` : ''}
+      </div>
+    </section>
 
     <section class="section">
       <div class="section-head">
@@ -523,8 +547,9 @@ async function viewAlerts() {
             ? `超过 ${r.duration > 0 ? durText(r.duration) : '即刻'} 未上报`
             : `${esc(m ? m.label : r.metric)} ${r.op === 'lt' ? '低于' : '高于'} ${r.threshold}${unit}`;
           const scope = ruleScopeText(r, nodes);
+          const sil = silenceMap[r.id];
           return `<tr>
-            <td class="strong">${esc(r.name)}</td>
+            <td class="strong">${esc(r.name)}${sil ? ` <span class="badge warn" title="${esc(silLabel(sil))}">通知静默中</span>` : ''}</td>
             <td style="font-size:12px">${cond}${scope ? `<div class="field-hint">${esc(scope)}</div>` : ''}</td>
             <td class="num mono">${durText(r.duration)}</td>
             <td><span class="badge ${r.severity === 'critical' ? 'crit' : r.severity === 'warn' ? 'warn' : 'mute'}">${sevLabel[r.severity] || r.severity}</span></td>
@@ -532,6 +557,7 @@ async function viewAlerts() {
               <label class="switch"><input type="checkbox" data-rule-toggle="${esc(r.id)}"${r.enabled ? ' checked' : ''}><span></span></label>
             </td>
             <td class="num" style="white-space:nowrap">
+              <button class="btn tiny" data-rule-silence="${esc(r.id)}">${sil ? '静默设置' : '静默'}</button>
               <button class="btn tiny" data-rule-edit="${esc(r.id)}">编辑</button>
               <button class="btn tiny danger" data-rule-del="${esc(r.id)}">删除</button>
             </td>
@@ -602,6 +628,99 @@ async function viewAlerts() {
   $('#addRuleBtn').onclick = () => {
     if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
     openRuleDialog(null, meta, nodes);
+  };
+
+  const globalSilenceBtn = $('#globalSilenceBtn');
+  if (globalSilenceBtn) {
+    globalSilenceBtn.onclick = () => {
+      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      openSilenceDialog('global', '全局通知', globalSil);
+    };
+  }
+  const globalUnsilenceBtn = $('#globalUnsilenceBtn');
+  if (globalUnsilenceBtn) {
+    globalUnsilenceBtn.onclick = async () => {
+      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      try {
+        await adminApi('/api/admin/silences/global', { method: 'DELETE' });
+        toast('全局静默已取消');
+        viewAlerts();
+      } catch (e) { toast('取消失败：' + e.message, 'err'); }
+    };
+  }
+  $$('[data-rule-silence]').forEach((b) => {
+    b.onclick = () => {
+      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      const r = (rules || []).find((x) => x.id === b.dataset.ruleSilence);
+      if (r) openSilenceDialog(r.id, r.name, silenceMap[r.id]);
+    };
+  });
+}
+
+// openSilenceDialog 设置或取消某个范围（global / 规则）的通知静默。
+function openSilenceDialog(scope, label, current) {
+  const presets = [
+    { v: '60', t: '1 小时' },
+    { v: '360', t: '6 小时' },
+    { v: '1440', t: '24 小时' },
+    { v: '10080', t: '7 天' },
+  ];
+  const dlg = document.createElement('div');
+  dlg.className = 'modal-mask';
+  dlg.innerHTML = `<div class="modal">
+    <div class="modal-title">${current ? '调整通知静默' : '通知静默'} · ${esc(label)}</div>
+    <p class="modal-sub">静默期间告警仍会正常记录与恢复，只是不再外发通知；到期后自动恢复投递。</p>
+    ${current ? `<p class="modal-sub" style="color:var(--warn)">当前静默至 ${clock(current.until)}${current.reason ? ' · ' + esc(current.reason) : ''}</p>` : ''}
+    <form id="silenceForm" class="form-grid">
+      ${selectField('静默时长', 'minutes', '60', presets)}
+      ${field('备注', 'reason', '', { placeholder: '例如：机房维护、迁移窗口' })}
+      <div class="form-actions">
+        <button class="btn primary" type="submit">${current ? '重新静默' : '开始静默'}</button>
+        ${current ? '<button class="btn danger" type="button" id="silenceRemove">取消静默</button>' : ''}
+        <button class="btn" type="button" id="silenceCancel">关闭</button>
+      </div>
+    </form>
+  </div>`;
+  document.body.appendChild(dlg);
+
+  const close = () => dlg.remove();
+  dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  $('#silenceCancel', dlg).onclick = close;
+
+  const path = '/api/admin/silences/' + encodeURIComponent(scope);
+  const removeBtn = $('#silenceRemove', dlg);
+  if (removeBtn) {
+    removeBtn.onclick = async () => {
+      removeBtn.disabled = true;
+      try {
+        await adminApi(path, { method: 'DELETE' });
+        toast('静默已取消');
+        close();
+        viewAlerts();
+      } catch (e) {
+        toast('取消失败：' + e.message, 'err');
+        removeBtn.disabled = false;
+      }
+    };
+  }
+
+  $('#silenceForm', dlg).onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(e.target);
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      await adminApi(path, {
+        method: 'PUT',
+        body: JSON.stringify({ minutes: Number(d.minutes) || 60, reason: d.reason || '' }),
+      });
+      toast('静默已生效');
+      close();
+      viewAlerts();
+    } catch (err) {
+      toast('设置失败：' + err.message, 'err');
+      btn.disabled = false;
+    }
   };
 }
 

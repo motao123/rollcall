@@ -52,7 +52,9 @@ type Message struct {
 	Severity string  `json:"severity"`
 	NodeName string  `json:"nodeName"`
 	NodeID   string  `json:"nodeId"`
+	RuleID   string  `json:"ruleId"`
 	RuleName string  `json:"ruleName"`
+	AlertID  string  `json:"alertId"`
 	Value    float64 `json:"value"`
 	Resolved bool    `json:"resolved"`
 	TS       int64   `json:"ts"`

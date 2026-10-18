@@ -87,7 +87,9 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 		Severity: a.Severity,
 		NodeName: a.NodeName,
 		NodeID:   a.NodeID,
+		RuleID:   a.RuleID,
 		RuleName: a.RuleName,
+		AlertID:  a.ID,
 		Value:    a.Value,
 		Resolved: resolved,
 		TS:       time.Now().Unix(),
@@ -157,18 +159,22 @@ func (e *Engine) Evaluate() {
 			if !breached {
 				e.mu.Lock()
 				delete(e.since, key)
-				_, wasActive := e.active[key]
+				prev, wasActive := e.active[key]
 				delete(e.active, key)
 				e.mu.Unlock()
 
 				resolved := e.st.ResolveAlert(rule.ID, n.ID)
 				if wasActive || resolved {
-					e.send(&model.Alert{
+					a := &model.Alert{
 						RuleID: rule.ID, RuleName: rule.Name,
 						NodeID: n.ID, NodeName: n.Name,
 						Severity: rule.Severity, Value: val,
 						Message: fmt.Sprintf("%s 的「%s」已恢复", n.Name, rule.Name),
-					}, true)
+					}
+					if prev != nil {
+						a.ID = prev.ID
+					}
+					e.send(a, true)
 				}
 				continue
 			}

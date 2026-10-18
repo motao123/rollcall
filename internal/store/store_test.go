@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/motao/rollcall/internal/model"
 )
@@ -272,8 +273,8 @@ func TestSaveWritesSchemaVersion(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	raw := readSnapshotFile(t, filepath.Join(dir, "state.json"))
-	if !contains(string(raw), `"schemaVersion":1`) {
-		t.Fatalf("快照缺少 schemaVersion=1: %s", raw)
+	if !contains(string(raw), `"schemaVersion":2`) {
+		t.Fatalf("快照缺少 schemaVersion=2: %s", raw)
 	}
 }
 
@@ -324,5 +325,160 @@ func TestConcurrentSaveProducesValidSnapshot(t *testing.T) {
 	}
 	if got, ok := re.Node("n_save1"); !ok || got.Token != "tok-1" {
 		t.Fatalf("令牌未正确恢复: %+v", got)
+	}
+}
+
+// TestNotifyQueuePersistsAndRecovers 验证投递任务与累计统计跨重启保留。
+func TestNotifyQueuePersistsAndRecovers(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	now := time.Now().Unix()
+	job := &model.NotifyJob{
+		ID: "nj_1", RuleID: "r_cpu", NodeID: "n1", Severity: "critical",
+		Title: "CPU 高", CreatedAt: now, NextAttemptAt: now, Status: model.NotifyPending,
+	}
+	if !st.EnqueueNotifyJob(job) {
+		t.Fatal("入队失败")
+	}
+	if got := st.NotifyStats().Pending; got != 1 {
+		t.Fatalf("pending = %d，期望 1", got)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+
+	re := New(dir)
+	if err := re.LoadErr(); err != nil {
+		t.Fatalf("重新载入失败: %v", err)
+	}
+	if got := re.NotifyStats().Pending; got != 1 {
+		t.Fatalf("重启后 pending = %d，期望 1", got)
+	}
+	claimed := re.ClaimNotifyJobs(now, 10)
+	if len(claimed) != 1 || claimed[0].ID != "nj_1" {
+		t.Fatalf("到期任务领取异常: %+v", claimed)
+	}
+	if !re.NotifyJobSent("nj_1", "", now) {
+		t.Fatal("标记送达失败")
+	}
+	if s := re.NotifyStats(); s.Pending != 0 || s.Sent != 1 || s.LastSuccess != now {
+		t.Fatalf("统计异常: %+v", s)
+	}
+	if err := re.Save(); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+	re2 := New(dir)
+	if s := re2.NotifyStats(); s.Sent != 1 || s.LastSuccess != now || s.Pending != 0 {
+		t.Fatalf("重启后统计异常: %+v", s)
+	}
+}
+
+// TestClaimNotifyJobsHonorsLimitAndLease 验证领取上限与租约，
+// 被领取的任务不会在同一时刻被再次领取。
+func TestClaimNotifyJobsHonorsLimitAndLease(t *testing.T) {
+	st := New(t.TempDir())
+	now := time.Now().Unix()
+	for _, id := range []string{"nj_1", "nj_2", "nj_3"} {
+		if !st.EnqueueNotifyJob(&model.NotifyJob{
+			ID: id, Severity: "warn", CreatedAt: now, NextAttemptAt: now, Status: model.NotifyPending,
+		}) {
+			t.Fatalf("入队 %s 失败", id)
+		}
+	}
+	first := st.ClaimNotifyJobs(now, 2)
+	if len(first) != 2 {
+		t.Fatalf("首次领取 %d 条，期望 2", len(first))
+	}
+	second := st.ClaimNotifyJobs(now, 10)
+	if len(second) != 1 {
+		t.Fatalf("第二次领取 %d 条，期望剩余 1", len(second))
+	}
+	if st.NotifyStats().Pending != 3 {
+		t.Fatal("领取不应改变 pending 统计")
+	}
+	later := st.ClaimNotifyJobs(now+int64(NotifyLease/time.Second)+1, 10)
+	if len(later) != 3 {
+		t.Fatalf("租约到期后应可重新领取 3 条，实际 %d", len(later))
+	}
+}
+
+// TestSilenceScopesPrecedenceAndExpiry 验证全局优先、规则级回退与过期清理。
+func TestSilenceScopesPrecedenceAndExpiry(t *testing.T) {
+	st := New(t.TempDir())
+	now := time.Now().Unix()
+	st.SetSilence(&model.Silence{Scope: "r_cpu", Until: now + 600, Reason: "维护"})
+	if scope, reason, ok := st.SilenceFor("r_cpu", now); !ok || scope != "r_cpu" || reason != "维护" {
+		t.Fatalf("规则静默未生效: %s %s %v", scope, reason, ok)
+	}
+	if _, _, ok := st.SilenceFor("r_mem", now); ok {
+		t.Fatal("其他规则不应被静默")
+	}
+	st.SetSilence(&model.Silence{Scope: "global", Until: now + 60})
+	if scope, _, ok := st.SilenceFor("r_cpu", now); !ok || scope != "global" {
+		t.Fatalf("全局静默应优先，实际 %s %v", scope, ok)
+	}
+	if _, _, ok := st.SilenceFor("r_cpu", now+61); !ok {
+		t.Fatal("全局过期后应回退到规则静默")
+	}
+	if _, _, ok := st.SilenceFor("r_cpu", now+601); ok {
+		t.Fatal("全部过期后不应静默")
+	}
+	st.PruneNotify(now + 601)
+	if len(st.Silences(now+601)) != 0 {
+		t.Fatal("过期静默应被清理")
+	}
+}
+
+// TestNotifyJobPruneKeepsPendingAndPersistsSilence 验证清理只淘汰已结束任务，
+// 且静默期随快照持久化。
+func TestNotifyJobPruneKeepsPendingAndPersistsSilence(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	now := time.Now().Unix()
+	old := now - int64(NotifyJobRetention/time.Second) - 10
+	st.EnqueueNotifyJob(&model.NotifyJob{
+		ID: "nj_old_done", Status: model.NotifySent, CreatedAt: old, SentAt: old,
+	})
+	st.EnqueueNotifyJob(&model.NotifyJob{
+		ID: "nj_old_pending", Status: model.NotifyPending, CreatedAt: old, NextAttemptAt: now,
+	})
+	st.SetSilence(&model.Silence{Scope: "global", Until: now + 3600, Reason: "演练"})
+	st.PruneNotify(now)
+	if s := st.NotifyStats(); s.Pending != 1 {
+		t.Fatalf("清理后 pending = %d，期望 1（未完成任务必须保留）", s.Pending)
+	}
+	if got := st.Silences(now); len(got) != 1 || got[0].Reason != "演练" {
+		t.Fatalf("静默不应被清理: %+v", got)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+	re := New(dir)
+	if got := re.Silences(now); len(got) != 1 || got[0].Scope != "global" {
+		t.Fatalf("静默未持久化: %+v", got)
+	}
+	if s := re.NotifyStats(); s.Pending != 1 {
+		t.Fatalf("未完成任务未持久化: %+v", s)
+	}
+}
+
+// TestDeleteRuleSuppressesPendingJobs 验证删除规则后不会继续投递其通知。
+func TestDeleteRuleSuppressesPendingJobs(t *testing.T) {
+	st := New(t.TempDir())
+	st.UpsertRule(&model.AlertRule{ID: "r_x", Name: "x", Enabled: true})
+	now := time.Now().Unix()
+	st.EnqueueNotifyJob(&model.NotifyJob{
+		ID: "nj_x", RuleID: "r_x", Status: model.NotifyPending, CreatedAt: now, NextAttemptAt: now,
+	})
+	st.SetSilence(&model.Silence{Scope: "r_x", Until: now + 600})
+	st.DeleteRule("r_x")
+	if got := st.ClaimNotifyJobs(now, 10); len(got) != 0 {
+		t.Fatalf("已删规则的任务不应继续投递: %+v", got)
+	}
+	if s := st.NotifyStats(); s.Suppressed != 1 {
+		t.Fatalf("应累计 1 条静默拦截，实际 %+v", s)
+	}
+	if _, _, ok := st.SilenceFor("r_x", now); ok {
+		t.Fatal("规则删除后其静默应一并清理")
 	}
 }

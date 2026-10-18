@@ -171,6 +171,10 @@ func TestRestartDoesNotDuplicateActiveAlertNotification(t *testing.T) {
 	if len(sent) != 1 || !sent[0].Resolved {
 		t.Fatalf("恢复时应发送 1 条恢复通知，实际 %+v", sent)
 	}
+	// 恢复通知必须关联持久化告警，便于与告警历史对应。
+	if sent[0].AlertID != "a_old" || sent[0].RuleID != "r_off" || sent[0].NodeID != "n1" {
+		t.Fatalf("恢复通知的关联字段异常: %+v", sent[0])
+	}
 }
 
 // TestRuleScopeLimitsAndResolvesAlerts 验证定向规则只评估范围内节点，

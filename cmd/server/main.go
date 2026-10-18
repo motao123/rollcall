@@ -22,6 +22,7 @@ import (
 
 	"github.com/motao/rollcall/internal/alert"
 	"github.com/motao/rollcall/internal/notify"
+	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/probe"
 	"github.com/motao/rollcall/internal/store"
 	"github.com/motao/rollcall/internal/version"
@@ -199,13 +200,16 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	ob := outbox.New(st, outbox.DefaultConfig())
 	ws := web.New(st, runner, engine, web.Config{
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass, PanelLink: *panelLink,
-		CNYRate: *cnyRate,
+		CNYRate: *cnyRate, Outbox: ob,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)
 	}
+	ob.Start()
+	defer ob.Stop()
 	srv.Handler = ws.Handler()
 
 	scheme := "http"
@@ -238,6 +242,7 @@ func main() {
 		if err := srv.Shutdown(shutCtx); err != nil {
 			log.Printf("HTTP 服务关闭超时: %v", err)
 		}
+		ob.Stop()
 		if err := st.Save(); err != nil {
 			log.Printf("退出前保存失败: %v", err)
 		} else {

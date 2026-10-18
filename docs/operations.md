@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.3.0
+make linux VERSION=v1.4.0
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version

@@ -108,10 +108,16 @@ type Store struct {
 	rules    map[string]*model.AlertRule
 	alerts   []*model.Alert
 	settings map[string]string
-	path     string
-	dirty    bool
-	loadErr  error
-	saveMu   sync.Mutex
+
+	notifyJobs   map[string]*model.NotifyJob
+	notifyStats  model.NotifyStats
+	notifySilent map[string]*model.Silence // scope(global|ruleID) -> 静默期
+
+	path    string
+	dirty   bool
+	loadErr error
+	saveMu  sync.Mutex
+	saveReq chan struct{}
 }
 
 // New 创建并尝试从磁盘恢复状态。
@@ -120,14 +126,17 @@ type Store struct {
 // 而是把损坏文件改名隔离，并通过 LoadErr 报告，由调用方决定是否退出。
 func New(dataDir string) *Store {
 	s := &Store{
-		nodes:    map[string]*model.Node{},
-		hosts:    map[string]model.HostInfo{},
-		series:   map[string]*Ring{},
-		services: map[string]*model.Service{},
-		svcRes:   map[string]*Ring{},
-		rules:    map[string]*model.AlertRule{},
-		settings: map[string]string{},
-		path:     filepath.Join(dataDir, "state.json"),
+		nodes:        map[string]*model.Node{},
+		hosts:        map[string]model.HostInfo{},
+		series:       map[string]*Ring{},
+		services:     map[string]*model.Service{},
+		svcRes:       map[string]*Ring{},
+		rules:        map[string]*model.AlertRule{},
+		settings:     map[string]string{},
+		notifyJobs:   map[string]*model.NotifyJob{},
+		notifySilent: map[string]*model.Silence{},
+		path:         filepath.Join(dataDir, "state.json"),
+		saveReq:      make(chan struct{}, 1),
 	}
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		s.loadErr = fmt.Errorf("创建数据目录 %s: %w", dataDir, err)
@@ -181,7 +190,7 @@ func decodeSnapshot(b []byte) ([]byte, error) {
 // SnapshotSchemaVersion 是当前快照结构版本。
 // 旧版快照没有该字段（解析为 0），仍按兼容格式载入；
 // 高于当前版本的文件必须显式拒绝，避免新结构被旧程序静默读成零值。
-const SnapshotSchemaVersion = 1
+const SnapshotSchemaVersion = 2
 
 type snapshot struct {
 	SchemaVersion int                         `json:"schemaVersion"`
@@ -194,9 +203,12 @@ type snapshot struct {
 	Alerts        []*model.Alert              `json:"alerts"`
 	// Tokens 单独持久化：model.Node.Token 标了 json:"-"，
 	// 不会随节点一起写入，否则重启后 Agent 全部认证失败。
-	Tokens   map[string]string `json:"tokens"`
-	Settings map[string]string `json:"settings"`
-	SavedAt  int64             `json:"savedAt"`
+	Tokens       map[string]string         `json:"tokens"`
+	Settings     map[string]string         `json:"settings"`
+	NotifyJobs   []*model.NotifyJob        `json:"notifyJobs,omitempty"`
+	NotifyStats  model.NotifyStats         `json:"notifyStats"`
+	NotifySilent map[string]*model.Silence `json:"notifySilences,omitempty"`
+	SavedAt      int64                     `json:"savedAt"`
 }
 
 func (s *Store) load() error {
@@ -275,6 +287,19 @@ func (s *Store) load() error {
 			s.alerts = append(s.alerts, a)
 		}
 	}
+	for _, j := range snap.NotifyJobs {
+		if j == nil || j.ID == "" {
+			continue
+		}
+		s.notifyJobs[j.ID] = j
+	}
+	s.notifyStats = snap.NotifyStats
+	s.notifyStats.Pending = 0 // Pending 由当前任务实时计算，不信任快照值
+	for scope, sl := range snap.NotifySilent {
+		if sl != nil && scope != "" {
+			s.notifySilent[scope] = sl
+		}
+	}
 	if snap.Settings != nil {
 		s.settings = snap.Settings
 	}
@@ -304,6 +329,9 @@ func (s *Store) Save() error {
 		SvcRes:        make(map[string][]model.Metrics, len(s.svcRes)),
 		Tokens:        make(map[string]string, len(s.nodes)),
 		Settings:      make(map[string]string, len(s.settings)),
+		NotifyJobs:    make([]*model.NotifyJob, 0, len(s.notifyJobs)),
+		NotifyStats:   s.notifyStats,
+		NotifySilent:  make(map[string]*model.Silence, len(s.notifySilent)),
 		SavedAt:       time.Now().Unix(),
 	}
 	// 以下均为值类型或纯值字段结构体，解引用即得到独立副本
@@ -332,6 +360,20 @@ func (s *Store) Save() error {
 	for k, v := range s.settings {
 		snap.Settings[k] = v
 	}
+	for _, j := range s.notifyJobs {
+		cp := *j
+		snap.NotifyJobs = append(snap.NotifyJobs, &cp)
+	}
+	sort.Slice(snap.NotifyJobs, func(i, j int) bool {
+		if snap.NotifyJobs[i].CreatedAt != snap.NotifyJobs[j].CreatedAt {
+			return snap.NotifyJobs[i].CreatedAt < snap.NotifyJobs[j].CreatedAt
+		}
+		return snap.NotifyJobs[i].ID < snap.NotifyJobs[j].ID
+	})
+	for scope, sl := range s.notifySilent {
+		cp := *sl
+		snap.NotifySilent[scope] = &cp
+	}
 	for k, r := range s.series {
 		snap.Series[k] = r.Slice()
 	}
@@ -359,16 +401,47 @@ func (s *Store) Save() error {
 }
 
 // StartAutoSave 启动后台快照。
+//
+// 除固定间隔外，还监听 RequestSave：通知入队、投递结果、静默变更等
+// 关键状态会请求尽快落盘，避免重启后丢任务。请求按 2 秒窗口合并，
+// 告警风暴时不会对每个任务各做一次全量快照。
 func (s *Store) StartAutoSave(every time.Duration) {
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for range t.C {
-			if err := s.Save(); err != nil {
-				log.Printf("自动保存失败: %v", err)
-			}
+			s.saveLogged()
 		}
 	}()
+	go func() {
+		for range s.saveReq {
+			time.Sleep(2 * time.Second)
+			// 合并窗口内到达的后续请求；本窗口之后的请求留给下一轮。
+		drain:
+			for {
+				select {
+				case <-s.saveReq:
+				default:
+					break drain
+				}
+			}
+			s.saveLogged()
+		}
+	}()
+}
+
+// RequestSave 请求尽快落盘。非阻塞，可安全用于高频路径。
+func (s *Store) RequestSave() {
+	select {
+	case s.saveReq <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Store) saveLogged() {
+	if err := s.Save(); err != nil {
+		log.Printf("自动保存失败: %v", err)
+	}
 }
 
 // ---------- 节点 ----------
@@ -417,6 +490,16 @@ func (s *Store) DeleteNode(id string) {
 			a.ResolvedAt = now
 		}
 	}
+	for _, j := range s.notifyJobs {
+		if j.NodeID == id && j.Status == model.NotifyPending {
+			j.Status = model.NotifySuppressed
+			j.SuppressedBy = "node:" + id
+			j.LastError = "节点已删除"
+			j.NextAttemptAt = 0
+			s.notifyStats.Suppressed++
+		}
+	}
+	s.RequestSave()
 }
 
 func (s *Store) Nodes() []*model.Node {
@@ -660,6 +743,8 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 		if ex.RuleID == a.RuleID && ex.NodeID == a.NodeID && ex.ResolvedAt == 0 {
 			ex.Value = a.Value
 			ex.Message = a.Message
+			// 回填持久化告警的真实 ID，通知任务据此关联告警记录。
+			a.ID = ex.ID
 			return false, true
 		}
 	}
@@ -771,12 +856,24 @@ func (s *Store) DeleteRule(id string) bool {
 		return false
 	}
 	delete(s.rules, id)
+	delete(s.notifySilent, id)
 	now := time.Now().Unix()
 	for _, a := range s.alerts {
 		if a.RuleID == id && a.ResolvedAt == 0 {
 			a.ResolvedAt = now
 		}
 	}
+	// 规则已删除，尚未投递的通知不再有意义，避免管理员收到已撤销规则的告警。
+	for _, j := range s.notifyJobs {
+		if j.RuleID == id && j.Status == model.NotifyPending {
+			j.Status = model.NotifySuppressed
+			j.SuppressedBy = id
+			j.LastError = "规则已删除"
+			j.NextAttemptAt = 0
+			s.notifyStats.Suppressed++
+		}
+	}
+	s.RequestSave()
 	return true
 }
 
@@ -795,4 +892,285 @@ func (s *Store) ResolveRuleAlerts(ruleID string) int {
 		}
 	}
 	return n
+}
+
+// ---------- 通知队列与静默 ----------
+
+const (
+	// MaxNotifyJobs 限制内存/快照中的任务总数，防止异常场景无限增长。
+	MaxNotifyJobs = 2000
+	// MaxFinalNotifyJobs 是保留的已结束任务数（sent/failed/suppressed）。
+	MaxFinalNotifyJobs = 500
+	// NotifyJobRetention 是已结束任务的保留时长。
+	NotifyJobRetention = 7 * 24 * time.Hour
+	// NotifyLease 是任务被领取后的租约：进程崩溃时任务在租约到期后重新变为可投递。
+	NotifyLease = 5 * time.Minute
+)
+
+// EnqueueNotifyJob 写入一条投递任务。队列已满且无法清理时返回 false。
+// 任务状态为 suppressed 时会同步累计静默计数（用于入队即静默的场景）。
+func (s *Store) EnqueueNotifyJob(j *model.NotifyJob) bool {
+	s.mu.Lock()
+	if j.ID == "" || s.notifyJobs[j.ID] != nil {
+		s.mu.Unlock()
+		return false
+	}
+	if len(s.notifyJobs) >= MaxNotifyJobs {
+		s.pruneNotifyLocked(time.Now().Unix())
+	}
+	if len(s.notifyJobs) >= MaxNotifyJobs {
+		s.mu.Unlock()
+		log.Printf("通知队列已满（%d 条），拒绝新任务: %s", MaxNotifyJobs, j.Title)
+		return false
+	}
+	cp := *j
+	if cp.Status == model.NotifySuppressed {
+		s.notifyStats.Suppressed++
+	}
+	s.notifyJobs[cp.ID] = &cp
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// ClaimNotifyJobs 领取到期的待投递任务，并把 NextAttemptAt 推到租约到期时间，
+// 避免多轮调度或进程内重复投递。返回的是副本。
+func (s *Store) ClaimNotifyJobs(now int64, limit int) []*model.NotifyJob {
+	if limit <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	due := make([]*model.NotifyJob, 0)
+	for _, j := range s.notifyJobs {
+		if j.Status == model.NotifyPending && j.NextAttemptAt <= now {
+			due = append(due, j)
+		}
+	}
+	sort.Slice(due, func(i, k int) bool {
+		if due[i].NextAttemptAt != due[k].NextAttemptAt {
+			return due[i].NextAttemptAt < due[k].NextAttemptAt
+		}
+		return due[i].CreatedAt < due[k].CreatedAt
+	})
+	if len(due) > limit {
+		due = due[:limit]
+	}
+	out := make([]*model.NotifyJob, 0, len(due))
+	leaseUntil := now + int64(NotifyLease/time.Second)
+	for _, j := range due {
+		j.NextAttemptAt = leaseUntil
+		cp := *j
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// NextNotifyAt 返回最近一条待投递任务的计划时间。
+func (s *Store) NextNotifyAt() (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var next int64
+	found := false
+	for _, j := range s.notifyJobs {
+		if j.Status != model.NotifyPending {
+			continue
+		}
+		if !found || j.NextAttemptAt < next {
+			next = j.NextAttemptAt
+			found = true
+		}
+	}
+	return next, found
+}
+
+// NotifyJobSent 标记投递成功（任一通道成功即算送达，避免重试造成重复刷屏）。
+func (s *Store) NotifyJobSent(id, lastError string, now int64) bool {
+	s.mu.Lock()
+	j, ok := s.notifyJobs[id]
+	if !ok || j.Status != model.NotifyPending {
+		s.mu.Unlock()
+		return false
+	}
+	j.Attempts++
+	j.Status = model.NotifySent
+	j.SentAt = now
+	j.LastError = lastError
+	j.NextAttemptAt = 0
+	s.notifyStats.Sent++
+	s.notifyStats.LastSuccess = now
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// NotifyJobRetry 标记本轮失败并安排下一次重试。
+func (s *Store) NotifyJobRetry(id, lastError string, nextAt, now int64) bool {
+	s.mu.Lock()
+	j, ok := s.notifyJobs[id]
+	if !ok || j.Status != model.NotifyPending {
+		s.mu.Unlock()
+		return false
+	}
+	j.Attempts++
+	j.LastError = lastError
+	j.NextAttemptAt = nextAt
+	j.Status = model.NotifyPending
+	s.notifyStats.Retries++
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// NotifyJobFailed 标记重试耗尽的最终失败。
+func (s *Store) NotifyJobFailed(id, lastError string, now int64) bool {
+	s.mu.Lock()
+	j, ok := s.notifyJobs[id]
+	if !ok || j.Status != model.NotifyPending {
+		s.mu.Unlock()
+		return false
+	}
+	j.Attempts++
+	j.Status = model.NotifyFailed
+	j.LastError = lastError
+	j.NextAttemptAt = 0
+	s.notifyStats.Failed++
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// NotifyJobSuppressed 标记任务因静默或配置停用未投递。
+func (s *Store) NotifyJobSuppressed(id, by, reason string, now int64) bool {
+	s.mu.Lock()
+	j, ok := s.notifyJobs[id]
+	if !ok || j.Status != model.NotifyPending {
+		s.mu.Unlock()
+		return false
+	}
+	j.Status = model.NotifySuppressed
+	j.SuppressedBy = by
+	j.LastError = reason
+	j.NextAttemptAt = 0
+	s.notifyStats.Suppressed++
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// NotifyStats 返回队列深度与累计投递统计。
+func (s *Store) NotifyStats() model.NotifyStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := s.notifyStats
+	for _, j := range s.notifyJobs {
+		if j.Status == model.NotifyPending {
+			st.Pending++
+		}
+	}
+	return st
+}
+
+// PruneNotify 清理过期/超量的已结束任务与过期静默，不影响未完成任务。
+func (s *Store) PruneNotify(now int64) {
+	s.mu.Lock()
+	s.pruneNotifyLocked(now)
+	s.mu.Unlock()
+}
+
+func (s *Store) pruneNotifyLocked(now int64) {
+	retain := int64(NotifyJobRetention / time.Second)
+	for id, j := range s.notifyJobs {
+		if j.Status == model.NotifyPending {
+			continue
+		}
+		ts := j.CreatedAt
+		if j.SentAt > ts {
+			ts = j.SentAt
+		}
+		if ts > 0 && now-ts > retain {
+			delete(s.notifyJobs, id)
+		}
+	}
+	// 已结束任务按时间倒序保留最近 N 条；未完成任务永不淘汰。
+	final := make([]*model.NotifyJob, 0, len(s.notifyJobs))
+	for _, j := range s.notifyJobs {
+		if j.Status != model.NotifyPending {
+			final = append(final, j)
+		}
+	}
+	if len(final) > MaxFinalNotifyJobs {
+		sort.Slice(final, func(i, k int) bool {
+			if final[i].CreatedAt != final[k].CreatedAt {
+				return final[i].CreatedAt > final[k].CreatedAt
+			}
+			return final[i].ID > final[k].ID
+		})
+		for _, j := range final[MaxFinalNotifyJobs:] {
+			delete(s.notifyJobs, j.ID)
+		}
+	}
+	for scope, sl := range s.notifySilent {
+		if sl.Until > 0 && sl.Until <= now {
+			delete(s.notifySilent, scope)
+		}
+	}
+}
+
+// SetSilence 新增或覆盖某个范围（global / 规则 ID）的静默期。
+func (s *Store) SetSilence(sl *model.Silence) {
+	s.mu.Lock()
+	s.notifySilent[sl.Scope] = &model.Silence{
+		Scope: sl.Scope, Until: sl.Until, Reason: sl.Reason, CreatedAt: sl.CreatedAt,
+	}
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
+// DeleteSilence 取消某个范围的静默，返回是否存在。
+func (s *Store) DeleteSilence(scope string) bool {
+	s.mu.Lock()
+	_, ok := s.notifySilent[scope]
+	delete(s.notifySilent, scope)
+	s.mu.Unlock()
+	if ok {
+		s.RequestSave()
+	}
+	return ok
+}
+
+// Silences 返回当前仍生效的静默期。
+func (s *Store) Silences(now int64) []*model.Silence {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.Silence, 0, len(s.notifySilent))
+	for _, sl := range s.notifySilent {
+		if sl.Until <= now {
+			continue
+		}
+		cp := *sl
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Scope != out[j].Scope {
+			return out[i].Scope < out[j].Scope
+		}
+		return out[i].Until < out[j].Until
+	})
+	return out
+}
+
+// SilenceFor 返回规则在指定时间生效的静默范围：全局优先，其次规则级。
+func (s *Store) SilenceFor(ruleID string, now int64) (scope, reason string, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if sl, exists := s.notifySilent["global"]; exists && sl.Until > now {
+		return "global", sl.Reason, true
+	}
+	if ruleID != "" {
+		if sl, exists := s.notifySilent[ruleID]; exists && sl.Until > now {
+			return ruleID, sl.Reason, true
+		}
+	}
+	return "", "", false
 }

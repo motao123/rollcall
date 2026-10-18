@@ -20,6 +20,7 @@ import (
 	"github.com/motao/rollcall/internal/alert"
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/notify"
+	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/probe"
 	"github.com/motao/rollcall/internal/store"
 )
@@ -29,17 +30,17 @@ var assets embed.FS
 
 // Server 汇总所有依赖。
 type Server struct {
-	st            *store.Store
-	runner        *probe.Runner
-	engine        *alert.Engine
-	adminToken    string
-	authUser      string
-	authPass      string
-	panelLink     string
-	cnyRate       float64
-	limiter       *authFailureLimiter
-	notifyLimiter *sendLimiter
-	notifyErr     error
+	st         *store.Store
+	runner     *probe.Runner
+	engine     *alert.Engine
+	adminToken string
+	authUser   string
+	authPass   string
+	panelLink  string
+	cnyRate    float64
+	limiter    *authFailureLimiter
+	outbox     *outbox.Manager
+	notifyErr  error
 
 	testMu   sync.Mutex
 	lastTest time.Time
@@ -50,8 +51,9 @@ type Config struct {
 	AdminToken string // 管理 API 令牌（为空则不开放管理 API）
 	AuthUser   string // Basic Auth 用户名（为空则不启用）
 	AuthPass   string
-	PanelLink  string  // 面板对外地址，拼进通知正文
-	CNYRate    float64 // CNY→USD 折算汇率，<=0 时使用 7.2
+	PanelLink  string          // 面板对外地址，拼进通知正文
+	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
+	Outbox     *outbox.Manager // 通知投递队列；nil 时不外发通知
 }
 
 func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server {
@@ -62,7 +64,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
 		panelLink: cfg.PanelLink, cnyRate: rate,
-		limiter: newAuthFailureLimiter(), notifyLimiter: newSendLimiter(maxConcurrentNotify)}
+		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox}
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
 		srv.notifyErr = err
@@ -75,55 +77,22 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 // NotifyErr 返回启动时通知配置的解析错误，供 main 记录日志。
 func (s *Server) NotifyErr() error { return s.notifyErr }
 
-const maxConcurrentNotify = 8
-
-// sendLimiter 限制通知投递的并发数。
-// 大量告警同时爆发时（如整机房断网），不能无限起 goroutine 做外发 HTTP；
-// 队列满时宁可丢弃并记录，也不阻塞告警评估循环。
-type sendLimiter struct {
-	sem chan struct{}
-}
-
-func newSendLimiter(n int) *sendLimiter {
-	if n <= 0 {
-		n = maxConcurrentNotify
-	}
-	return &sendLimiter{sem: make(chan struct{}, n)}
-}
-
-func (l *sendLimiter) try(fn func()) bool {
-	select {
-	case l.sem <- struct{}{}:
-		go func() {
-			defer func() { <-l.sem }()
-			fn()
-		}()
-		return true
-	default:
-		return false
-	}
-}
-
-// applyNotifyConfig 把通知配置同步到告警引擎。
+// applyNotifyConfig 把通知配置同步到投递队列与告警引擎。
+// 引擎回调只做入队；真正的 HTTP 投递由 Outbox 的有界 worker 完成。
 func (s *Server) applyNotifyConfig(cfg *notify.Config) {
+	if s.outbox != nil {
+		s.outbox.SetConfig(cfg)
+	}
 	if s.engine == nil {
 		return
 	}
 	s.engine.SetRepeat(cfg.RepeatInterval)
 	s.engine.SetLink(s.panelLink)
-	if !cfg.Enabled || len(cfg.EnabledChannels()) == 0 {
-		s.engine.SetNotifier(nil)
+	if s.outbox != nil {
+		s.engine.SetNotifier(s.outbox.Enqueue)
 		return
 	}
-	snapshot := *cfg
-	s.engine.SetNotifier(func(m notify.Message) {
-		if !snapshot.ShouldSend(m.Severity) {
-			return
-		}
-		if !s.notifyLimiter.try(func() { notify.Send(&snapshot, m) }) {
-			log.Printf("通知并发已达上限 %d，丢弃一条 %s 级通知: %s", maxConcurrentNotify, m.Severity, m.Title)
-		}
-	})
+	s.engine.SetNotifier(nil)
 }
 
 // Handler 返回配置好的路由。
@@ -156,6 +125,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/admin/rules", s.handleAdminRules)
 	mux.HandleFunc("/api/admin/rules/", s.handleAdminRuleByID)
 	mux.HandleFunc("/api/admin/rule-meta", s.handleRuleMeta)
+	mux.HandleFunc("/api/admin/silences", s.handleAdminSilences)
+	mux.HandleFunc("/api/admin/silences/", s.handleAdminSilenceByScope)
 	mux.HandleFunc("/api/export/", s.handleExport)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 
@@ -498,9 +469,13 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().Unix()
 	writeJSON(w, 200, map[string]any{
-		"active": s.st.ActiveAlertCount(),
-		"items":  s.st.Alerts(200),
+		"active":   s.st.ActiveAlertCount(),
+		"items":    s.st.Alerts(200),
+		"silences": s.st.Silences(now),
+		"notify":   s.st.NotifyStats(),
+		"now":      now,
 	})
 }
 

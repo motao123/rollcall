@@ -242,6 +242,23 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	help("rollcall_alerts_active", "Currently active alerts.", "gauge")
 	gauge("rollcall_alerts_active", nil, float64(s.st.ActiveAlertCount()))
 
+	// 通知队列
+	ns := s.st.NotifyStats()
+	help("rollcall_notify_queue_pending", "Notifications waiting to be delivered or retried.", "gauge")
+	gauge("rollcall_notify_queue_pending", nil, float64(ns.Pending))
+	help("rollcall_notify_sent_total", "Notifications delivered successfully (at least one channel).", "counter")
+	gauge("rollcall_notify_sent_total", nil, float64(ns.Sent))
+	help("rollcall_notify_failed_total", "Notifications abandoned after all retries.", "counter")
+	gauge("rollcall_notify_failed_total", nil, float64(ns.Failed))
+	help("rollcall_notify_retries_total", "Notification delivery retries scheduled.", "counter")
+	gauge("rollcall_notify_retries_total", nil, float64(ns.Retries))
+	help("rollcall_notify_suppressed_total", "Notifications suppressed by silence or disabled config.", "counter")
+	gauge("rollcall_notify_suppressed_total", nil, float64(ns.Suppressed))
+	help("rollcall_notify_last_success_timestamp_seconds", "Unix timestamp of the last successful delivery (0 = never).", "gauge")
+	gauge("rollcall_notify_last_success_timestamp_seconds", nil, float64(ns.LastSuccess))
+	help("rollcall_notify_silences_active", "Active notification silences (global or per-rule).", "gauge")
+	gauge("rollcall_notify_silences_active", nil, float64(len(s.st.Silences(now))))
+
 	svcs := s.st.Services()
 	svcDown := 0
 	for _, sv := range svcs {

@@ -108,6 +108,60 @@ type Alert struct {
 	ResolvedAt int64   `json:"resolvedAt"` // 0 表示仍在持续
 }
 
+// 通知投递任务状态。
+const (
+	NotifyPending    = "pending"    // 等待投递或重试
+	NotifySent       = "sent"       // 至少一个通道投递成功
+	NotifyFailed     = "failed"     // 重试耗尽，仍需人工关注
+	NotifySuppressed = "suppressed" // 静默或通知配置停用，未实际投递
+)
+
+// NotifyJob 是一条持久化的通知投递任务。
+// 任务先落内存队列并由 Outbox 异步投递，重启后未完成任务会继续重试，
+// 避免同步发送时的并发丢弃与进程退出丢通知。
+type NotifyJob struct {
+	ID            string  `json:"id"`
+	AlertID       string  `json:"alertId,omitempty"`
+	RuleID        string  `json:"ruleId"`
+	RuleName      string  `json:"ruleName"`
+	NodeID        string  `json:"nodeId"`
+	NodeName      string  `json:"nodeName"`
+	Severity      string  `json:"severity"`
+	Resolved      bool    `json:"resolved"`
+	Title         string  `json:"title"`
+	Body          string  `json:"body"`
+	Value         float64 `json:"value"`
+	Link          string  `json:"link"`
+	EventTS       int64   `json:"eventTs"`
+	CreatedAt     int64   `json:"createdAt"`
+	Attempts      int     `json:"attempts"`
+	NextAttemptAt int64   `json:"nextAttemptAt"`
+	LastError     string  `json:"lastError,omitempty"`
+	Status        string  `json:"status"`
+	SentAt        int64   `json:"sentAt,omitempty"`
+	SuppressedBy  string  `json:"suppressedBy,omitempty"` // global 或规则 ID
+}
+
+// Silence 是一段通知静默期。Scope 为 "global" 或规则 ID。
+// 静默只抑制通知投递，告警本身仍会正常记录与恢复。
+type Silence struct {
+	Scope     string `json:"scope"`
+	Until     int64  `json:"until"`
+	Reason    string `json:"reason,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+// NotifyStats 是通知队列与投递累计统计。
+// Pending 为实时计算值，其余计数器跨重启保留。
+type NotifyStats struct {
+	Pending     int64 `json:"pending"`
+	Sent        int64 `json:"sent"`
+	Failed      int64 `json:"failed"`
+	Retries     int64 `json:"retries"`
+	Suppressed  int64 `json:"suppressed"`
+	LastSuccess int64 `json:"lastSuccess"`
+}
+
 // ---------- 以下是直接下发给前端的视图模型 ----------
 
 // NodeView 是节点列表项，合并台账、最新指标与状态。

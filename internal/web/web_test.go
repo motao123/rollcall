@@ -595,33 +595,6 @@ func TestMonthlyUsesConfiguredRate(t *testing.T) {
 	}
 }
 
-func TestSendLimiterBounded(t *testing.T) {
-	l := newSendLimiter(2)
-	release := make(chan struct{})
-	started := make(chan struct{}, 2)
-	block := func() {
-		started <- struct{}{}
-		<-release
-	}
-	if !l.try(block) || !l.try(block) {
-		t.Fatal("前两个任务应被接收")
-	}
-	<-started
-	<-started
-	if l.try(func() {}) {
-		t.Fatal("并发已满时应拒绝新任务，而不是无限堆积 goroutine")
-	}
-	close(release)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for !l.try(func() {}) {
-		if time.Now().After(deadline) {
-			t.Fatal("任务结束后槽位未释放")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // TestPublicStatusIsDesensitized 确认公开状态页不泄露资产与指纹信息。
 func TestPublicStatusIsDesensitized(t *testing.T) {
 	st := store.New(t.TempDir())
@@ -678,5 +651,94 @@ func TestReportStillUsesNodeToken(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("无节点令牌应 401，实际 %d", w.Code)
+	}
+}
+
+// TestSilenceAPI 验证静默的鉴权、校验与生效范围。
+func TestSilenceAPI(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertRule(&model.AlertRule{ID: "r_cpu", Name: "CPU", Enabled: true})
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	h := srv.Handler()
+
+	do := func(method, path, body, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		if token != "" {
+			req.Header.Set("X-Admin-Token", token)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	if w := do(http.MethodPut, "/api/admin/silences/global", `{"minutes":60}`, ""); w.Code != 401 {
+		t.Fatalf("无令牌应 401，实际 %d", w.Code)
+	}
+	if w := do(http.MethodPut, "/api/admin/silences/global", `{"minutes":0}`, "test-admin-token-1234567890"); w.Code != 400 {
+		t.Fatalf("非法时长应 400，实际 %d", w.Code)
+	}
+	if w := do(http.MethodPut, "/api/admin/silences/r_missing", `{"minutes":60}`, "test-admin-token-1234567890"); w.Code != 404 {
+		t.Fatalf("不存在的规则应 404，实际 %d", w.Code)
+	}
+	// 规则级静默 + 全局静默
+	if w := do(http.MethodPut, "/api/admin/silences/r_cpu", `{"minutes":30,"reason":"升级"}`, "test-admin-token-1234567890"); w.Code != 200 {
+		t.Fatalf("规则静默失败: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(http.MethodPut, "/api/admin/silences/global", `{"minutes":60,"reason":"维护"}`, "test-admin-token-1234567890"); w.Code != 200 {
+		t.Fatalf("全局静默失败: %d %s", w.Code, w.Body.String())
+	}
+
+	w := do(http.MethodGet, "/api/admin/silences", "", "test-admin-token-1234567890")
+	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`"global"`)) ||
+		!bytes.Contains(w.Body.Bytes(), []byte(`"r_cpu"`)) {
+		t.Fatalf("静默列表异常: %d %s", w.Code, w.Body.String())
+	}
+
+	// 只读告警接口应携带静默状态与队列统计
+	w = do(http.MethodGet, "/api/alerts", "", "test-admin-token-1234567890")
+	for _, want := range []string{`"silences"`, `"notify"`, `"pending"`, `"suppressed"`} {
+		if !bytes.Contains(w.Body.Bytes(), []byte(want)) {
+			t.Fatalf("/api/alerts 缺少 %s: %s", want, w.Body.String())
+		}
+	}
+
+	if w := do(http.MethodDelete, "/api/admin/silences/global", "", "test-admin-token-1234567890"); w.Code != 200 ||
+		!bytes.Contains(w.Body.Bytes(), []byte(`"deleted":true`)) {
+		t.Fatalf("取消静默失败: %d %s", w.Code, w.Body.String())
+	}
+	if got := st.Silences(time.Now().Unix()); len(got) != 1 || got[0].Scope != "r_cpu" {
+		t.Fatalf("取消 global 后仅应保留规则静默: %+v", got)
+	}
+}
+
+// TestMetricsExposeNotifyQueue 验证通知队列与静默指标。
+func TestMetricsExposeNotifyQueue(t *testing.T) {
+	st := store.New(t.TempDir())
+	now := time.Now().Unix()
+	st.SetSilence(&model.Silence{Scope: "global", Until: now + 600})
+	st.EnqueueNotifyJob(&model.NotifyJob{
+		ID: "nj_m", Severity: "critical", Status: model.NotifyPending,
+		CreatedAt: now, NextAttemptAt: now,
+	})
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("/metrics 返回 %d", w.Code)
+	}
+	for _, want := range []string{
+		"rollcall_notify_queue_pending 1",
+		"rollcall_notify_sent_total 0",
+		"rollcall_notify_failed_total 0",
+		"rollcall_notify_retries_total 0",
+		"rollcall_notify_suppressed_total 0",
+		"rollcall_notify_last_success_timestamp_seconds 0",
+		"rollcall_notify_silences_active 1",
+	} {
+		if !bytes.Contains(w.Body.Bytes(), []byte(want)) {
+			t.Fatalf("指标缺失 %q:\n%s", want, w.Body.String())
+		}
 	}
 }

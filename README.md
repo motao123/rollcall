@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.3.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.4.0**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -121,7 +121,14 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 - SMTP 默认强制 TLS：465 隐式 TLS，587/25 必须 STARTTLS；不支持 STARTTLS 时拒绝明文发送凭据
 - 通知内容为「主题 + 正文」两段式，含节点、规则、当前值、级别、时间、面板链接
 - 支持重复提醒间隔（0 = 只通知一次）
-- **外发并发上限 8**：告警风暴时超出的通知会丢弃并写日志，避免 goroutine 与连接无限堆积
+- **持久化 Outbox**：告警只负责入队，投递由 8 个有界 worker 异步完成；任务随快照落盘，
+  重启后继续投递。失败按 30s → 2m → 10m → 30m → 1h 退避，最多 5 次，
+  耗尽后保留为 `failed` 并写入日志，不再静默丢弃
+- **部分成功语义**：任一通道送达即视为已送达，避免为补发失败通道向成功通道重复刷屏；
+  逐通道错误保留在任务 `lastError` 中
+- **通知静默**：支持全局或单规则静默（1 小时 / 6 小时 / 24 小时 / 7 天，可填备注）。
+  静默期间告警仍正常记录与恢复，仅拦截外发；到期自动恢复
+- 队列深度、送达/失败/重试/静默拦截与最近成功时间均可在告警页与 `/metrics` 查看
 
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
@@ -178,8 +185,8 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 - 每节点一个**定长环形缓冲**（2880 点 = 24h @30s），全量常驻内存约 30MB
 - 默认每 60 秒把状态快照写入 `data/state.json`（`-save-interval` 可调，10s–1h；gzip 压缩 JSON，先写 `.tmp` 再 rename，保证原子性）
 - 启动时自动恢复；兼容旧版本写出的明文 JSON，首次保存后自动转为 gzip
-- 快照带 `schemaVersion`（当前为 1）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
-  避免新结构被旧程序静默读成零值
+- 快照带 `schemaVersion`（当前为 2）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
+  避免新结构被旧程序静默读成零值；v2 新增通知队列、投递统计与静默期，旧版 v1/无版本快照仍可直接载入
 - 快照损坏会隔离为 `state.json.corrupt-<时间>` 并拒绝启动，
   而不是静默以空库运行（否则全部节点与令牌会凭空消失）
 
@@ -263,7 +270,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
 > 使用前需要构建机安装 `make`。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.3.0`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.4.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 
 ### 2. 预览 UI（可选）
@@ -411,6 +418,8 @@ runuser -u rollcall-agent -- \
 | GET/POST | `/api/admin/rules` | 列出 / 创建告警规则 |
 | GET/PUT/DELETE | `/api/admin/rules/{id}` | 查看 / 修改 / 删除单条规则 |
 | GET | `/api/admin/rule-meta` | 规则表单元数据（指标/级别/时长选项，需令牌） |
+| GET | `/api/admin/silences` | 当前生效的通知静默 |
+| PUT/DELETE | `/api/admin/silences/{global\|ruleId}` | 设置（`{"minutes":60,"reason":"..."}`）/ 取消静默 |
 
 公开接口（无需任何凭据）：
 
@@ -552,6 +561,7 @@ rollcall/
 | ~~P3~~ | ~~告警规则界面编辑（增删改 + 启停 + 服务端校验）~~ ✅ |
 | ~~P4~~ | ~~公开状态页 `/status`（免登录 + 48 段 24h 色块 + 严格脱敏）~~ ✅ |
 | ~~P5~~ | ~~数据导出（CSV + Prometheus exposition）~~ ✅ |
+| ~~P6~~ | ~~通知可靠性：持久化 Outbox + 重试退避 + 全局/规则静默 + 队列指标~~ ✅ |
 
 **P5 明细**：
 
@@ -578,13 +588,19 @@ scrape_configs:
     basic_auth: { username: rollcall, password: "<admin.token 内容>" }  # username 任意，密码填令牌
 ```
 
-暴露的指标族（均带 `id`/`name` 标签）：
+暴露的指标族（节点/服务指标带 `id`/`name` 标签）：
 `rollcall_build_info`、`rollcall_nodes_total/online`、`rollcall_alerts_active`、
 `rollcall_services_total/down`、`rollcall_node_{online,cpu_percent,memory_percent,
 disk_percent,load1/5/15,uptime_seconds,tcp_connections,processes,
 network_receive_bytes_total,network_transmit_bytes_total,
 last_report_age_seconds}`、`rollcall_service_{up,latency_milliseconds,
 certificate_days_remaining,uptime_percent_24h}`
+
+通知队列指标：
+`rollcall_notify_queue_pending`、`rollcall_notify_sent_total`、
+`rollcall_notify_failed_total`、`rollcall_notify_retries_total`、
+`rollcall_notify_suppressed_total`、`rollcall_notify_last_success_timestamp_seconds`、
+`rollcall_notify_silences_active`
 
 ---
 
