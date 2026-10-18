@@ -12,7 +12,9 @@ WorkingDirectory=/opt/rollcall
 # 若要直接改绑 0.0.0.0，必须同时启用 -auth 与内置 TLS（-tls-cert/-tls-key），
 # 否则服务会拒绝启动；匿名公开只读面板需显式加 -allow-public，
 # 明文 HTTP 暴露需显式加 -allow-insecure。
-ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data
+# 探测与通知默认拒绝私网地址；本机服务探测（如 127.0.0.1:22）与本机自建
+# webhook 需显式开启对应开关；若全部使用公网目标，应删掉这两个参数。
+ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data -allow-private-probes -allow-private-notify
 Restart=always
 RestartSec=5s
 
