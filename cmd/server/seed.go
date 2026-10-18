@@ -42,6 +42,13 @@ func seedDemo(st *store.Store) {
 	now := time.Now().Unix()
 	rnd := rand.New(rand.NewSource(20261017))
 
+	// 离线演示节点：其最后一帧必须停在 15 分钟前。
+	// 不能在主循环跑完后再补一条 now-900 —— 环形缓冲会丢弃时间回退的点
+	// （Ring.Add 与 AddMetrics 都拒绝 TS 不大于上一条的样本），
+	// 那条样本被静默丢弃后节点仍显示在线，r_offline 永远不触发。
+	const offlineNode = "n08"
+	offlineCutoff := now - 900
+
 	for i, sp := range specs {
 		id := fmt.Sprintf("n%02d", i+1)
 		st.UpsertNode(&model.Node{
@@ -112,16 +119,21 @@ func seedDemo(st *store.Store) {
 				Procs:     120 + rnd.Intn(60),
 			})
 		}
+		offline := id == offlineNode
 		for _, seg := range segments {
 			for t := seg.from; t < seg.to; t += seg.step {
+				if offline && t > offlineCutoff {
+					continue
+				}
 				addSample(t)
 			}
 		}
-		addSample(now)
+		if offline {
+			addSample(offlineCutoff)
+		} else {
+			addSample(now)
+		}
 	}
-
-	// 离线节点：模拟 1 台失联
-	st.AddMetrics("n08", model.HostInfo{}, model.Metrics{TS: now - 900})
 
 	// 服务探测目标
 	svcs := []model.Service{
