@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -84,12 +85,48 @@ func (l *authFailureLimiter) succeed(ip string) {
 	l.mu.Unlock()
 }
 
+// clientIP 返回用于限流的客户端地址。
+//
+// 只有当直连对端是回环 / 私网 / 链路本地地址时才采信 X-Forwarded-For：
+// 这类源地址只可能来自本机或内网反向代理，公网客户端无法伪造。
+// 从右向左取第一个非可信地址 —— 代理链最后一跳追加的才是真实客户端，
+// 左侧内容可被客户端伪造。
+//
+// 无条件信任 XFF 会让攻击者伪造地址绕过限速；完全忽略 XFF 则会在
+// 反向代理后把所有客户端折叠成代理 IP，任意人发 10 次错误凭证即可
+// 让整站被 429 封禁 10 分钟（零成本 DoS）。
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if !isTrustedProxy(host) {
+		return host
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		cand := strings.TrimSpace(parts[i])
+		if cand == "" {
+			continue
+		}
+		if h, _, err := net.SplitHostPort(cand); err == nil {
+			cand = h
+		}
+		if net.ParseIP(cand) == nil || isTrustedProxy(cand) {
+			continue
+		}
+		return cand
 	}
 	return host
+}
+
+// isTrustedProxy 判断该地址是否可能是本机/内网代理。
+func isTrustedProxy(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 type statusRecorder struct {

@@ -135,17 +135,23 @@ func Parse(raw string) (*Config, error) {
 			})
 		}
 		if lg.Email.SMTPHost != "" {
+			opts := map[string]string{
+				"smtpHost": lg.Email.SMTPHost,
+				"username": lg.Email.Username,
+				"password": lg.Email.Password,
+				"from":     lg.Email.From,
+				"to":       strings.Join(lg.Email.To, ","),
+			}
+			// 旧配置省略端口时 SMTPPort 为 0。写成字符串 "0" 会让 sendEmail
+			// 进入「非空即校验」分支并返回 SMTP 端口无效，从而绕过 465 默认值，
+			// 迁移后的邮件渠道全部失效。只有显式配置了端口才写入。
+			if lg.Email.SMTPPort > 0 {
+				opts["smtpPort"] = strconv.Itoa(lg.Email.SMTPPort)
+			}
 			c.Channels = append(c.Channels, ChannelConfig{
 				ID: "m_email", Type: "email", Name: "邮件",
 				Enabled: lg.Email.Enabled,
-				Options: map[string]string{
-					"smtpHost": lg.Email.SMTPHost,
-					"smtpPort": strconv.Itoa(lg.Email.SMTPPort),
-					"username": lg.Email.Username,
-					"password": lg.Email.Password,
-					"from":     lg.Email.From,
-					"to":       strings.Join(lg.Email.To, ","),
-				},
+				Options: opts,
 			})
 		}
 		c.normalize()
@@ -469,7 +475,10 @@ func postJSON(urlStr string, payload any) ([]byte, error) {
 func checkNotifyURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return fmt.Errorf("通知地址无效: %w", err)
+		// 不包装原始错误：*url.Error 的文本会带上完整 URL，
+		// 而 Telegram 的 bot token 位于路径、通用 Webhook 的密钥常写在查询串，
+		// 回显到 API 响应或日志即泄露凭据（与 netErr 的取舍一致）。
+		return errors.New("通知地址格式无效")
 	}
 	return currentNotifyPolicy().CheckURL(u)
 }
@@ -723,7 +732,11 @@ func sendGotify(o map[string]string, subject, body string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+o["token"])
+	// Gotify 的推送鉴权是 X-Gotify-Key 头（或 token 查询参数），
+	// 不接受 Authorization: Bearer —— 用错头会稳定返回 401。
+	if tok := strings.TrimSpace(o["token"]); tok != "" {
+		req.Header.Set("X-Gotify-Key", tok)
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return netErr(err)

@@ -26,6 +26,20 @@ type Policy struct {
 
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
+// metadataIPs 是云厂商元数据服务的固定地址，必须**无条件**拦截。
+//
+// 169.254.169.254 等链路本地地址已由 IsLinkLocalUnicast 覆盖；
+// 以下两个落在 CGNAT / ULA 段内，会被 AllowPrivate 放行，故单独列出：
+//   - 100.100.100.200  阿里云（100.64/10 CGNAT）
+//   - fd00:ec2::254    AWS IPv6（fc00::/7 ULA）
+//
+// 元数据服务永远不是合法的「自建内网服务」目标；一旦放行，
+// 用户可把通知地址指向它，从而窃取实例凭据。
+var metadataIPs = []net.IP{
+	net.IPv4(100, 100, 100, 200),
+	net.ParseIP("fd00:ec2::254"),
+}
+
 // CheckIP 返回该 IP 是否允许访问。
 func (p Policy) CheckIP(ip net.IP) error {
 	if ip == nil {
@@ -33,6 +47,11 @@ func (p Policy) CheckIP(ip net.IP) error {
 	}
 	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return fmt.Errorf("目标地址 %s 属于禁止访问的保留网段", ip)
+	}
+	for _, m := range metadataIPs {
+		if ip.Equal(m) {
+			return fmt.Errorf("目标地址 %s 是云厂商元数据服务，始终禁止访问", ip)
+		}
 	}
 	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 0 {
 		// 0.0.0.0/8（this network）在部分系统上会被路由到本机

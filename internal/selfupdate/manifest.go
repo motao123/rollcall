@@ -164,6 +164,12 @@ func VerifyEnvelope(raw []byte, pub ed25519.PublicKey) (*Manifest, error) {
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return nil, errors.New("更新清单签名格式无效")
 	}
+	// ed25519.Verify 对长度不合法的公钥会直接 panic（而不是返回 false）。
+	// VerifyEnvelope 是导出入口，Updater.PublicKey 也是导出字段，
+	// 调用方传入残缺配置时不应让进程崩溃。
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, errors.New("更新公钥长度无效")
+	}
 	if !ed25519.Verify(pub, payloadRaw, sig) {
 		return nil, errors.New("更新清单签名校验失败")
 	}
