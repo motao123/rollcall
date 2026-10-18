@@ -518,14 +518,18 @@ func sendWecom(o map[string]string, subject, body string) error {
 	}
 	// 企业微信出错时 HTTP 仍为 200，必须解析 errcode 才能知道真实结果
 	var r struct {
-		ErrCode int    `json:"errcode"`
+		ErrCode *int   `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
 	if err := decodeResult(rb, &r); err != nil {
 		return fmt.Errorf("wecom: %w", err)
 	}
-	if r.ErrCode != 0 {
-		return fmt.Errorf("wecom: %s (errcode %d)", r.ErrMsg, r.ErrCode)
+	if r.ErrCode == nil {
+		// 缺字段时零值 0 会被当成成功；必须要求服务端显式返回结果。
+		return fmt.Errorf("wecom: 响应缺少 errcode，无法确认投递结果")
+	}
+	if *r.ErrCode != 0 {
+		return fmt.Errorf("wecom: %s (errcode %d)", r.ErrMsg, *r.ErrCode)
 	}
 	return nil
 }
@@ -553,14 +557,17 @@ func sendDingtalk(o map[string]string, subject, body string) error {
 		return err
 	}
 	var r struct {
-		ErrCode int    `json:"errcode"`
+		ErrCode *int   `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
 	if err := decodeResult(rb, &r); err != nil {
 		return fmt.Errorf("dingtalk: %w", err)
 	}
-	if r.ErrCode != 0 {
-		return fmt.Errorf("dingtalk: %s (errcode %d)", r.ErrMsg, r.ErrCode)
+	if r.ErrCode == nil {
+		return fmt.Errorf("dingtalk: 响应缺少 errcode，无法确认投递结果")
+	}
+	if *r.ErrCode != 0 {
+		return fmt.Errorf("dingtalk: %s (errcode %d)", r.ErrMsg, *r.ErrCode)
 	}
 	return nil
 }
@@ -584,14 +591,17 @@ func sendLark(o map[string]string, subject, body string) error {
 		return err
 	}
 	var r struct {
-		Code int    `json:"code"`
+		Code *int   `json:"code"`
 		Msg  string `json:"msg"`
 	}
 	if err := decodeResult(rb, &r); err != nil {
 		return fmt.Errorf("lark: %w", err)
 	}
-	if r.Code != 0 {
-		return fmt.Errorf("lark: %s (code %d)", r.Msg, r.Code)
+	if r.Code == nil {
+		return fmt.Errorf("lark: 响应缺少 code，无法确认投递结果")
+	}
+	if *r.Code != 0 {
+		return fmt.Errorf("lark: %s (code %d)", r.Msg, *r.Code)
 	}
 	return nil
 }
@@ -643,14 +653,17 @@ func sendBark(o map[string]string, subject, body string) error {
 		return err
 	}
 	var r struct {
-		Code    int    `json:"code"`
+		Code    *int   `json:"code"`
 		Message string `json:"message"`
 	}
 	if err := decodeResult(rb, &r); err != nil {
 		return fmt.Errorf("bark: %w", err)
 	}
-	if r.Code != 0 && r.Code != 200 {
-		return fmt.Errorf("bark: %s (code %d)", r.Message, r.Code)
+	if r.Code == nil {
+		return fmt.Errorf("bark: 响应缺少 code，无法确认投递结果")
+	}
+	if *r.Code != 0 && *r.Code != 200 {
+		return fmt.Errorf("bark: %s (code %d)", r.Message, *r.Code)
 	}
 	return nil
 }
@@ -669,14 +682,17 @@ func sendServerchan(o map[string]string, subject, body string) error {
 		return err
 	}
 	var r struct {
-		Code int    `json:"code"`
+		Code *int   `json:"code"`
 		Msg  string `json:"message"`
 	}
 	if err := decodeResult(rb, &r); err != nil {
 		return fmt.Errorf("serverchan: %w", err)
 	}
-	if r.Code != 0 {
-		return fmt.Errorf("serverchan: %s (code %d)", r.Msg, r.Code)
+	if r.Code == nil {
+		return fmt.Errorf("serverchan: 响应缺少 code，无法确认投递结果")
+	}
+	if *r.Code != 0 {
+		return fmt.Errorf("serverchan: %s (code %d)", r.Msg, *r.Code)
 	}
 	return nil
 }
@@ -698,14 +714,17 @@ func sendPushplus(o map[string]string, subject, body string) error {
 		return err
 	}
 	var r struct {
-		Code int    `json:"code"`
+		Code *int   `json:"code"`
 		Msg  string `json:"msg"`
 	}
 	if err := decodeResult(rb, &r); err != nil {
 		return fmt.Errorf("pushplus: %w", err)
 	}
-	if r.Code != 200 {
-		return fmt.Errorf("pushplus: %s (code %d)", r.Msg, r.Code)
+	if r.Code == nil {
+		return fmt.Errorf("pushplus: 响应缺少 code，无法确认投递结果")
+	}
+	if *r.Code != 200 {
+		return fmt.Errorf("pushplus: %s (code %d)", r.Msg, *r.Code)
 	}
 	return nil
 }

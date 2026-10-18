@@ -93,12 +93,9 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 
 	var monthSum float64
 	for _, v := range s.buildNodeViews() {
-		days := 0
-		if v.ExpireAt != "" {
-			if t, err := time.Parse("2006-01-02", v.ExpireAt); err == nil {
-				days = int(time.Until(t).Hours() / 24)
-			}
-		}
+		// 与仪表盘共用 daysUntil：它按本地日历日计算并四舍五入，
+		// 避免 UTC 解析 + 截断把「今天到期」和「还有 23 小时」都算成 0 天。
+		days, _ := daysUntil(v.ExpireAt)
 		mv := monthly(v.Price, v.Currency, s.cnyRate)
 		monthSum += mv
 		online := "否"

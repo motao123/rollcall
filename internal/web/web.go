@@ -702,8 +702,14 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	for _, sv := range svcs {
 		_, lat, ok, cert, has := s.st.ServiceLastFull(sv.ID)
 		hist := s.st.ServiceSeries(sv.ID)
+		// Uptime 声明为 24h 可用率，而 ServiceSeries 返回整个环形缓冲
+		// （2880 点，按探测间隔不同可能是 8h 或 48h），必须显式截断窗口。
+		cutoff := time.Now().Unix() - 86400
 		up, tot := 0, 0
 		for _, h := range hist {
+			if h[0] < cutoff {
+				continue
+			}
 			tot++
 			if h[2] == 1 {
 				up++

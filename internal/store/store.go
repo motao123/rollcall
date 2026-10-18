@@ -271,7 +271,10 @@ func (s *Store) load() error {
 	if err != nil {
 		bak := s.path + ".corrupt-" + time.Now().Format("20060102-150405")
 		if renameErr := os.Rename(s.path, bak); renameErr != nil {
-			return fmt.Errorf("快照损坏且无法隔离 %s: %w", s.path, err)
+			// 隔离失败是当前要处理的故障，应包装 renameErr；
+			// decodeErr 已通过返回值语义说明，混在 %w 里会让调用方的
+			// errors.Is/As 误判。
+			return fmt.Errorf("快照损坏且无法隔离 %s: %w", s.path, renameErr)
 		}
 		return fmt.Errorf("快照损坏，已备份到 %s: %w", bak, err)
 	}
@@ -926,12 +929,15 @@ func (s *Store) ActiveAlertsByNode() map[string]int {
 // DeleteService 删除探测目标及其历史。
 func (s *Store) DeleteService(id string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.services[id]; !ok {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.services, id)
 	delete(s.svcRes, id)
+	s.mu.Unlock()
+	// 变更已进入内存，必须请求落盘：否则重启后删除的服务会「复活」。
+	s.RequestSave()
 	return true
 }
 
