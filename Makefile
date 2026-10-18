@@ -6,7 +6,7 @@ BINARY_AGENT  := rollcall-agent
 ifeq ($(origin VERSION),undefined)
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 endif
-VERSION_FLAG := -X github.com/motao/rollcall/internal/version.Version=$(VERSION)
+VERSION_FLAG := -X 'github.com/motao/rollcall/internal/version.Version=$(VERSION)'
 
 .PHONY: all server agent rollsign linux clean clean-data demo fmt vet test
 

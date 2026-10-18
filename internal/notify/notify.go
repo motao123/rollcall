@@ -456,6 +456,9 @@ func dispatch(ch ChannelConfig, subject, body string, m Message) error {
 }
 
 func postJSON(urlStr string, payload any) ([]byte, error) {
+	// 校验与真正请求必须使用同一个字符串：前端粘贴地址常带首尾空格，
+	// 只对校验侧 TrimSpace 会出现「校验通过但请求失败」的怪现象。
+	urlStr = strings.TrimSpace(urlStr)
 	if err := checkNotifyURL(urlStr); err != nil {
 		return nil, err
 	}

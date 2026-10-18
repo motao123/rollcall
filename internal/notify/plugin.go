@@ -378,12 +378,11 @@ func runPlugin(p *plugin, ch ChannelConfig, subject, body string, m Message) err
 		return fmt.Errorf("插件 %s 超时（%s）", p.def.Type, p.timeout)
 	}
 	if err != nil {
-		msg := strings.TrimSpace(out.buf.String())
-		if msg != "" {
+		if msg := sanitizePluginOutput(out.buf.String()); msg != "" {
 			if out.overflow {
 				msg += "…"
 			}
-			return fmt.Errorf("插件 %s 调用失败: %v: %s", p.def.Type, err, truncateRunes(msg, 160))
+			return fmt.Errorf("插件 %s 调用失败: %v: %s", p.def.Type, err, msg)
 		}
 		return fmt.Errorf("插件 %s 调用失败: %v", p.def.Type, err)
 	}
@@ -396,6 +395,24 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// sanitizePluginOutput 压缩插件输出，避免把内部信息原样带进 API 响应。
+// 去掉控制字符（含 ANSI 的 ESC 序列）与换行，只保留可读的单行摘要，
+// 并截断到 160 个字符。
+func sanitizePluginOutput(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// 丢弃控制字符
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return truncateRunes(strings.Join(strings.Fields(b.String()), " "), 160)
 }
 
 // pluginDefsSnapshot 返回按类型排序的插件定义副本。
