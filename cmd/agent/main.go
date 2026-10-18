@@ -78,9 +78,13 @@ func main() {
 	host := c.Host()
 	log.Printf("节点 %s（%s / %s，%d 核）→ %s", cfg.NodeID, host.Hostname, host.OS, host.Cores, cfg.Server)
 
-	// 首次采集用于建立 CPU 基线
+	// 首次采集用于建立 CPU 基线；-once 不应让验证脚本干等一个完整上报周期
 	c.Collect()
-	time.Sleep(time.Duration(cfg.Interval) * time.Second)
+	if *once {
+		time.Sleep(1 * time.Second)
+	} else {
+		time.Sleep(time.Duration(cfg.Interval) * time.Second)
+	}
 
 	// 上报接口不需要重定向：拒绝跟随可确保 X-Node-Token 绝不会被转发到其他主机
 	client := &http.Client{
@@ -90,38 +94,38 @@ func main() {
 		},
 	}
 
-	send := func() {
+	send := func() error {
 		m := c.Collect()
 		rep := model.Report{NodeID: cfg.NodeID, Host: host, Metrics: m}
 		body, err := json.Marshal(rep)
 		if err != nil {
-			log.Printf("序列化失败: %v", err)
-			return
+			return fmt.Errorf("序列化失败: %w", err)
 		}
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("构造请求失败: %v", err)
-			return
+			return fmt.Errorf("构造请求失败: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Node-Token", cfg.Token)
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("上报失败: %v", err)
-			return
+			return fmt.Errorf("上报失败: %w", err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			log.Printf("上报被拒绝: HTTP %d", resp.StatusCode)
-			return
+			return fmt.Errorf("上报被拒绝: HTTP %d", resp.StatusCode)
 		}
 		log.Printf("已上报 cpu=%.1f%% mem=%.1f%% disk=%.1f%%",
 			m.CPUPct, pct(m.MemUsed, m.MemTotal), pct(m.DiskUsed, m.DiskTotal))
+		return nil
 	}
 
 	if *once {
-		send()
+		if err := send(); err != nil {
+			log.Printf("验证失败: %v", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -135,7 +139,9 @@ func main() {
 		}
 		go func() {
 			defer sending.Store(false)
-			send()
+			if err := send(); err != nil {
+				log.Print(err)
+			}
 		}()
 	}
 	t := time.NewTicker(time.Duration(cfg.Interval) * time.Second)

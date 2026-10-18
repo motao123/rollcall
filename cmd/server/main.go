@@ -28,7 +28,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:9080", "监听地址（默认仅回环）")
+	addr := flag.String("addr", "127.0.0.1:19080", "监听地址（默认仅回环）")
 	dataDir := flag.String("data", "./data", "数据目录")
 	demo := flag.Bool("demo", false, "载入演示数据（仅用于预览 UI）")
 	probeEvery := flag.Duration("probe-interval", 10*time.Second, "探测调度粒度（每个服务仍按自身 interval 执行）")

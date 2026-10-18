@@ -14,6 +14,7 @@ const state = {
   range: '1h',
   search: '',
   data: {},
+  panelLink: '',
   timers: [],
 };
 
@@ -351,7 +352,7 @@ async function viewNodeDetail(id) {
 
   $('#view').innerHTML = `
     <div class="detail-head">
-      <button class="back-btn" onclick="location.hash='#/nodes'">
+      <button class="back-btn" id="backToNodes">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
         返回
       </button>
@@ -431,6 +432,7 @@ async function viewNodeDetail(id) {
       </div>
     </div>`;
 
+  $('#backToNodes').onclick = () => { location.hash = '#/nodes'; };
   $$('.range-tabs button', $('#view')).forEach((b) => {
     b.onclick = () => { state.range = b.dataset.range; viewNodeDetail(id); };
   });
@@ -830,8 +832,8 @@ async function viewSettings() {
       <div class="panel panel-pad" style="max-width:560px">
         <div class="section-title" style="margin-bottom:6px">需要管理令牌</div>
         <p style="font-size:12.5px;color:var(--fg-2);margin:0 0 14px">
-          管理功能需要控制端生成的令牌。它位于服务器的
-          <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>。
+          管理功能需要控制端生成的令牌。它位于服务端的数据目录（默认
+          <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>）。
         </p>
         <form id="tokForm" class="form-grid">
           ${field('管理令牌', 'token', '', { type: 'password', placeholder: '粘贴 admin.token 内容', required: true })}
@@ -858,6 +860,7 @@ async function viewSettings() {
     cfg = st.notify || {};
     chans = st.channels || [];
     defs = st.defs || [];
+    state.panelLink = st.panelLink || '';
   } catch (e) {
     loadErr = e.message;
   }
@@ -1237,14 +1240,39 @@ async function viewSettings() {
   };
 }
 
+function isLoopbackHost(hostname) {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+}
+
+function agentServerURL() {
+  const configured = (state.panelLink || '').trim().replace(/\/+$/, '');
+  return configured || location.origin;
+}
+
 // showAgentConfig 在创建节点后弹出接入指引
 function showAgentConfig(node) {
+  const server = agentServerURL();
+  let host = '';
+  try { host = new URL(server).hostname; } catch (e) { host = ''; }
+  const insecure = server.startsWith('http://') && !isLoopbackHost(host);
   const cfg = JSON.stringify({
-    server: 'http://<控制端地址>:19080',
+    server,
     nodeId: node.id,
     token: node.token,
     interval: 30,
   }, null, 2);
+
+  const install = `install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
+install -d -m 0750 /etc/rollcall
+# 将上面的 JSON 写入 /etc/rollcall/agent.json
+chmod 600 /etc/rollcall/agent.json
+# 在仓库目录安装 systemd 单元
+install -m 0644 deploy/rollcall-agent.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now rollcall-agent
+systemctl status rollcall-agent --no-pager
+# 验证一次上报（约 2 秒）
+rollcall-agent -config /etc/rollcall/agent.json -once`;
 
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
@@ -1252,11 +1280,9 @@ function showAgentConfig(node) {
     <div class="modal-title">节点已创建 — 接入指引</div>
     <p class="modal-sub">把这台机器的 Agent 指向控制端即可开始上报。</p>
     <pre class="code">${esc(cfg)}</pre>
+    ${insecure ? '<p class="modal-sub" style="color:var(--warn)">当前控制端地址是明文 HTTP，非本机 Agent 会拒绝上报。请配置 HTTPS，或确认只在本机回环使用。</p>' : ''}
     <p class="modal-sub">在目标机器上执行：</p>
-    <pre class="code">install -m 0755 rollcall-agent /usr/local/bin/
-mkdir -p /etc/rollcall
-# 将上面的 JSON 写入 /etc/rollcall/agent.json（权限 0640）
-systemctl enable --now rollcall-agent</pre>
+    <pre class="code">${esc(install)}</pre>
     <div class="form-actions">
       <button class="btn primary" id="dlgOk">知道了</button>
     </div>
@@ -1285,7 +1311,10 @@ function bindNodeClicks() {
 
 function setActiveNav(route) {
   $$('.nav-item').forEach((a) => {
-    a.classList.toggle('active', a.dataset.route === route);
+    const active = a.dataset.route === route;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
   });
 }
 
@@ -1318,7 +1347,7 @@ async function render() {
     $('#view').innerHTML = `<div class="panel panel-pad" style="text-align:center;padding:48px 20px">
       <div style="font-size:13px;color:var(--crit);font-weight:600;margin-bottom:6px">数据加载失败</div>
       <div style="font-size:12px;color:var(--fg-3)">${esc(e.message)}</div>
-      <div style="font-size:11.5px;color:var(--fg-3);margin-top:10px">请确认服务端已启动（默认 :9080）</div>
+      <div style="font-size:11.5px;color:var(--fg-3);margin-top:10px">请确认服务端已启动（默认 :19080）</div>
     </div>`;
     $('#liveText').textContent = '离线';
   }

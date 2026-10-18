@@ -231,30 +231,109 @@ Agent 每 30 秒读取以下文件，**不做任何其他操作**：
 
 ## 五、快速开始
 
-### 服务端
+### 前置条件
+
+- 生产：Linux + systemd
+- 构建机：Go 1.22+、git、curl
+- 生产端口默认只监听回环，对外请用反向代理或内置 TLS
+
+### 1. 获取源码并构建
 
 ```bash
-# 1. 编译（纯标准库，无网络依赖）
+git clone https://github.com/motao123/rollcall.git
 cd rollcall
 go build -o rollcall-server ./cmd/server
+go build -o rollcall-agent ./cmd/agent
 
-# 2. 预览 UI（内置 15 台演示数据，不发起真实探测）
-#    端口用 9188：本机 9080 常被其他进程占用
-#    演示模式使用临时数据目录，退出后自动删除，不会污染生产 state.json
-./rollcall-server -addr 127.0.0.1:9188 -demo
-
-# 3. 生产运行（默认只监听回环，对外经反向代理或启用 TLS + Basic Auth）
-./rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data
-
-# 4. 交叉编译到 Linux（服务端与 Agent 均提供 amd64 / arm64）
-make linux   # 产物在 dist/
+# 交叉编译示例
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-server ./cmd/server
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 ```
 
-打开 `http://127.0.0.1:9188`（预览）或 `http://127.0.0.1:19080`（生产）即可。
+> 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
+> 使用前需要构建机安装 `make`。
+
+### 2. 预览 UI（可选）
+
+```bash
+./rollcall-server -addr 127.0.0.1:9188 -demo
+```
+
+打开 `http://127.0.0.1:9188`。演示模式使用临时数据目录，退出后自动删除，
+不会污染生产 `state.json`。
+
+### 3. 安装服务端（systemd）
+
+```bash
+sudo useradd --system --home /opt/rollcall --shell /usr/sbin/nologin rollcall
+sudo install -d -o rollcall -g rollcall -m 0750 /opt/rollcall /opt/rollcall/data
+sudo install -m 0755 rollcall-server /opt/rollcall/rollcall-server
+sudo install -m 0644 deploy/rollcall-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rollcall-server
+curl -fsS http://127.0.0.1:19080/healthz
+```
+
+若不需要探测/通知内网目标，请从 unit 的 `ExecStart` 中删除
+`-allow-private-probes -allow-private-notify`；这两个参数应仅在明确需要时开启。
 
 > 服务端收到 SIGINT/SIGTERM 后会停止接收新请求、等待在途请求结束并立即保存快照，
 > systemd 重启不会丢失最近一次自动保存（60 秒）之后的数据。
-> 数据目录使用临时目录以外的路径时，请确保运行用户对其有写权限。
+
+### 4. 首次登录
+
+```bash
+sudo cat /opt/rollcall/data/admin.token
+```
+
+打开 `http://127.0.0.1:19080`，两种方式任选：
+
+- 访问 `http://127.0.0.1:19080/#admin=<令牌>`（令牌在 URL 片段中，不会发送给服务器）；
+- 或在「设置」页粘贴令牌并保存。
+
+对外访问请用 SSH 隧道或反向代理，不要直接把 19080 暴露到公网。
+
+### 5. 接入一台节点
+
+```bash
+# 在控制端创建节点（返回 id 与 token）
+TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
+curl -s -X POST http://127.0.0.1:19080/api/admin/nodes \
+  -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"节点名","provider":"racknerd","region":"美国","group":"prod"}'
+```
+
+把 `rollcall-agent` 和 `deploy/rollcall-agent.service` 上传到目标节点后执行：
+
+```bash
+# 1. 安装二进制与配置目录
+install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
+install -d -m 0750 /etc/rollcall
+
+# 2. 写入配置（server/nodeId/token 用上一步返回值）
+#    server 必须是 https://...；仅本机回环可用 http://127.0.0.1:19080
+cat >/etc/rollcall/agent.json <<'EOF'
+{
+  "server": "https://rollcall.example.com",
+  "nodeId": "n_xxxx",
+  "token": "<48位上报令牌>",
+  "interval": 30
+}
+EOF
+chmod 600 /etc/rollcall/agent.json
+
+# 3. 安装 systemd 单元
+install -m 0644 rollcall-agent.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now rollcall-agent
+
+# 4. 验证一次上报（失败会以非 0 退出，约 2 秒）
+rollcall-agent -config /etc/rollcall/agent.json -once
+```
+
+> Agent 默认拒绝向**非本机**的明文 HTTP 服务端上报（节点令牌会裸奔）。
+> 远程节点必须使用 `https://`；仅本机回环或明确接受风险时才加 `-allow-insecure`。
+> Agent 不跟随 3xx，确保 `X-Node-Token` 不会被转发到其他主机。
 
 > **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
 >
@@ -270,7 +349,9 @@ make linux   # 产物在 dist/
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `-addr` | `127.0.0.1:9080` | 监听地址；非回环需满足上面的安全条件 |
+| `-addr` | `127.0.0.1:19080` | 监听地址；非回环需满足上面的安全条件 |
+| `-demo` | false | 载入 15 台演示数据，使用临时数据目录，不发起真实探测 |
+| `-panel-link` | 空 | 面板对外地址（用于告警链接和 Agent 接入指引） |
 | `-tls-cert` / `-tls-key` | 空 | 同时提供则启用 HTTPS |
 | `-auth` | 空 | `user:password`，启用 Basic Auth（密码不可为空） |
 | `-allow-public` | false | 允许无 Basic Auth 时监听非回环（公开只读） |
@@ -281,33 +362,6 @@ make linux   # 产物在 dist/
 | `-probe-interval` | `10s` | 探测调度粒度；每个服务按自身 `interval` 执行 |
 | `-admin-token` | 自动生成 | 管理令牌，显式指定时至少 16 字符 |
 | `-data` | `./data` | 数据目录（state.json / admin.token，均为 0600） |
-
-### 接入一台节点
-
-```bash
-# 1. 在控制端注册节点（管理 API）
-TOKEN=$(cat /opt/rollcall/data/admin.token)
-curl -s -X POST http://127.0.0.1:19080/api/admin/nodes \
-  -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"节点名","provider":"racknerd","region":"美国","group":"prod"}'
-# → 返回 {"id":"n_xxxx","token":"<48位上报令牌>", ...}
-
-# 2. 编译 Agent 并部署
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
-scp rollcall-agent root@node:/usr/local/bin/
-scp deploy/agent.json root@node:/etc/rollcall/agent.json   # 填入 server/nodeId/token
-
-# 3. 安装 systemd 服务
-install -m 644 deploy/rollcall-agent.service /etc/systemd/system/
-systemctl enable --now rollcall-agent
-
-# 4. 验证一次上报
-rollcall-agent -config /etc/rollcall/agent.json -once
-```
-
-> Agent 默认拒绝向**非本机**的明文 HTTP 服务端上报（节点令牌会裸奔）。
-> 请使用 `https://`；仅在本机回环或明确接受风险时才加 `-allow-insecure`。
-> Agent 也不跟随 3xx，确保 `X-Node-Token` 不会被转发到其他主机。
 
 ### 管理 API
 
