@@ -35,9 +35,14 @@ func (t Theme) Validate() error {
 	default:
 		return fmt.Errorf("mode 必须是 auto/light/dark")
 	}
-	for name, c := range map[string]string{"accent": t.Accent, "accentDark": t.AccentDark} {
-		if c != "" && !hexColor.MatchString(c) {
-			return fmt.Errorf("%s 必须是 #rrggbb 格式", name)
+	// 用有序切片而不是 map：两个字段同时非法时，
+	// map 迭代顺序会让报错字段在多次调用间随机变化。
+	for _, f := range []struct{ name, val string }{
+		{"accent", t.Accent},
+		{"accentDark", t.AccentDark},
+	} {
+		if f.val != "" && !hexColor.MatchString(f.val) {
+			return fmt.Errorf("%s 必须是 #rrggbb 格式", f.name)
 		}
 	}
 	if t.Radius != nil && (*t.Radius < 0 || *t.Radius > 24) {
@@ -56,9 +61,10 @@ func (t Theme) Normalize() Theme {
 	return t
 }
 
-// Parse 解析已保存的主题；空值返回默认主题。
+// Parse 解析已保存的主题；空值或字面量 null 返回默认主题。
 func Parse(raw string) (Theme, error) {
-	if strings.TrimSpace(raw) == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "null" {
 		return Default(), nil
 	}
 	var t Theme

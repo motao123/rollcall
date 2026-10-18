@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -237,7 +238,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// 构建信息
 	help("rollcall_build_info", "Build information.", "gauge")
-	fmt.Fprintf(&b, "rollcall_build_info{version=%q,go=%q} 1\n", version.Version, runtime.Version())
+	// 必须用 Prometheus 的 q 转义：%q 会输出 \t、\xNN 等 Go 转义，
+	// Prometheus 文本解析器不接受，整个 /metrics 会抓取失败。
+	fmt.Fprintf(&b, "rollcall_build_info{version=%s,go=%s} 1\n", q(version.Version), q(runtime.Version()))
 
 	// 汇总
 	views := s.buildNodeViews()
@@ -396,12 +399,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		name       string
 		help       string
 		needUptime bool
-		get        func(ok bool, lat, cert int, up float64) float64
+		get        func(ok, has bool, lat, cert int, up float64) float64
 	}{
-		{"rollcall_service_up", "1 if last probe succeeded.", false, func(ok bool, lat, cert int, up float64) float64 { return b2f(ok) }},
-		{"rollcall_service_latency_milliseconds", "Last probe latency in ms.", false, func(ok bool, lat, cert int, up float64) float64 { return float64(lat) }},
-		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", false, func(ok bool, lat, cert int, up float64) float64 { return float64(cert) }},
-		{"rollcall_service_uptime_percent_24h", "24h availability percent.", true, func(ok bool, lat, cert int, up float64) float64 { return up }},
+		{"rollcall_service_up", "1 if last probe succeeded (NaN = never probed).", false, func(ok, has bool, lat, cert int, up float64) float64 {
+			if !has {
+				// 从未探测过：输出 NaN 而不是 0，
+				// 否则与「探测失败」无法区分，会误触发告警。
+				return math.NaN()
+			}
+			return b2f(ok)
+		}},
+		{"rollcall_service_latency_milliseconds", "Last probe latency in ms.", false, func(ok, has bool, lat, cert int, up float64) float64 { return float64(lat) }},
+		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", false, func(ok, has bool, lat, cert int, up float64) float64 { return float64(cert) }},
+		{"rollcall_service_uptime_percent_24h", "24h availability percent.", true, func(ok, has bool, lat, cert int, up float64) float64 { return up }},
 	}
 	for _, m := range svcMetrics {
 		help(m.name, m.help, "gauge")
@@ -410,7 +420,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			if m.needUptime && !d.upOK {
 				continue
 			}
-			gauge(m.name, []string{"id=" + q(d.sv.ID), "name=" + q(d.sv.Name)}, m.get(d.ok, d.lat, d.cert, d.up))
+			gauge(m.name, []string{"id=" + q(d.sv.ID), "name=" + q(d.sv.Name)}, m.get(d.ok, d.has, d.lat, d.cert, d.up))
 		}
 	}
 

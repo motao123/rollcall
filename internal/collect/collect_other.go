@@ -5,6 +5,7 @@
 package collect
 
 import (
+	"os"
 	"runtime"
 	"sync"
 
@@ -20,8 +21,13 @@ func New() *Collector { return &Collector{} }
 
 func (c *Collector) Host() model.HostInfo {
 	c.hostOnce.Do(func() {
+		hostname := "dev-host"
+		// 用真实主机名，避免联调时节点在面板里显示成假名字、污染资产台账。
+		if hn, err := os.Hostname(); err == nil && hn != "" {
+			hostname = hn
+		}
 		c.host = model.HostInfo{
-			Hostname: "dev-host",
+			Hostname: hostname,
 			OS:       runtime.GOOS + " (demo)",
 			Arch:     runtime.GOARCH,
 			Cores:    runtime.NumCPU(),
@@ -31,6 +37,7 @@ func (c *Collector) Host() model.HostInfo {
 }
 
 // Collect 在非 Linux 平台返回零值，仅用于本地调试 UI。
+// agent 启动时已明确警告该平台不会采集真实指标。
 func (c *Collector) Collect() model.Metrics {
 	return model.Metrics{TS: timeNow()}
 }

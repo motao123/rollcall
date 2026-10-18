@@ -17,10 +17,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/motao/rollcall/internal/alert"
+	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/probe"
@@ -173,8 +175,9 @@ func main() {
 			defer t.Stop()
 			last := map[string]time.Time{}
 			for {
-				now := time.Now()
-				for _, sv := range st.Services() {
+				svcs := st.Services()
+				due := make([]*model.Service, 0, len(svcs))
+				for _, sv := range svcs {
 					if !sv.Enabled {
 						continue
 					}
@@ -182,24 +185,37 @@ func main() {
 					if interval <= 0 {
 						interval = 60 * time.Second
 					}
-					if t, ok := last[sv.ID]; ok && now.Sub(t) < interval {
+					// 用「此刻」而不是本轮起点比较：ticker 略微提前触发时，
+					// 按起点算会把间隔判短，实际探测周期被拉长一倍。
+					if t0, ok := last[sv.ID]; ok && time.Since(t0) < interval {
 						continue
 					}
-					last[sv.ID] = now
-					res := runner.Do(*sv)
-					st.AddServiceResult(res)
+					last[sv.ID] = time.Now()
+					due = append(due, sv)
 				}
-				// 清理已删除服务的时间戳，避免 map 随增删持续增长
-				if len(last) > 2*len(st.Services())+32 {
+				// 并发探测：单个黑洞目标不应阻塞其余所有服务。
+				// 上限 8 与通知队列的默认 worker 数一致。
+				var wg sync.WaitGroup
+				sem := make(chan struct{}, 8)
+				for _, sv := range due {
+					wg.Add(1)
+					go func(sv *model.Service) {
+						defer wg.Done()
+						sem <- struct{}{}
+						defer func() { <-sem }()
+						st.AddServiceResult(runner.Do(*sv))
+					}(sv)
+				}
+				wg.Wait()
+				// 清理已删除服务的时间戳，避免 map 随增删持续增长。
+				// Services() 只取一次，原实现每个过期 ID 都重新复制+排序一遍。
+				if len(last) > 2*len(svcs)+32 {
+					alive := make(map[string]bool, len(svcs))
+					for _, sv := range svcs {
+						alive[sv.ID] = true
+					}
 					for id := range last {
-						found := false
-						for _, sv := range st.Services() {
-							if sv.ID == id {
-								found = true
-								break
-							}
-						}
-						if !found {
+						if !alive[id] {
 							delete(last, id)
 						}
 					}

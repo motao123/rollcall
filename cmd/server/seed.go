@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"math"
 	"math/rand"
 	"time"
@@ -14,29 +13,29 @@ import (
 // 仅在 -demo 参数下调用，生产环境不会执行。
 func seedDemo(st *store.Store) {
 	type spec struct {
-		name, provider, region, group, expire, os string
-		price                                     float64
-		cur                                       string
-		baseCPU, baseMem                          float64
-		disk                                      float64
+		id, name, provider, region, group, expire, os string
+		price                                         float64
+		cur                                           string
+		baseCPU, baseMem                              float64
+		disk                                          float64
 	}
 
 	specs := []spec{
-		{"腾讯云-sg", "腾讯云", "新加坡", "prod", "2030-03-07", "Debian 12", 0, "CNY", 22, 38, 58},
-		{"腾讯云-上海", "腾讯云", "上海", "prod", "2027-06-12", "Debian 13", 0, "CNY", 34, 55, 71},
-		{"阿里云-成都", "阿里云", "成都", "prod", "2027-01-20", "Ubuntu 22.04", 0, "CNY", 18, 44, 62},
-		{"华为云-香港", "华为云", "香港", "prod", "2026-12-01", "Ubuntu 22.04", 0, "CNY", 27, 41, 49},
-		{"netcup-1o", "netcup", "德国", "probe", "2027-03-15", "Debian 12", 6.5, "USD", 12, 31, 34},
-		{"netcup-RS1000", "netcup", "德国", "prod", "2027-08-02", "Debian 12", 14.0, "USD", 41, 63, 77},
-		{"racknerd-圣何塞", "racknerd", "美国", "probe", "2027-02-18", "Debian 12", 11.0, "USD", 8, 22, 28},
-		{"racknerd-纽约", "racknerd", "美国", "probe", "2026-11-09", "Debian 12", 11.0, "USD", 16, 37, 41},
-		{"racknerd-DC02", "racknerd", "美国", "test", "2026-10-28", "Debian 12", 9.5, "USD", 5, 19, 23},
-		{"DMIT-49.9", "DMIT", "美国", "prod", "2027-05-30", "Debian 12", 49.9, "USD", 33, 52, 66},
-		{"dmit-wee", "DMIT", "美国", "prod", "2027-04-11", "Debian 12", 36.9, "USD", 45, 58, 72},
-		{"棉花云-香港", "棉花云", "香港", "probe", "2026-12-25", "Debian 12", 0, "CNY", 9, 26, 31},
-		{"bestvm.cloud-tw", "bestvm", "台湾", "probe", "2027-07-19", "Debian 12", 18.0, "USD", 14, 29, 38},
-		{"hostyun-us", "hostyun", "美国", "test", "2026-11-30", "CentOS 7", 7.0, "USD", 3, 17, 21},
-		{"武汉-独服", "自建", "武汉", "prod", "2029-01-01", "Ubuntu 24.04", 0, "CNY", 52, 68, 88},
+		{"n01", "腾讯云-sg", "腾讯云", "新加坡", "prod", "2030-03-07", "Debian 12", 0, "CNY", 22, 38, 58},
+		{"n02", "腾讯云-上海", "腾讯云", "上海", "prod", "2027-06-12", "Debian 13", 0, "CNY", 34, 55, 71},
+		{"n03", "阿里云-成都", "阿里云", "成都", "prod", "2027-01-20", "Ubuntu 22.04", 0, "CNY", 18, 44, 62},
+		{"n04", "华为云-香港", "华为云", "香港", "prod", "2026-12-01", "Ubuntu 22.04", 0, "CNY", 27, 41, 49},
+		{"n05", "netcup-1o", "netcup", "德国", "probe", "2027-03-15", "Debian 12", 6.5, "USD", 12, 31, 34},
+		{"n06", "netcup-RS1000", "netcup", "德国", "prod", "2027-08-02", "Debian 12", 14.0, "USD", 41, 63, 77},
+		{"n07", "racknerd-圣何塞", "racknerd", "美国", "probe", "2027-02-18", "Debian 12", 11.0, "USD", 8, 22, 28},
+		{"n08", "racknerd-纽约", "racknerd", "美国", "probe", "2026-11-09", "Debian 12", 11.0, "USD", 16, 37, 41},
+		{"n09", "racknerd-DC02", "racknerd", "美国", "test", "2026-10-28", "Debian 12", 9.5, "USD", 5, 19, 23},
+		{"n10", "DMIT-49.9", "DMIT", "美国", "prod", "2027-05-30", "Debian 12", 49.9, "USD", 33, 52, 66},
+		{"n11", "dmit-wee", "DMIT", "美国", "prod", "2027-04-11", "Debian 12", 36.9, "USD", 45, 58, 72},
+		{"n12", "棉花云-香港", "棉花云", "香港", "probe", "2026-12-25", "Debian 12", 0, "CNY", 9, 26, 31},
+		{"n13", "bestvm.cloud-tw", "bestvm", "台湾", "probe", "2027-07-19", "Debian 12", 18.0, "USD", 14, 29, 38},
+		{"n14", "hostyun-us", "hostyun", "美国", "test", "2026-11-30", "CentOS 7", 7.0, "USD", 3, 17, 21},
+		{"n15", "武汉-独服", "自建", "武汉", "prod", "2029-01-01", "Ubuntu 24.04", 0, "CNY", 52, 68, 88},
 	}
 
 	now := time.Now().Unix()
@@ -50,7 +49,9 @@ func seedDemo(st *store.Store) {
 	offlineCutoff := now - 900
 
 	for i, sp := range specs {
-		id := fmt.Sprintf("n%02d", i+1)
+		// 显式 ID：离线模拟与服务探测都按 ID 引用节点，
+		// 用位置推导会在插入/重排 specs 时把场景指向错误的机器。
+		id := sp.id
 		st.UpsertNode(&model.Node{
 			ID: id, Name: sp.name, Provider: sp.provider, Region: sp.region,
 			Group: sp.group, ExpireAt: sp.expire, Price: sp.price,
@@ -68,9 +69,12 @@ func seedDemo(st *store.Store) {
 
 		// 全年分层演示数据：粗粒度覆盖 365 天，细粒度覆盖最近 7 天和 24 小时。
 		// 这样 7d/30d/365d 曲线都能在 demo 中看到真实聚合结果。
+		// 密度按「看得见的精度」分配：365 天档 6 小时、30 天档 15 分钟，
+		// 近 7 天与 24 小时保持分钟级。旧区间的采样密度远超聚合精度，
+		// 只会拖慢 -demo 启动（单节点 2.7 万点 → 1.5 万点）。
 		segments := []struct{ from, to, step int64 }{
-			{now - 365*86400, now - 30*86400, 3600},
-			{now - 30*86400, now - 7*86400, 300},
+			{now - 365*86400, now - 30*86400, 6 * 3600},
+			{now - 30*86400, now - 7*86400, 900},
 			{now - 7*86400, now - 86400, 60},
 			{now - 86400, now, 30},
 		}
@@ -186,9 +190,11 @@ func seedDemo(st *store.Store) {
 	// 规则 ID 必须指向真实存在的规则，否则筛选与统计会出现孤儿引用。
 	st.OpenAlert(&model.Alert{
 		ID: "al_hist_1", RuleID: "r_offline", RuleName: "节点失联",
-		NodeID: "n08", NodeName: "racknerd-纽约", Severity: "warn",
+		// 严重度与 r_offline 的 critical 保持一致；时间跨度必须是 900 秒，
+		// 才能与 Value=900 和「15 分钟」的文案对上。
+		NodeID: "n08", NodeName: "racknerd-纽约", Severity: "critical",
 		Value: 900, Message: "演示：节点失联 15 分钟后恢复",
-		StartedAt: now - 8600, ResolvedAt: now - 6000,
+		StartedAt: now - 8600, ResolvedAt: now - 7700,
 	})
 }
 

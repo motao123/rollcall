@@ -92,21 +92,46 @@ func (c *Collector) Host() model.HostInfo {
 	return c.host
 }
 
+// detectVirt 判断虚拟化类型。
+//
+// 不能只看 /proc/cpuinfo 的 CPU 型号：KVM 直通/宿主机型号透传时
+// cpuinfo 里通常不含 "KVM"（hypervisor vendor 在 CPUID 0x40000000，
+// /proc/cpuinfo 不暴露），Hyper-V 也很少带 "Microsoft"。
+// 按 systemd-detect-virt 的思路优先读 /sys 与 DMI。
 func detectVirt() string {
-	b, err := os.ReadFile("/proc/cpuinfo")
-	if err != nil {
-		return ""
+	if b, err := os.ReadFile("/sys/hypervisor/type"); err == nil {
+		switch v := strings.TrimSpace(string(b)); {
+		case v != "":
+			if len(v) > 1 {
+				return strings.ToUpper(v[:1]) + v[1:]
+			}
+			return v
+		}
 	}
-	s := string(b)
-	switch {
-	case strings.Contains(s, "KVM"):
-		return "KVM"
-	case strings.Contains(s, "VMware"):
-		return "VMware"
-	case strings.Contains(s, "Microsoft"):
-		return "Hyper-V"
-	case strings.Contains(s, "QEMU"):
-		return "QEMU"
+	for _, p := range []string{"/sys/class/dmi/id/product_name", "/sys/class/dmi/id/sys_vendor"} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		s := strings.ToLower(string(b))
+		switch {
+		case strings.Contains(s, "kvm"):
+			return "KVM"
+		case strings.Contains(s, "vmware"):
+			return "VMware"
+		case strings.Contains(s, "virtualbox"):
+			return "VirtualBox"
+		case strings.Contains(s, "hyper-v"), strings.Contains(s, "microsoft"):
+			return "Hyper-V"
+		case strings.Contains(s, "qemu"):
+			return "QEMU"
+		case strings.Contains(s, "xen"):
+			return "Xen"
+		}
+	}
+	// 最后退回 CPUID hypervisor 标志（部分内核会在 cpuinfo 暴露 flag）
+	if b, err := os.ReadFile("/proc/cpuinfo"); err == nil && strings.Contains(string(b), " hypervisor") {
+		return "virtualized"
 	}
 	return "bare-metal"
 }

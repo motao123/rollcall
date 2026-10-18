@@ -69,6 +69,8 @@
 
   function render(d) {
     document.getElementById('title').textContent = d.site || '服务状态';
+    // 同步浏览器标签标题：否则改服务端 statusTitle 后标签页永远停在硬编码值
+    document.title = (d.site ? d.site + ' · ' : '') + '服务状态';
     var st = new Date(d.generatedAt * 1000);
     var p = function (n) { return (n < 10 ? '0' : '') + n; };
     document.getElementById('stamp').textContent =

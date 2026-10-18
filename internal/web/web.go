@@ -1413,7 +1413,12 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		ChannelID string `json:"channelId"`
 	}
 	body := http.MaxBytesReader(w, r.Body, 4<<10)
-	_ = json.NewDecoder(body).Decode(&req)
+	if err := json.NewDecoder(body).Decode(&req); err != nil && err != io.EOF {
+		// 空 body 合法（测全部通道）；语法错误必须拒绝，
+		// 否则畸形请求会被当成「无 channelId」并向所有通道群发。
+		fail(w, 400, "请求体不是合法 JSON")
+		return
+	}
 
 	cfg, err := notify.Parse(s.st.GetSetting("notify"))
 	if err != nil {
