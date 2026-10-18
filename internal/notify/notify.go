@@ -432,6 +432,9 @@ func dispatch(ch ChannelConfig, subject, body string, m Message) error {
 	case "webhook":
 		return sendWebhook(ch.Options, m)
 	}
+	if p, ok := pluginOf(ch.Type); ok {
+		return runPlugin(p, ch, subject, body, m)
+	}
 	return fmt.Errorf("不支持的通道类型：%s", ch.Type)
 }
 

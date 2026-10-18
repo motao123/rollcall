@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/motao/rollcall/internal/model"
 )
@@ -87,6 +88,93 @@ func TestHistoryAggregation(t *testing.T) {
 	got := s.HistorySeries("n1", HistoryResolution1m, histBase+300)
 	if len(got) != 5 || got[0].TS != histBase+300 {
 		t.Fatalf("since 过滤异常: len=%d first=%+v", len(got), got)
+	}
+}
+
+func TestConfigureHistoryValidation(t *testing.T) {
+	t.Cleanup(func() { _ = ConfigureHistory(DefaultHistoryRetention()) })
+	if err := ConfigureHistory(HistoryRetention{Tier1m: 2 * time.Hour, Tier5m: 12 * time.Hour, Tier1h: 48 * time.Hour}); err != nil {
+		t.Fatalf("配置有效保留期失败: %v", err)
+	}
+	if tier1m.keep != 120 || tier5m.keep != 144 || tier1h.keep != 48 {
+		t.Fatalf("桶数量未按保留期更新: %+v %+v %+v", tier1m, tier5m, tier1h)
+	}
+	bad := []HistoryRetention{
+		{Tier1m: 30 * time.Second, Tier5m: time.Hour, Tier1h: time.Hour},
+		{Tier1m: time.Hour, Tier5m: 5 * time.Minute, Tier1h: time.Hour},
+		{Tier1m: 90 * time.Minute, Tier5m: time.Hour, Tier1h: time.Hour},
+		{Tier1m: 11 * 365 * 24 * time.Hour, Tier5m: time.Hour, Tier1h: time.Hour},
+	}
+	for _, r := range bad {
+		if err := ConfigureHistory(r); err == nil {
+			t.Fatalf("非法保留期应报错: %+v", r)
+		}
+	}
+}
+
+func TestHistoryUsageSumsPreserveAbsoluteValues(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	s.AddMetrics("n1", model.HostInfo{}, model.Metrics{
+		TS: histBase, MemUsed: 1 << 30, MemTotal: 2 << 30,
+		DiskUsed: 10 << 30, DiskTotal: 60 << 30,
+	})
+	s.AddMetrics("n1", model.HostInfo{}, model.Metrics{
+		TS: histBase + 30, MemUsed: 3 << 30, MemTotal: 8 << 30,
+		DiskUsed: 20 << 30, DiskTotal: 60 << 30,
+	})
+	check := func(s *Store, label string) {
+		t.Helper()
+		m1 := s.HistorySeries("n1", HistoryResolution1m, histBase)
+		if len(m1) != 1 {
+			t.Fatalf("%s: 1m 点数 %d", label, len(m1))
+		}
+		if m1[0].MemUsed != 2<<30 {
+			t.Fatalf("%s: 平均内存用量 %d，want %d（不能用最新总量反推）", label, m1[0].MemUsed, uint64(2<<30))
+		}
+		if m1[0].DiskUsed != 15<<30 {
+			t.Fatalf("%s: 平均磁盘用量 %d，want %d", label, m1[0].DiskUsed, uint64(15<<30))
+		}
+	}
+	check(s, "内存")
+	if err := s.SaveHistory(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := New(dir)
+	if err := s2.LoadErr(); err != nil {
+		t.Fatal(err)
+	}
+	check(s2, "重载")
+}
+
+// TestHistorySchema1Fallback 验证旧快照没有绝对用量总和时按最新总量回算，
+// 并在同桶新增样本时把旧样本补进总和，避免平均值被拉低。
+func TestHistorySchema1Fallback(t *testing.T) {
+	dir := t.TempDir()
+	old := `{"schemaVersion":1,"nodes":{"n1":{"lastTs":1700006430,"m1":[` +
+		`{"b":1700006400,"c":2,"ca":1,"cm":1,"ma":25,"da":33.333333,"mt":8589934592,"dt":64424509440}]}}}`
+	if err := os.WriteFile(filepath.Join(dir, "history.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(dir)
+	if err := s.LoadErr(); err != nil {
+		t.Fatal(err)
+	}
+	m1 := s.HistorySeries("n1", HistoryResolution1m, histBase)
+	if len(m1) != 1 || m1[0].MemUsed != 2<<30 {
+		t.Fatalf("旧 schema 回算异常: %+v", m1)
+	}
+	s.AddMetrics("n1", model.HostInfo{}, model.Metrics{
+		TS: histBase + 30, MemUsed: 4 << 30, MemTotal: 8 << 30,
+		DiskUsed: 40 << 30, DiskTotal: 60 << 30,
+	})
+	m1 = s.HistorySeries("n1", HistoryResolution1m, histBase)
+	if len(m1) != 1 || m1[0].Count != 3 {
+		t.Fatalf("旧桶续写异常: %+v", m1)
+	}
+	// (2GB×2 旧样本 + 4GB) / 3
+	if want := uint64(8<<30) / 3; m1[0].MemUsed != want {
+		t.Fatalf("旧桶续写后平均用量 %d，want %d", m1[0].MemUsed, want)
 	}
 }
 

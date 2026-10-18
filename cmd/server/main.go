@@ -44,7 +44,11 @@ func main() {
 	allowPrivateProbes := flag.Bool("allow-private-probes", false, "允许探测回环/私网/链路本地目标")
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
 	allowPrivateNotify := flag.Bool("allow-private-notify", false, "允许通知通道访问回环/私网目标（自建 Gotify/Bark/Webhook 时使用）")
+	notifyPlugins := flag.String("notify-plugins", "", "通知插件目录（显式启用本地插件，目录内 *.json 清单）")
 	saveInterval := flag.Duration("save-interval", 60*time.Second, "自动保存快照间隔（10s–1h）")
+	history1m := flag.Duration("history-1m-retention", 7*24*time.Hour, "1 分钟聚合层保留时长（默认 7 天）")
+	history5m := flag.Duration("history-5m-retention", 30*24*time.Hour, "5 分钟聚合层保留时长（默认 30 天）")
+	history1h := flag.Duration("history-1h-retention", 365*24*time.Hour, "1 小时聚合层保留时长（默认 365 天）")
 	cnyRate := flag.Float64("cny-rate", 7.2, "CNY 折算 USD 的汇率（用于成本聚合）")
 	showVersion := flag.Bool("version", false, "打印版本后退出")
 	flag.Parse()
@@ -65,6 +69,11 @@ func main() {
 	if *cnyRate <= 0 || *cnyRate > 1000 {
 		log.Fatal("-cny-rate 必须在 0–1000 之间")
 	}
+	retention := store.HistoryRetention{Tier1m: *history1m, Tier5m: *history5m, Tier1h: *history1h}
+	if err := store.ConfigureHistory(retention); err != nil {
+		log.Fatalf("历史保留期配置无效: %v", err)
+	}
+	log.Printf("历史聚合保留: 1m=%s 5m=%s 1h=%s", retention.Tier1m, retention.Tier5m, retention.Tier1h)
 	if (*tlsCert == "") != (*tlsKey == "") {
 		log.Fatal("-tls-cert 与 -tls-key 必须同时提供")
 	}
@@ -144,6 +153,12 @@ func main() {
 		InsecureTLS:  *insecureProbeTLS,
 	})
 	notify.SetAllowPrivateTargets(*allowPrivateNotify)
+	if err := notify.LoadPlugins(*notifyPlugins); err != nil {
+		log.Fatalf("加载通知插件失败: %v", err)
+	}
+	if n := notify.PluginCount(); n > 0 {
+		log.Printf("已加载 %d 个通知插件（目录 %s）", n, *notifyPlugins)
+	}
 	engine := alert.New(st)
 	engine.Start(15 * time.Second)
 	st.StartAutoSave(*saveInterval)

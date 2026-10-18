@@ -1,10 +1,14 @@
 // Command agent 是只读监控代理。
 //
 // ★ 安全承诺 ★
-//   - 不 import os/exec        → 无法执行任何命令
+//   - 不 import os/exec        → 无法执行任意命令
 //   - 不监听任何端口            → 无入站攻击面
 //   - 不接收服务端指令          → 协议为单向上报
 //   - 只读 /proc、/etc/os-release 与 statfs → 不触碰用户数据
+//
+// 自更新是唯一会修改自身二进制的功能，且必须在本机配置中显式开启：
+// 只拉取 Ed25519 签名清单、校验 SHA-256，替换自身后用 syscall.Exec 重启，
+// 不经过 shell，也不执行清单以外的任何程序。
 //
 // 验证方式见 internal/collect/collect_linux.go 顶部注释与 README 第一节。
 // 要点：用 `go list -deps ./cmd/agent` 看依赖、用**未剥离**二进制的
@@ -13,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -28,14 +34,23 @@ import (
 
 	"github.com/motao/rollcall/internal/collect"
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/selfupdate"
 	"github.com/motao/rollcall/internal/version"
 )
 
+type updateConfig struct {
+	Enabled            bool   `json:"enabled"`
+	ManifestURL        string `json:"manifestUrl"`
+	PublicKey          string `json:"publicKey"`
+	CheckIntervalHours int    `json:"checkIntervalHours"` // 1–168，默认 6
+}
+
 type config struct {
-	Server   string `json:"server"` // 主控地址，如 https://rollcall.example.com
-	NodeID   string `json:"nodeId"`
-	Token    string `json:"token"`
-	Interval int    `json:"interval"` // 秒
+	Server   string       `json:"server"` // 主控地址，如 https://rollcall.example.com
+	NodeID   string       `json:"nodeId"`
+	Token    string       `json:"token"`
+	Interval int          `json:"interval"` // 秒
+	Update   updateConfig `json:"update"`
 }
 
 func loadConfig(path string) (*config, error) {
@@ -55,6 +70,17 @@ func loadConfig(path string) (*config, error) {
 	if c.Interval > 60 {
 		return nil, fmt.Errorf("interval 不能超过 60 秒（服务端 120 秒未收到上报即判定离线），当前 %d 秒", c.Interval)
 	}
+	if c.Update.Enabled {
+		if strings.TrimSpace(c.Update.ManifestURL) == "" || strings.TrimSpace(c.Update.PublicKey) == "" {
+			return nil, fmt.Errorf("update.enabled 为 true 时必须配置 manifestUrl 与 publicKey")
+		}
+		if c.Update.CheckIntervalHours == 0 {
+			c.Update.CheckIntervalHours = 6
+		}
+		if c.Update.CheckIntervalHours < 1 || c.Update.CheckIntervalHours > 168 {
+			return nil, fmt.Errorf("update.checkIntervalHours 必须在 1–168 之间")
+		}
+	}
 	return &c, nil
 }
 
@@ -62,6 +88,8 @@ func main() {
 	cfgPath := flag.String("config", "./agent.json", "配置文件路径")
 	once := flag.Bool("once", false, "只采集并上报一次（用于验证连通性）")
 	allowInsecure := flag.Bool("allow-insecure", false, "允许用明文 HTTP 连接非本机服务端（节点令牌会明文传输）")
+	rollback := flag.Bool("rollback", false, "恢复 .prev 备份的上一版本并重启（手动回滚）")
+	updateNow := flag.Bool("update-now", false, "立即检查并安装更新后退出（需在配置中启用 update）")
 	showVersion := flag.Bool("version", false, "打印版本后退出")
 	flag.Parse()
 
@@ -71,6 +99,37 @@ func main() {
 	}
 	if runtime.GOOS != "linux" {
 		log.Printf("⚠ 当前平台 %s 仅用于 UI 调试，采集指标将全部为 0；生产请使用 Linux", runtime.GOOS)
+	}
+
+	exePath, exeErr := os.Executable()
+	if exeErr != nil {
+		log.Printf("⚠ 无法定位可执行文件，自更新与回滚不可用: %v", exeErr)
+		exePath = ""
+	}
+	if runtime.GOOS == "linux" && exePath != "" {
+		if *rollback {
+			if err := selfupdate.ManualRollback(exePath, version.Version); err != nil {
+				log.Fatalf("回滚失败: %v", err)
+			}
+			log.Printf("已恢复上一版本，重新启动…")
+			if err := reexec(exePath, stripFlag(os.Args, "-rollback")); err != nil {
+				log.Fatalf("重启失败: %v", err)
+			}
+			return
+		}
+		rolledBack, err := selfupdate.HandleStartup(exePath, version.Version)
+		if err != nil {
+			log.Printf("检查更新启动标记失败: %v", err)
+		}
+		if rolledBack {
+			log.Printf("新版本连续 %d 次启动未稳定，已回滚到上一版本", selfupdate.MaxStartupAttempts)
+			if err := reexec(exePath, os.Args); err != nil {
+				log.Fatalf("重启失败: %v", err)
+			}
+			return
+		}
+	} else if *rollback {
+		log.Fatal("-rollback 仅支持 Linux")
 	}
 
 	cfg, err := loadConfig(*cfgPath)
@@ -84,6 +143,65 @@ func main() {
 	endpoint, err := reportEndpoint(cfg.Server, *allowInsecure)
 	if err != nil {
 		log.Fatalf("配置错误: %v", err)
+	}
+
+	var updater *selfupdate.Updater
+	if cfg.Update.Enabled {
+		if runtime.GOOS != "linux" || exePath == "" {
+			log.Fatal("自更新仅支持 Linux 且需要可定位的可执行文件")
+		}
+		updater, err = selfupdate.New(cfg.Update.ManifestURL, cfg.Update.PublicKey, *allowInsecure)
+		if err != nil {
+			log.Fatalf("更新配置无效: %v", err)
+		}
+	}
+	checkAndApply := func(ctx context.Context) (bool, error) {
+		m, err := updater.Fetch(ctx)
+		if err != nil {
+			return false, err
+		}
+		key := updater.GOOS + "-" + updater.GOARCH
+		if _, ok := m.Assets[key]; !ok {
+			if selfupdate.IsNewer(m.Version, version.Version) {
+				log.Printf("更新清单 %s 没有适用于 %s 的资产", m.Version, key)
+			}
+			return false, nil
+		}
+		asset, newer := updater.Candidate(m, version.Version)
+		if !newer {
+			return false, nil
+		}
+		if failed, ok := selfupdate.BlockedVersion(exePath); ok && selfupdate.SameVersion(failed, m.Version) {
+			log.Printf("版本 %s 此前启动失败已回滚，%s 内不再自动安装", m.Version, selfupdate.FailedVersionBackoff)
+			return false, nil
+		}
+		path, err := updater.Download(ctx, asset, filepath.Dir(exePath))
+		if err != nil {
+			return false, err
+		}
+		if err := selfupdate.Apply(exePath, path, m.Version); err != nil {
+			_ = os.Remove(path)
+			return false, err
+		}
+		log.Printf("已安装 Agent %s，上一版本备份为 %s", m.Version, selfupdate.BackupPath(exePath))
+		return true, nil
+	}
+
+	if *updateNow {
+		if updater == nil {
+			log.Fatal("-update-now 需要在配置中启用 update")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		updated, err := checkAndApply(ctx)
+		cancel()
+		if err != nil {
+			log.Fatalf("更新检查失败: %v", err)
+		}
+		if updated {
+			return
+		}
+		log.Printf("未安装更新（已是最新版本，或该版本处于回滚冷却期）")
+		return
 	}
 
 	c := collect.New()
@@ -130,6 +248,11 @@ func main() {
 		}
 		log.Printf("已上报 cpu=%.1f%% mem=%.1f%% disk=%.1f%%",
 			m.CPUPct, pct(m.MemUsed, m.MemTotal), pct(m.DiskUsed, m.DiskTotal))
+		if exePath != "" {
+			if err := selfupdate.MarkStable(exePath); err != nil {
+				log.Printf("清除更新启动标记失败: %v", err)
+			}
+		}
 		return nil
 	}
 
@@ -139,6 +262,31 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	if updater != nil {
+		interval := time.Duration(cfg.Update.CheckIntervalHours) * time.Hour
+		go func() {
+			// 错开启动高峰；首次检查失败只记录，不影响上报。
+			timer := time.NewTimer(30 * time.Second)
+			defer timer.Stop()
+			for range timer.C {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				updated, err := checkAndApply(ctx)
+				cancel()
+				if err != nil {
+					log.Printf("自动更新检查失败: %v", err)
+				}
+				if updated {
+					log.Printf("自更新已安装，重启 Agent…")
+					if err := reexec(exePath, os.Args); err != nil {
+						log.Fatalf("重启失败: %v", err)
+					}
+					return
+				}
+				timer.Reset(interval)
+			}
+		}()
 	}
 
 	// 上报异步执行：慢网络下同步 send 会堵住 ticker，
@@ -187,6 +335,18 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// stripFlag 去掉指定开关，避免回滚后 re-exec 再次触发回滚。
+func stripFlag(args []string, name string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func pct(used, total uint64) float64 {

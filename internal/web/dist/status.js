@@ -20,6 +20,38 @@
   // 切勿复用使用率的配色函数，否则会出现"83% 可用率显示绿色"的语义颠倒。
   var upCls = function (v) { return v >= 99.5 ? 'ok' : v >= 95 ? 'warn' : 'crit'; };
 
+  /* ---------------- 外观 ---------------- */
+
+  // 只应用服务端下发的固定字段；不接收、不拼接任何 CSS 文本。
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  var currentTheme = null;
+
+  function paintTheme() {
+    var t = currentTheme || {};
+    var mode = (t.mode === 'light' || t.mode === 'dark') ? t.mode : (mq.matches ? 'dark' : 'light');
+    var root = document.documentElement;
+    root.setAttribute('data-theme', mode);
+    root.style.setProperty('--accent',
+      mode === 'dark' ? (t.accentDark || '#6ea8d8') : (t.accent || '#2f5d8a'));
+    root.style.setProperty('--r', ((t.radius == null ? 12 : Number(t.radius))) + 'px');
+    if (t.compact) root.setAttribute('data-density', 'compact');
+    else root.removeAttribute('data-density');
+  }
+
+  function loadTheme() {
+    fetch('/api/theme', { headers: { Accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (t) {
+        currentTheme = t;
+        paintTheme();
+        if (t.mode !== 'light' && t.mode !== 'dark' && mq.addEventListener) {
+          mq.addEventListener('change', paintTheme);
+        }
+      })
+      .catch(paintTheme);
+  }
+  loadTheme();
+
   function bars(node) {
     var b = node.bars || [];
     if (!b.length) return '';
@@ -120,4 +152,6 @@
 
   load();
   setInterval(load, 30000);
+  // 外观配置变化不频繁，每 5 分钟同步一次即可。
+  setInterval(loadTheme, 300000);
 })();

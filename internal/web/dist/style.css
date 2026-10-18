@@ -1036,3 +1036,21 @@ pre.code {
 .switch input:checked + span { background: var(--ok); }
 .switch input:checked + span::before { transform: translateX(15px); }
 .switch input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---------- 主题外观 ---------- */
+
+.field input[type="color"] {
+  height: 34px;
+  padding: 3px;
+  cursor: pointer;
+}
+
+/* 紧凑密度只压缩纵向间距，不改变信息层级与断点布局 */
+html[data-density="compact"] .section { margin-bottom: 18px; }
+html[data-density="compact"] .section-head { margin-bottom: 9px; }
+html[data-density="compact"] .panel-pad { padding: 12px; }
+html[data-density="compact"] .kpi { padding: 10px 12px 11px; }
+html[data-density="compact"] .node-card { padding: 11px 12px 9px; }
+html[data-density="compact"] tbody td { padding: 7px 12px; }
+html[data-density="compact"] .ch-card { margin-bottom: 8px; }
+html[data-density="compact"] .form-grid { gap: 9px 12px; }

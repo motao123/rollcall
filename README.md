@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.6.1**（`./rollcall-server -version` 可查）。
+当前版本 **v1.7.0**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -40,6 +40,7 @@
 > **能力缺失比代码自主更安全。**
 
 Agent 里不 import `os/exec`、不 `net.Listen`，攻击者即使拿到面板也无处下发命令 —— 攻击面从"任意 RCE"降到"只能伪造指标数据"。
+唯一的代码替换路径是可选的自更新：只接受本机配置的签名清单，面板与服务端都无法触发。
 
 可用以下方式验证这个承诺：
 
@@ -55,7 +56,7 @@ go tool nm /tmp/agent-full | grep -cE 'net\.Listen|TCPListener' # 期望：0
 
 # ③ 对照组：server 必须有 Listen，否则说明 grep 模式写错了
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/server-full ./cmd/server
-go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0（实测 9）
+go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 ```
 
 > **⚠ 两个会让验证变成"假通过"的坑**（实测踩过）：
@@ -134,6 +135,39 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
   可在修复通道后手动重试，重试会重置尝试次数并立即唤醒调度器
 - **变更留痕**：规则停用、删除或收紧定向范围导致活跃告警被关闭时，会补发恢复通知，不再静默消失
 
+**通知插件（可选，显式开启）**
+
+内置通道之外，可用 `-notify-plugins <目录>` 加载本地插件：
+
+- 目录顶层的 `*.json` 清单声明通道类型、展示名、配置字段与相对可执行文件；
+  未指定该参数时，服务端没有任何执行外部程序的路径
+- 投递时把通道配置与消息以 JSON 写入插件 stdin，**不经过 shell**；子进程环境完全重建，
+  不继承服务端环境变量（避免管理令牌泄露），每次调用硬超时 1–30 秒，输出有上限
+- 插件类型不能覆盖内置通道；清单与命令都限制在插件目录内，拒绝符号链接越界，
+  命令必须是普通可执行文件
+- 插件通道沿用现有通知页的编辑、脱敏与逐通道测试；修改清单后需重启服务端
+- 插件在本机以服务端用户身份运行，属于**受信任的本地扩展**，不是沙箱；
+  只应安装自己审计过的脚本
+
+### 6. 外观主题（受限沙箱）
+
+- 设置页可配置明暗模式、浅色/深色强调色、圆角（0–24px）与紧凑密度
+- 服务端只接受固定字段（`mode` / `accent` / `accentDark` / `radius` / `compact`），
+  未知字段与非法颜色直接拒绝；**永远不接受 CSS 文本**
+- 前端只把这些值映射到白名单 CSS 变量；公开状态页同步应用，且不新增任何数据暴露
+- 主题随设置持久化；`GET /api/theme` 公开下发（仅样式），
+  管理端用 `GET/PUT /api/admin/theme` 读写
+
+### 7. Agent 签名自更新（可选，默认关闭）
+
+- Agent 从配置中的**清单地址主动拉取**更新，不开放入站端口，服务端不参与、也无法下发更新指令
+- 清单是 Ed25519 签名信封，包含版本、平台资产 URL、SHA-256 与大小；签名、哈希或大小不符即拒绝
+- 更新包必须是小端 ELF 且架构匹配，下载到同目录后原子替换，保留 `.prev` 备份
+- 新版本连续 3 次启动仍未完成一次成功上报时自动回滚；失败版本 7 天内不再自动尝试
+- 手动回滚 `rollcall-agent -rollback`；立即检查 `rollcall-agent -update-now`
+- 自更新需要 Agent 对其二进制所在目录有写权限，systemd 加固下还需放行该目录
+  （见运维手册）；默认安装路径 `/usr/local/bin` 归 root 所有，因此默认不会自动更新
+
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
 
@@ -198,10 +232,15 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 对齐 Komari 的"无数据库"理念，同时保证重启不丢历史：
 
 - **原始层**：每节点一个定长环形缓冲（2880 点 = 24h @30s），支撑 1h/6h/24h 查询
-- **聚合层**：1m × 7d、5m × 30d、1h × 365d 三级桶，支撑 7d/30d/365d 查询；
-  桶内保存平均值、CPU 峰值、网络增量与样本数，内存约 70MB @ 40 节点满保留期
+- **聚合层**：1m × 7d、5m × 30d、1h × 365d 三级桶（默认），支撑 7d/30d/365d 查询；
+  桶内保存平均值、CPU 峰值、网络增量与样本数，内存约 70MB @ 40 节点满保留期；
+  三级保留期可分别用 `-history-1m-retention` / `-history-5m-retention` /
+  `-history-1h-retention` 调整（须满足 1m ≤ 5m ≤ 1h，且为对应聚合窗口的整数倍）
+- 聚合桶从 schema 2 起记录内存/磁盘**绝对用量总和**，扩容后不会因
+  「最新总量 × 历史百分比」产生系统性偏差；旧桶自动回退到原百分比换算
 - 默认每 60 秒把状态快照写入 `data/state.json`（`-save-interval` 可调，10s–1h；gzip 压缩 JSON，先写 `.tmp` 再 rename，保证原子性）
 - 聚合历史每 5 分钟单独写入 `data/history.json`，与主快照解耦；主快照体积不随保留期增长
+  （history schema 当前为 2；旧 schema 1 可直接载入并自动补齐用量总和字段）
 - 启动时自动恢复；兼容旧版本写出的明文 JSON，首次保存后自动转为 gzip
 - 历史缺失或损坏时自动用 24h 原始点回填，损坏文件隔离为 `history.json.corrupt-<时间>`；
   正常重启只回放上次落盘之后的原始点，不会重复累计
@@ -289,9 +328,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 ```
 
 > 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
-> 使用前需要构建机安装 `make`。
+> 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
+> `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.6.1`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.7.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -373,6 +413,19 @@ EOF
 chown root:rollcall-agent /etc/rollcall/agent.json
 chmod 0640 /etc/rollcall/agent.json
 
+# 3.1 可选：启用签名自更新（默认关闭；不需要可跳过）
+#     在 agent.json 中增加 update 块后再启动：
+# {
+#   "update": {
+#     "enabled": true,
+#     "manifestUrl": "https://updates.example.com/agent/manifest.json",
+#     "publicKey": "<base64 Ed25519 公钥>",
+#     "checkIntervalHours": 6
+#   }
+# }
+# manifestUrl 必须是 HTTPS（本机回环可用 HTTP）；publicKey 由 `rollsign keygen` 生成，
+# 私钥只保留在签名机。自更新还要求 Agent 对二进制目录有写权限，见运维手册。
+
 # 4. 启动
 systemctl daemon-reload
 systemctl enable --now rollcall-agent
@@ -391,6 +444,28 @@ runuser -u rollcall-agent -- \
 > Agent 默认拒绝向**非本机**的明文 HTTP 服务端上报（节点令牌会裸奔）。
 > 远程节点必须使用 `https://`；仅本机回环或明确接受风险时才加 `-allow-insecure`。
 > Agent 不跟随 3xx，确保 `X-Node-Token` 不会被转发到其他主机。
+
+> **自更新权限**：Agent 以低权限用户运行时，必须对**二进制所在目录**有写权限才能原子替换自身；
+> 默认的 `/usr/local/bin` 归 root 所有，未做额外配置时自更新只会失败并记录日志，不影响上报。
+> 需要自更新时，建议把二进制放到专用目录（目录属主 `rollcall-agent`）：
+>
+> ```bash
+> install -d -o rollcall-agent -g rollcall-agent -m 0750 /opt/rollcall-agent
+> install -m 0755 -o rollcall-agent -g rollcall-agent \
+>   rollcall-agent /opt/rollcall-agent/rollcall-agent
+> ```
+>
+> 并在 systemd drop-in 中把 `ExecStart` 指向新路径，同时放行写权限：
+>
+> ```ini
+> [Service]
+> ExecStart=
+> ExecStart=/opt/rollcall-agent/rollcall-agent -config /etc/rollcall/agent.json
+> ReadWritePaths=/opt/rollcall-agent
+> ```
+>
+> `-rollback` 恢复 `.prev` 后自动重启；`.update-pending` 记录待验证版本与启动次数，
+> 首次成功上报后自动删除。签名与清单生成见 `docs/operations.md`。
 
 > **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
 >
@@ -416,9 +491,13 @@ runuser -u rollcall-agent -- \
 | `-allow-insecure` | false | 允许非回环地址使用明文 HTTP |
 | `-allow-private-probes` | false | 允许 HTTP/TCP 探测内网与回环目标 |
 | `-allow-private-notify` | false | 允许通知通道访问内网/回环目标（自建 Gotify/Bark/Webhook） |
+| `-notify-plugins` | 空 | 通知插件目录；显式指定后加载顶层 `*.json` 清单 |
 | `-insecure-probe-tls` | false | 探测 HTTPS 时跳过证书校验（自签名目标） |
 | `-probe-interval` | `10s` | 探测调度粒度；每个服务按自身 `interval` 执行 |
 | `-save-interval` | `60s` | 自动保存快照间隔（10s–1h）；退出时还会强制保存一次 |
+| `-history-1m-retention` | `168h` | 1 分钟聚合保留期（≥1m、为 60s 整数倍） |
+| `-history-5m-retention` | `720h` | 5 分钟聚合保留期（≥5m、为 300s 整数倍） |
+| `-history-1h-retention` | `8760h` | 1 小时聚合保留期（≥1h、为 3600s 整数倍） |
 | `-cny-rate` | `7.2` | CNY 折算 USD 的汇率（仅用于成本聚合展示） |
 | `-admin-token` | 自动生成 | 管理令牌，显式指定时至少 16 字符 |
 | `-data` | `./data` | 数据目录（state.json / history.json / admin.token，均为 0600） |
@@ -437,6 +516,7 @@ runuser -u rollcall-agent -- \
 | GET/POST | `/api/admin/services` | 列出 / 创建探测目标（`enabled` 默认 true） |
 | DELETE | `/api/admin/services/{id}` | 删除探测目标 |
 | GET/POST | `/api/admin/settings` | 读取（脱敏）/ 保存通知配置 |
+| GET/PUT | `/api/admin/theme` | 读取 / 保存外观主题（固定字段，未知字段拒绝） |
 | POST | `/api/admin/test-notify` | 发送测试通知，可带 `{"channelId":"..."}` 只测单个 |
 | GET/POST | `/api/admin/rules` | 列出 / 创建告警规则 |
 | GET/PUT/DELETE | `/api/admin/rules/{id}` | 查看 / 修改 / 删除单条规则 |
@@ -452,6 +532,7 @@ runuser -u rollcall-agent -- \
 |---|---|---|
 | GET | `/status` | 公开状态页 HTML |
 | GET | `/api/status` | 公开状态页数据（严格脱敏） |
+| GET | `/api/theme` | 公开外观主题（仅固定样式字段） |
 | GET | `/status.js` | 公开状态页脚本 |
 | GET | `/healthz` | 健康检查 |
 
@@ -524,7 +605,8 @@ ssh -N -L 19080:127.0.0.1:19080 root@<控制端 IP>
 rollcall/
 ├── cmd/
 │   ├── server/main.go       服务端入口
-│   └── agent/main.go        只读 Agent 入口
+│   ├── agent/main.go        只读 Agent 入口
+│   └── rollsign/main.go     更新清单签名工具（keygen / sign）
 ├── internal/
 │   ├── model/               数据结构（无依赖）
 │   ├── store/               环形缓冲 + 分层聚合 + JSON 快照
@@ -532,13 +614,17 @@ rollcall/
 │   ├── netguard/            出站地址策略（SSRF 防护，探测/通知共用）
 │   ├── probe/               HTTP/TCP 探测
 │   ├── alert/               告警引擎
+│   ├── notify/              通知通道 + 本地插件加载/执行
+│   ├── outbox/              持久化通知队列
+│   ├── selfupdate/          Ed25519 清单校验、下载、原子替换与回滚
+│   ├── theme/               受限主题模型与校验
 │   ├── version/             构建版本号（ldflags 注入）
 │   └── web/
 │       ├── web.go           API + 内嵌静态资源
 │       └── dist/            index.html / app.js / style.css
 ├── deploy/                  systemd 单元与配置样例
-├── docs/operations.md       备份、升级、令牌轮换与故障排查
-├── .github/workflows/ci.yml gofmt / vet / test / 交叉编译
+├── docs/operations.md       备份、升级、插件、自更新与故障排查
+├── .github/workflows/ci.yml gofmt / vet / test / -race / 交叉编译
 └── LICENSE                  MIT
 ```
 
@@ -548,9 +634,12 @@ rollcall/
 
 | 风险 | 本项目的处理 |
 |---|---|
-| Agent 被用作 RAT | 不 import `os/exec`，无任何命令执行路径 |
-| Agent 被远程控制 | 协议单向（仅 POST 上报），服务端不连 Agent |
+| Agent 被用作 RAT | 不 import `os/exec`；唯一执行路径是 `syscall.Exec` 重启**已签名**的新版本自身 |
+| Agent 被远程控制 | 协议单向（仅 POST 上报），服务端不连 Agent，也不能触发自更新 |
 | Agent 开放端口 | 不 `net.Listen`，无入站攻击面 |
+| Agent 更新被投毒 | 自更新默认关闭；Ed25519 签名清单 + SHA-256/大小校验 + ELF 架构检查；不跟随重定向 |
+| 主题编辑器注入 | 只接受固定字段与 `#rrggbb`，拒绝未知字段；前端仅映射白名单 CSS 变量，永不渲染 CSS 文本 |
+| 通知插件越权 | 需本机 `-notify-plugins` 显式开启；清单/命令限制在插件目录，拒绝符号链接逃逸；无 shell，环境变量重建，1–30s 超时 |
 | 上报伪造 | 每节点独立 token，**常量时间比较**；服务端时间戳校正 |
 | 请求体攻击 | `MaxBytesReader` 限制 64KB；`DisallowUnknownFields` |
 | XSS / 点击劫持 | 前端全量 `esc()` 转义；CSP `default-src 'self'` + `frame-ancestors 'none'`；`X-Frame-Options: DENY` |
@@ -576,9 +665,11 @@ rollcall/
 ## 八、已知限制
 
 1. **未实现** ICMP 探测（需 raw socket 权限；HTTP/TCP 已覆盖绝大多数场景）
-2. 时序仅保留 24 小时，长期趋势需外接 TSDB
+2. 长历史依赖本地分层聚合（默认 1h 层 365 天）；更长期归档或多实例仍需外接 TSDB
 3. 单实例单进程，无水平扩展设计（40 台规模绰绰有余）
 4. 无多用户与权限体系（管理令牌为单一凭据，适合个人/小团队）
+5. Agent 自更新仅支持 Linux，且要求对二进制目录有写权限；服务端升级仍由运维执行
+6. 主题只有固定字段，通知插件是本机受信任扩展而非沙箱；两者都需要管理权限才能配置
 
 ---
 
@@ -592,6 +683,9 @@ rollcall/
 | ~~P4~~ | ~~公开状态页 `/status`（免登录 + 48 段 24h 色块 + 严格脱敏）~~ ✅ |
 | ~~P5~~ | ~~数据导出（CSV + Prometheus exposition）~~ ✅ |
 | ~~P6~~ | ~~通知可靠性：持久化 Outbox + 重试退避 + 全局/规则静默 + 队列指标~~ ✅ |
+| ~~P7~~ | ~~外观主题沙箱（固定字段 + 白名单 CSS 变量）~~ ✅ |
+| ~~P8~~ | ~~通知插件机制（本地清单、无 shell、环境/超时隔离）~~ ✅ |
+| ~~P9~~ | ~~Agent 签名自更新 + 自动/手动回滚~~ ✅ |
 
 **P5 明细**：
 
@@ -641,20 +735,23 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.7.0）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 active + enabled |
-| 上报频率 | 严格 30 秒一报，曲线无丢点 |
-| 指标正确性 | 与 `df`/`free` 交叉核对无偏差 |
-| 数据持久化 | state.json 写入正常，重启后历史保留 |
-| 告警引擎 | 4 条默认规则加载，无误报 |
-| 安全约束 | Agent 监听端口数 = 0 |
-| 内存占用 | server 5.7 MB / agent 7.0 MB |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.7.0、active + enabled |
+| 上报频率 | 30 秒一报，在线/数据延迟/离线状态判定正确 |
+| 指标正确性 | CPU/内存/磁盘与 `df`/`free` 交叉核对无偏差 |
+| 数据持久化 | state.json 与 gzip history.json 重启后保留，历史快照升级 schema 2 |
+| 历史范围 | 1h/6h/24h 原始点；7d/30d/365d 走 1m/5m/1h 聚合，全年合成数据 UI 验证通过 |
+| 告警与通知 | 默认规则加载；Outbox 指标正常；插件投递、环境隔离与拒绝全局可写目录在独立实例验证 |
+| 主题 | 公开读取默认主题，管理端校验、保存与重启后持久化均正常 |
+| Agent 自更新 | 独立实例验证签名安装、启动计数、自动/手动回滚与 7 天冷却 |
+| 安全约束 | Agent 依赖表无 `os/exec`、监听端口数 = 0；服务端 `net.Listen` 符号 > 0 |
+| 内存占用 | server 14.3 MB / agent 7.9 MB |
 
-完整步骤与测试结果见 `docs/部署与验证报告-20261017.txt`，
-真实部署界面截图见 `docs/screenshots/deploy-live.png`、`deploy-detail.png`。
+完整操作步骤与升级/回滚方法见 `docs/operations.md`；初次部署的完整测试记录见
+`docs/部署与验证报告-20261017.txt`，界面截图见 `docs/screenshots/`。
 
 ---
 

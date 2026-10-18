@@ -168,6 +168,7 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
 		{"/status.js", authPublic, static},
 		{"/api/status", authPublic, http.HandlerFunc(s.handleStatus)},
+		{"/api/theme", authPublic, http.HandlerFunc(s.handleTheme)},
 
 		// Agent 上报：handler 内校验 X-Node-Token
 		{"/api/report", authNodeToken, http.HandlerFunc(s.handleReport)},
@@ -188,6 +189,7 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
 		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
+		{"/api/admin/theme", authAdmin, http.HandlerFunc(s.handleAdminTheme)},
 		{"/api/admin/test-notify", authAdmin, http.HandlerFunc(s.handleTestNotify)},
 		{"/api/admin/rules", authAdmin, http.HandlerFunc(s.handleAdminRules)},
 		{"/api/admin/rules/", authAdmin, http.HandlerFunc(s.handleAdminRuleByID)},

@@ -9,8 +9,10 @@
 # 二进制
 /rollcall-server
 /rollcall-agent
+/rollsign
 /rollcall-server.exe
 /rollcall-agent.exe
+/rollsign.exe
 /probe-server
 /probe-agent
 /probe-server.exe

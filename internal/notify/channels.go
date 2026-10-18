@@ -138,22 +138,35 @@ var channelDefs = []ChannelDef{
 	},
 }
 
-// Defs 返回全部可用通道定义（深拷贝 Fields，防止调用方篡改内置表）。
+// Defs 返回全部可用通道定义（内置 + 已加载插件）。
+// 深拷贝 Fields，防止调用方篡改内置表。
 func Defs() []ChannelDef {
-	out := make([]ChannelDef, len(channelDefs))
-	for i, d := range channelDefs {
+	out := make([]ChannelDef, 0, len(channelDefs)+PluginCount())
+	for _, d := range channelDefs {
 		d.Fields = append([]Field(nil), d.Fields...)
-		out[i] = d
+		out = append(out, d)
 	}
+	out = append(out, pluginDefsSnapshot()...)
 	return out
 }
 
-// defOf 按类型查找定义。
-func defOf(t string) (ChannelDef, bool) {
+// builtinDefOf 只查内置表，供插件加载时拒绝类型覆盖。
+func builtinDefOf(t string) (ChannelDef, bool) {
 	for _, d := range channelDefs {
 		if d.Type == t {
 			return d, true
 		}
+	}
+	return ChannelDef{}, false
+}
+
+// defOf 按类型查找定义（内置优先）。
+func defOf(t string) (ChannelDef, bool) {
+	if d, ok := builtinDefOf(t); ok {
+		return d, true
+	}
+	if p, ok := pluginOf(t); ok {
+		return p.def, true
 	}
 	return ChannelDef{}, false
 }

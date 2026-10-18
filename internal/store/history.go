@@ -20,11 +20,15 @@ const (
 	HistoryResolution5m  = "5m"
 	HistoryResolution1h  = "1h"
 
-	historySchemaVersion = 1
+	// schema 2 起聚合桶记录 memUsed/diskUsed 总和，不再用最新总量反推平均值。
+	historySchemaVersion = 2
 
 	// HistorySaveInterval 是历史快照的落盘间隔。
 	// 崩溃最多丢失该窗口的聚合点，原始 24h 会用于重启后回填。
 	HistorySaveInterval = 5 * time.Minute
+
+	// maxTierBuckets 限制任一聚合层的桶数，避免超大保留期耗尽内存。
+	maxTierBuckets = 1_000_000
 )
 
 type historyTier struct {
@@ -38,6 +42,61 @@ var (
 	tier5m = historyTier{name: HistoryResolution5m, interval: 300, keep: 30 * 24 * 12}
 	tier1h = historyTier{name: HistoryResolution1h, interval: 3600, keep: 365 * 24}
 )
+
+// HistoryRetention 是三级聚合各自的保留时长。
+// 必须在创建任何 Store 之前配置；单进程内只应在启动阶段调用一次。
+type HistoryRetention struct {
+	Tier1m time.Duration
+	Tier5m time.Duration
+	Tier1h time.Duration
+}
+
+// DefaultHistoryRetention 与 v1.5.0 起的固定值保持一致。
+func DefaultHistoryRetention() HistoryRetention {
+	return HistoryRetention{
+		Tier1m: 7 * 24 * time.Hour,
+		Tier5m: 30 * 24 * time.Hour,
+		Tier1h: 365 * 24 * time.Hour,
+	}
+}
+
+// ConfigureHistory 校验并应用聚合保留期。
+func ConfigureHistory(r HistoryRetention) error {
+	build := func(name string, interval int64, d time.Duration) (historyTier, error) {
+		if d < time.Duration(interval)*time.Second {
+			return historyTier{}, fmt.Errorf("%s 保留期不能短于一个聚合窗口（%ds）", name, interval)
+		}
+		if d > 10*365*24*time.Hour {
+			return historyTier{}, fmt.Errorf("%s 保留期不能超过 10 年", name)
+		}
+		if d%(time.Duration(interval)*time.Second) != 0 {
+			return historyTier{}, fmt.Errorf("%s 保留期必须是 %ds 的整数倍", name, interval)
+		}
+		keep := int(d / (time.Duration(interval) * time.Second))
+		if keep > maxTierBuckets {
+			return historyTier{}, fmt.Errorf("%s 保留期对应 %d 个桶，超过上限 %d", name, keep, maxTierBuckets)
+		}
+		return historyTier{name: name, interval: interval, keep: keep}, nil
+	}
+	minTier, err := build(HistoryResolution1m, 60, r.Tier1m)
+	if err != nil {
+		return err
+	}
+	fiveTier, err := build(HistoryResolution5m, 300, r.Tier5m)
+	if err != nil {
+		return err
+	}
+	hourTier, err := build(HistoryResolution1h, 3600, r.Tier1h)
+	if err != nil {
+		return err
+	}
+	// 更细的聚合层不应比更粗的层保留更久，否则时间范围会自相矛盾。
+	if r.Tier1m > r.Tier5m || r.Tier5m > r.Tier1h {
+		return errors.New("聚合保留期必须满足 1m ≤ 5m ≤ 1h")
+	}
+	tier1m, tier5m, tier1h = minTier, fiveTier, hourTier
+	return nil
+}
 
 func tierByName(name string) *historyTier {
 	switch name {
@@ -65,6 +124,11 @@ type historyBucket struct {
 	DiskTotal uint64  `json:"dt"` // 桶内最新磁盘总量
 	NetRx     uint64  `json:"rx"` // 桶内接收增量
 	NetTx     uint64  `json:"tx"` // 桶内发送增量
+	// schema 2：绝对用量总和，避免用「最新总量 × 平均百分比」反推，
+	// 内存/磁盘扩容后会系统性失真。旧桶该字段为 0 且 UsageOK=false。
+	MemUsedSum  uint64 `json:"mus,omitempty"`
+	DiskUsedSum uint64 `json:"dus,omitempty"`
+	UsageOK     bool   `json:"uo,omitempty"`
 }
 
 // bucketRing 是按时间升序排列的定长聚合桶缓冲。
@@ -100,7 +164,7 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 		}
 	}
 	if b == nil {
-		nb := historyBucket{Index: idx}
+		nb := historyBucket{Index: idx, UsageOK: true}
 		r.buf[r.head] = nb
 		r.head = (r.head + 1) % r.size
 		if r.n < r.size {
@@ -109,6 +173,15 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 			// 覆盖最旧桶后，逻辑起点随 head 前移。
 		}
 		b = &r.buf[(r.head-1+r.size)%r.size]
+	}
+	if !b.UsageOK {
+		// 旧 schema 桶没有绝对用量总和：用当时的总量把平均值补成总和，
+		// 之后继续累计本期样本，避免 sum/count 把旧样本漏掉。
+		if b.Count > 0 {
+			b.MemUsedSum = pctBytes(b.MemTotal, float64(b.MemAvg)) * uint64(b.Count)
+			b.DiskUsedSum = pctBytes(b.DiskTotal, float64(b.DiskAvg)) * uint64(b.Count)
+		}
+		b.UsageOK = true
 	}
 	b.Count++
 	cpu := float32(m.CPUPct)
@@ -140,10 +213,19 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 	}
 	b.MemTotal = m.MemTotal
 	b.DiskTotal = m.DiskTotal
+	b.MemUsedSum = addSat(b.MemUsedSum, m.MemUsed)
+	b.DiskUsedSum = addSat(b.DiskUsedSum, m.DiskUsed)
 	if hasPrev {
 		b.NetRx += counterDelta(prev.NetRx, m.NetRx)
 		b.NetTx += counterDelta(prev.NetTx, m.NetTx)
 	}
+}
+
+func addSat(a, b uint64) uint64 {
+	if ^uint64(0)-a < b {
+		return ^uint64(0)
+	}
+	return a + b
 }
 
 // appendLoaded 用于从磁盘恢复：排序后仅保留最近 size 个桶。
@@ -491,8 +573,14 @@ func (s *Store) HistorySeries(nodeID, resolution string, since int64) []model.Hi
 			NetTxDelta: b.NetTx,
 			Count:      b.Count,
 		}
-		p.MemUsed = pctBytes(b.MemTotal, p.MemPct)
-		p.DiskUsed = pctBytes(b.DiskTotal, p.DiskPct)
+		if b.UsageOK && b.Count > 0 {
+			p.MemUsed = b.MemUsedSum / uint64(b.Count)
+			p.DiskUsed = b.DiskUsedSum / uint64(b.Count)
+		} else {
+			// 兼容 schema 1 桶：只能按最新总量回算。
+			p.MemUsed = pctBytes(b.MemTotal, p.MemPct)
+			p.DiskUsed = pctBytes(b.DiskTotal, p.DiskPct)
+		}
 		out = append(out, p)
 	}
 	return out

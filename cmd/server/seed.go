@@ -54,14 +54,22 @@ func seedDemo(st *store.Store) {
 		if sp.baseCPU > 30 {
 			cores = 4
 		}
-		st.AddMetrics(id, model.HostInfo{
+		host := model.HostInfo{
 			Hostname: sp.name, OS: sp.os, Kernel: "6.1.0-53-amd64",
 			Arch: "x86_64", CPUModel: "Intel Xeon / AMD EPYC", Cores: cores, Virt: "KVM",
-		}, model.Metrics{TS: now - 86400})
+		}
 
-		// 24 小时历史，30s 间隔
+		// 全年分层演示数据：粗粒度覆盖 365 天，细粒度覆盖最近 7 天和 24 小时。
+		// 这样 7d/30d/365d 曲线都能在 demo 中看到真实聚合结果。
+		segments := []struct{ from, to, step int64 }{
+			{now - 365*86400, now - 30*86400, 3600},
+			{now - 30*86400, now - 7*86400, 300},
+			{now - 7*86400, now - 86400, 60},
+			{now - 86400, now, 30},
+		}
 		var total uint64 = 26_000_000_000
-		for t := now - 86400; t <= now; t += 30 {
+		first := true
+		addSample := func(t int64) {
 			phase := float64(t%86400) / 86400 * 2 * math.Pi
 			// 日间高、夜间低的双峰曲线 + 抖动
 			wave := 0.55 + 0.35*math.Sin(phase-math.Pi/2)
@@ -81,7 +89,12 @@ func seedDemo(st *store.Store) {
 			diskUsed := uint64(float64(59*1024) * sp.disk / 100 * 1024 * 1024)
 			total += uint64(rnd.Intn(900_000))
 
-			st.AddMetrics(id, model.HostInfo{}, model.Metrics{
+			h := model.HostInfo{}
+			if first {
+				h = host
+				first = false
+			}
+			st.AddMetrics(id, h, model.Metrics{
 				TS:       t,
 				CPUPct:   round2(cpu),
 				Load1:    round2(cpu / 100 * float64(cores) * 1.6),
@@ -99,6 +112,12 @@ func seedDemo(st *store.Store) {
 				Procs:     120 + rnd.Intn(60),
 			})
 		}
+		for _, seg := range segments {
+			for t := seg.from; t < seg.to; t += seg.step {
+				addSample(t)
+			}
+		}
+		addSample(now)
 	}
 
 	// 离线节点：模拟 1 台失联

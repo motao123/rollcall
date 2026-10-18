@@ -15,6 +15,16 @@ ExecStart=/usr/local/bin/rollcall-agent -config /etc/rollcall/agent.json
 Restart=always
 RestartSec=10s
 
+# ---- 可选：签名自更新 ----
+# 自更新需要 Agent 对二进制所在目录有写权限。默认 /usr/local/bin 归 root，
+# 请改用专用目录并在 drop-in 中重写 ExecStart、放行写路径，例如：
+#   install -d -o rollcall-agent -g rollcall-agent -m 0750 /opt/rollcall-agent
+#   [Service]
+#   ExecStart=
+#   ExecStart=/opt/rollcall-agent/rollcall-agent -config /etc/rollcall/agent.json
+#   ReadWritePaths=/opt/rollcall-agent
+# 详见 docs/operations.md「Agent 签名自更新」。
+
 # ---- 最小权限加固：Agent 只需要读 /proc ----
 NoNewPrivileges=true
 ProtectSystem=strict

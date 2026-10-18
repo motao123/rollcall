@@ -5,7 +5,7 @@ BINARY_AGENT  := rollcall-agent
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 VERSION_FLAG := -X github.com/motao/rollcall/internal/version.Version=$(VERSION)
 
-.PHONY: all server agent linux clean clean-data demo fmt vet test
+.PHONY: all server agent rollsign linux clean clean-data demo fmt vet test
 
 all: server agent
 
@@ -14,6 +14,9 @@ server:
 
 agent:
 	go build -trimpath -ldflags "$(VERSION_FLAG)" -o $(BINARY_AGENT) ./cmd/agent
+
+rollsign:
+	go build -trimpath -ldflags "$(VERSION_FLAG)" -o rollsign ./cmd/rollsign
 
 # 交叉编译到 Linux（静态链接，无 CGO 依赖）
 linux:

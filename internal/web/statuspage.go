@@ -20,14 +20,24 @@ const statusPageHTML = `<!DOCTYPE html>
   --ok:#178a4c; --ok-bg:rgba(23,138,76,.10);
   --warn:#b4700a; --warn-bg:rgba(180,112,10,.12);
   --crit:#c02626; --crit-bg:rgba(192,38,38,.10);
+  --accent:#2f5d8a;
   --r:12px;
 }
+/* 服务端外观模式由 status.js 写入 data-theme；未下发前跟随系统。 */
+html[data-theme="dark"]{
+  --bg:#0e1216; --panel:#161b22; --line:#242c36; --fg:#e8edf3; --fg2:#9aa6b4; --fg3:#66707e;
+  --ok:#3ecf7a; --ok-bg:rgba(62,207,122,.13);
+  --warn:#e0a33c; --warn-bg:rgba(224,163,60,.14);
+  --crit:#f26d6d; --crit-bg:rgba(242,109,109,.13);
+  --accent:#6ea8d8;
+}
 @media (prefers-color-scheme: dark){
-  :root{
+  html:not([data-theme]){
     --bg:#0e1216; --panel:#161b22; --line:#242c36; --fg:#e8edf3; --fg2:#9aa6b4; --fg3:#66707e;
     --ok:#3ecf7a; --ok-bg:rgba(62,207,122,.13);
     --warn:#e0a33c; --warn-bg:rgba(224,163,60,.14);
     --crit:#f26d6d; --crit-bg:rgba(242,109,109,.13);
+    --accent:#6ea8d8;
   }
 }
 *{box-sizing:border-box}
@@ -53,7 +63,7 @@ h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
 .group{margin-bottom:26px}
 .group-title{
   font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;
-  color:var(--fg3);margin:0 0 10px;
+  color:var(--accent);opacity:.85;margin:0 0 10px;
 }
 .row{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
@@ -84,6 +94,10 @@ footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);
   .row{grid-template-columns:1fr}
   .bars{height:22px}
 }
+html[data-density="compact"] .wrap{padding-top:22px;padding-bottom:48px}
+html[data-density="compact"] .row{padding:10px 13px;margin-bottom:6px}
+html[data-density="compact"] .svc{padding:8px 13px;margin-bottom:6px}
+html[data-density="compact"] .group{margin-bottom:18px}
 </style>
 </head>
 <body>

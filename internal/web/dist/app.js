@@ -955,6 +955,10 @@ const LS_TOKEN_LEGACY = 'probe-admin-token';
 const LS_THEME = 'rollcall-theme';
 const LS_THEME_LEGACY = 'probe-theme';
 
+// 服务端下发的外观配置（仅固定字段）。用户本机手动切换模式仍优先，
+// 强调色 / 圆角 / 密度则始终跟随运营配置。
+let serverTheme = null;
+
 function lsGet(key, legacy) {
   return localStorage.getItem(key) || localStorage.getItem(legacy) || '';
 }
@@ -1060,15 +1064,18 @@ async function viewSettings() {
   }
 
   let nodes = [], services = [], cfg = null, chans = [], defs = [];
+  let themeCfg = null;
   let queue = { stats: {}, jobs: [] };
   let loadErr = '';
   try {
-    const [n, svc, q] = await Promise.all([
+    const [n, svc, q, th] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
       adminApi('/api/admin/notify/jobs'),
+      adminApi('/api/admin/theme'),
     ]);
     nodes = n; services = svc; queue = q || queue;
+    themeCfg = th || {};
     const st = await adminApi('/api/admin/settings');
     cfg = st.notify || {};
     chans = st.channels || [];
@@ -1111,6 +1118,40 @@ async function viewSettings() {
           <span class="badge ok">已认证</span>
           <button class="btn" id="chgTok">更换令牌</button>
         </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">外观主题</h2>
+        <span class="section-meta">仅固定字段，不下发 CSS 文本</span>
+      </div>
+      <div class="panel panel-pad">
+        <form id="themeForm" class="form-grid">
+          ${selectField('默认模式', 'mode', themeCfg.mode || 'auto',
+            [{ v: 'auto', t: '跟随系统' }, { v: 'light', t: '浅色' }, { v: 'dark', t: '深色' }])}
+          <label class="field">
+            <span class="field-label">浅色强调色</span>
+            <input type="color" name="accent" value="${esc(themeCfg.accent || THEME_DEFAULT_ACCENT)}">
+          </label>
+          <label class="field">
+            <span class="field-label">深色强调色</span>
+            <input type="color" name="accentDark" value="${esc(themeCfg.accentDark || THEME_DEFAULT_ACCENT_DARK)}">
+          </label>
+          <label class="field">
+            <span class="field-label">圆角（px）</span>
+            <input type="number" name="radius" min="0" max="24" value="${themeCfg.radius == null ? 10 : esc(themeCfg.radius)}">
+          </label>
+          ${checkbox('紧凑布局', 'themeCompact', !!themeCfg.compact)}
+          <div class="form-actions">
+            <button class="btn" type="button" id="themePreview">预览</button>
+            <button class="btn" type="button" id="themeReset">恢复默认</button>
+            <button class="btn primary" type="submit">保存外观</button>
+          </div>
+        </form>
+        <p class="field-hint" style="margin:10px 0 0">
+          强调色、圆角与紧凑密度对仪表盘和公开状态页生效；默认模式只是访客的初始值，右上角手动切换过则优先本机选择。
+        </p>
       </div>
     </section>
 
@@ -1266,6 +1307,46 @@ async function viewSettings() {
 
   // 事件绑定
   $('#chgTok').onclick = () => { lsDel(LS_TOKEN, LS_TOKEN_LEGACY); viewSettings(); };
+
+  /* ---- 外观主题 ---- */
+  const themeForm = $('#themeForm');
+  const readThemeForm = () => {
+    const d = formData(themeForm);
+    return {
+      mode: d.mode,
+      accent: d.accent,
+      accentDark: d.accentDark,
+      radius: d.radius === '' ? null : Number(d.radius),
+      compact: !!d.themeCompact,
+    };
+  };
+  const previewTheme = () => {
+    serverTheme = readThemeForm();
+    applyThemeVars(document.documentElement.dataset.theme || 'light');
+  };
+  $('#themePreview').onclick = () => {
+    previewTheme();
+    toast('已在本机预览，保存后对所有访客生效');
+  };
+  $('#themeReset').onclick = () => {
+    themeForm.querySelector('[name=mode]').value = 'auto';
+    themeForm.querySelector('[name=accent]').value = THEME_DEFAULT_ACCENT;
+    themeForm.querySelector('[name=accentDark]').value = THEME_DEFAULT_ACCENT_DARK;
+    themeForm.querySelector('[name=radius]').value = '10';
+    themeForm.querySelector('[name=themeCompact]').checked = false;
+    previewTheme();
+    toast('已恢复默认预览，保存后生效');
+  };
+  themeForm.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const body = readThemeForm();
+      const r = await adminApi('/api/admin/theme', { method: 'PUT', body: JSON.stringify(body) });
+      serverTheme = r.theme || body;
+      applyThemeVars(document.documentElement.dataset.theme || 'light');
+      toast('外观配置已保存');
+    } catch (err) { toast('保存失败：' + err.message, 'err'); }
+  };
 
   $$('[data-retry-job]').forEach((b) => {
     b.onclick = async () => {
@@ -1759,9 +1840,58 @@ async function render() {
 
 /* ---------------- 主题 ---------------- */
 
-function applyTheme(t) {
+const THEME_DEFAULT_ACCENT = '#2f5d8a';
+const THEME_DEFAULT_ACCENT_DARK = '#6ea8d8';
+
+function themeRgb(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function themeMix(rgb, amount) {
+  return rgb.map((v) => Math.round(v + (255 - v) * amount));
+}
+
+// 只写入白名单变量；服务端从不下发 CSS 文本，这里也不拼接到 <style>。
+function applyThemeVars(mode) {
+  const root = document.documentElement;
+  const t = serverTheme;
+  const accent = t ? (mode === 'dark' ? (t.accentDark || THEME_DEFAULT_ACCENT_DARK) : (t.accent || THEME_DEFAULT_ACCENT)) : '';
+  const rgb = themeRgb(accent);
+  if (rgb) {
+    root.style.setProperty('--accent', accent);
+    root.style.setProperty('--accent-2', '#' + themeMix(rgb, mode === 'dark' ? 0.22 : 0.16)
+      .map((v) => v.toString(16).padStart(2, '0')).join(''));
+    root.style.setProperty('--accent-soft', `rgba(${rgb.join(', ')}, ${mode === 'dark' ? 0.12 : 0.09})`);
+  } else {
+    root.style.removeProperty('--accent');
+    root.style.removeProperty('--accent-2');
+    root.style.removeProperty('--accent-soft');
+  }
+  if (t && t.radius !== null && t.radius !== undefined && t.radius !== '') {
+    root.style.setProperty('--r', Number(t.radius) + 'px');
+  } else {
+    root.style.removeProperty('--r');
+  }
+  if (t && t.compact) root.dataset.density = 'compact';
+  else delete root.dataset.density;
+}
+
+async function loadServerTheme() {
+  try {
+    const r = await fetch('/api/theme', { headers: { Accept: 'application/json' } });
+    if (!r.ok) return;
+    serverTheme = await r.json();
+    applyThemeVars(document.documentElement.dataset.theme || 'light');
+  } catch (e) { /* 外观是增强功能，拉取失败不影响主流程 */ }
+}
+
+function applyTheme(t, persist = true) {
   document.documentElement.dataset.theme = t;
-  lsSet(LS_THEME, LS_THEME_LEGACY, t);
+  if (persist) lsSet(LS_THEME, LS_THEME_LEGACY, t);
+  applyThemeVars(t);
   const icon = $('#themeIcon');
   const text = $('.sidebar-foot .btn-text');
   if (t === 'dark') {
@@ -1790,9 +1920,18 @@ function boot() {
   }
 
   const qTheme = params.get('theme');
+  const lsTheme = lsGet(LS_THEME, LS_THEME_LEGACY);
+  const hadThemePref = qTheme === 'dark' || qTheme === 'light' || !!lsTheme;
   applyTheme(qTheme === 'dark' || qTheme === 'light' ? qTheme
-    : (lsGet(LS_THEME, LS_THEME_LEGACY) ||
-       (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')));
+    : (lsTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')));
+
+  loadServerTheme().then(() => {
+    // 服务端模式只是默认值：用户手动切换过就尊重本机选择。
+    if (!hadThemePref && serverTheme &&
+        (serverTheme.mode === 'light' || serverTheme.mode === 'dark')) {
+      applyTheme(serverTheme.mode, false);
+    }
+  });
 
   $('#themeBtn').onclick = () => {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
