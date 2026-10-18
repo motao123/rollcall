@@ -18,6 +18,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/motao/rollcall/internal/agentwire"
 	"sort"
 	"sync"
 	"time"
@@ -34,7 +36,11 @@ const RingSize = 2880
 const ServiceRingSize = 2880
 
 // OnlineWindow 内收到上报即视为在线。
-const OnlineWindow = 120 // 秒
+//
+// 取值来自 internal/agentwire：它是 Agent 与服务端共用的上报契约，
+// Agent 的上报间隔上限由它推出。两侧各写一份数字迟早漂移，表现为
+// 「配置看着合法、实际上必然误报失联」——只在网络抖动时暴露，极难复现。
+const OnlineWindow = agentwire.OnlineTTL
 
 // StaleWindow 内仍有上报视为"数据延迟"：超过 OnlineWindow
 // 但尚未达到真正离线。它只影响展示语义，告警仍按 OnlineWindow 判定。

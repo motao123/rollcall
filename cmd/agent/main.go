@@ -28,6 +28,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/motao/rollcall/internal/agentwire"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -62,14 +64,20 @@ func loadConfig(path string) (*config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
+	// 上报节奏从 agentwire.OnlineTTL 推出，而不是在 Agent 里再写一份数字：
+	// 服务端按那个 TTL 判定离线，两侧各持一份迟早漂移。
+	ttl := agentwire.OnlineTTL
 	if c.Interval <= 0 {
-		c.Interval = 30
+		c.Interval = agentwire.ReportInterval(ttl)
 	}
-	// 服务端 120 秒未收到上报即判定离线；间隔超过 60 秒时，
-	// 一次网络抖动或采集延迟就会被误报为失联。
-	if c.Interval > 60 {
-		return nil, fmt.Errorf("interval 不能超过 60 秒（服务端 120 秒未收到上报即判定离线），当前 %d 秒", c.Interval)
+	// 间隔上限同样由 TTL 推出（不超过 TTL 的一半，保证一个 TTL 内至少两次机会），
+	// 下限挡住"每秒上报"这类只会给主控加压的配置。
+	clamped, ok := agentwire.ClampReportInterval(c.Interval, ttl)
+	if !ok {
+		return nil, fmt.Errorf("interval 必须在 %d–%d 秒之间（服务端 %d 秒未收到上报即判定离线），当前 %d 秒",
+			agentwire.MinReportInterval, agentwire.MaxReportInterval(ttl), ttl, c.Interval)
 	}
+	c.Interval = clamped
 	if c.Update.Enabled {
 		if strings.TrimSpace(c.Update.ManifestURL) == "" || strings.TrimSpace(c.Update.PublicKey) == "" {
 			return nil, fmt.Errorf("update.enabled 为 true 时必须配置 manifestUrl 与 publicKey")
