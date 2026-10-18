@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -273,8 +274,9 @@ func TestSaveWritesSchemaVersion(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	raw := readSnapshotFile(t, filepath.Join(dir, "state.json"))
-	if !contains(string(raw), `"schemaVersion":2`) {
-		t.Fatalf("快照缺少 schemaVersion=2: %s", raw)
+	want := `"schemaVersion":` + strconv.Itoa(SnapshotSchemaVersion)
+	if !contains(string(raw), want) {
+		t.Fatalf("快照缺少 %s: %s", want, raw)
 	}
 }
 

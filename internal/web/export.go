@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/store"
 	"github.com/motao/rollcall/internal/version"
 )
 
@@ -21,7 +22,7 @@ import (
 //
 //	GET /api/export/assets.csv   资产台账 + 当前状态
 //	GET /api/export/alerts.csv   告警历史
-//	GET /api/export/metrics.csv?node=<id>&range=1h|6h|24h
+//	GET /api/export/metrics.csv?node=<id>&range=1h|6h|24h|7d|30d|365d
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(r) {
 		fail(w, 401, "invalid admin token")
@@ -154,38 +155,62 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "node not found")
 		return
 	}
-	window := int64(3600)
-	switch r.URL.Query().Get("range") {
-	case "6h":
-		window = 6 * 3600
-	case "24h":
-		window = 24 * 3600
+	window, resolution, ok := historyRange(r.URL.Query().Get("range"))
+	if !ok {
+		fail(w, 400, "未知的时间范围")
+		return
+	}
+	since := time.Now().Unix() - window
+	buf, cw := csvBuffer()
+
+	if resolution == store.HistoryResolutionRaw {
+		pts := s.st.Series(nodeID, since)
+		if len(pts) == 0 {
+			fail(w, 404, "该时间范围内没有数据")
+			return
+		}
+		_ = cw.Write([]string{
+			"时间", "unix", "CPU%", "负载1", "负载5", "负载15",
+			"内存已用", "内存总量", "内存%", "Swap已用",
+			"磁盘已用", "磁盘总量", "磁盘%",
+			"接收字节", "发送字节", "TCP连接", "进程数", "运行秒",
+		})
+		for _, p := range pts {
+			_ = cw.Write([]string{
+				tsFmt(p.TS), strconv.FormatInt(p.TS, 10),
+				f2(p.CPUPct), f2(p.Load1), f2(p.Load5), f2(p.Load15),
+				strconv.FormatUint(p.MemUsed, 10), strconv.FormatUint(p.MemTotal, 10),
+				f2(pctF(p.MemUsed, p.MemTotal)), strconv.FormatUint(p.SwapUsed, 10),
+				strconv.FormatUint(p.DiskUsed, 10), strconv.FormatUint(p.DiskTotal, 10),
+				f2(pctF(p.DiskUsed, p.DiskTotal)),
+				strconv.FormatUint(p.NetRx, 10), strconv.FormatUint(p.NetTx, 10),
+				strconv.Itoa(p.TCPConn), strconv.Itoa(p.Procs), strconv.FormatUint(p.Uptime, 10),
+			})
+		}
+		flushCSV(w, "rollcall-metrics-"+sanitize(node.Name), buf, cw)
+		return
 	}
 
-	pts := s.st.Series(nodeID, time.Now().Unix()-window)
+	// 聚合区间：数值是桶内平均/增量，不能与原始累计计数器混用同一组列。
+	pts := s.st.HistorySeries(nodeID, resolution, since)
 	if len(pts) == 0 {
 		fail(w, 404, "该时间范围内没有数据")
 		return
 	}
-
-	buf, cw := csvBuffer()
-
 	_ = cw.Write([]string{
-		"时间", "unix", "CPU%", "负载1", "负载5", "负载15",
-		"内存已用", "内存总量", "内存%", "Swap已用",
-		"磁盘已用", "磁盘总量", "磁盘%",
-		"接收字节", "发送字节", "TCP连接", "进程数", "运行秒",
+		"时间", "unix", "分辨率", "CPU%", "CPU峰值",
+		"内存已用", "内存总量", "内存%", "磁盘已用", "磁盘总量", "磁盘%",
+		"负载1", "接收增量字节", "发送增量字节", "样本数",
 	})
 	for _, p := range pts {
 		_ = cw.Write([]string{
-			tsFmt(p.TS), strconv.FormatInt(p.TS, 10),
-			f2(p.CPUPct), f2(p.Load1), f2(p.Load5), f2(p.Load15),
-			strconv.FormatUint(p.MemUsed, 10), strconv.FormatUint(p.MemTotal, 10),
-			f2(pctF(p.MemUsed, p.MemTotal)), strconv.FormatUint(p.SwapUsed, 10),
-			strconv.FormatUint(p.DiskUsed, 10), strconv.FormatUint(p.DiskTotal, 10),
-			f2(pctF(p.DiskUsed, p.DiskTotal)),
-			strconv.FormatUint(p.NetRx, 10), strconv.FormatUint(p.NetTx, 10),
-			strconv.Itoa(p.TCPConn), strconv.Itoa(p.Procs), strconv.FormatUint(p.Uptime, 10),
+			tsFmt(p.TS), strconv.FormatInt(p.TS, 10), resolution,
+			f2(p.CPUPct), f2(p.CPUMax),
+			strconv.FormatUint(p.MemUsed, 10), strconv.FormatUint(p.MemTotal, 10), f2(p.MemPct),
+			strconv.FormatUint(p.DiskUsed, 10), strconv.FormatUint(p.DiskTotal, 10), f2(p.DiskPct),
+			f2(p.Load1),
+			strconv.FormatUint(p.NetRxDelta, 10), strconv.FormatUint(p.NetTxDelta, 10),
+			strconv.FormatUint(uint64(p.Count), 10),
 		})
 	}
 	flushCSV(w, "rollcall-metrics-"+sanitize(node.Name), buf, cw)

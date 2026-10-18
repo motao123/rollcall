@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.4.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.5.0**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -71,7 +71,8 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 - **Nezha 式指标维度**：CPU、内存、Swap、磁盘、负载（1/5/15）、TCP 连接数、进程数、运行时长、网络收发
 - **Komari 式轻量实现**：无数据库、单二进制、启动即用
 - 每个节点一张卡片：三色资源条 + 迷你 CPU 曲线 + 区域/流量/运行时长
-- 节点详情：五张时序图（CPU / 内存 / 磁盘 / 网络速率 / 负载），支持 1h / 6h / 24h 切换
+- 节点详情：五张时序图（CPU / 内存 / 磁盘 / 网络速率 / 负载），支持 1h / 6h / 24h / 7d / 30d / 365d 切换；
+  长范围自动使用 1m / 5m / 1h 聚合，不会一次返回数十万原始点
 
 ### 2. 服务探测（Nezha 强项）
 - 协议：HTTP(S) / TCP
@@ -178,15 +179,21 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 
 **上传协议**：`POST /api/report`，`X-Node-Token` 认证，JSON 体。服务端用**自身时间**校正时间戳，避免 Agent 时钟漂移污染时序。
 
-### 存储：环形缓冲 + JSON 快照
+### 存储：环形缓冲 + 分层历史 + JSON 快照
 
 对齐 Komari 的"无数据库"理念，同时保证重启不丢历史：
 
-- 每节点一个**定长环形缓冲**（2880 点 = 24h @30s），全量常驻内存约 30MB
+- **原始层**：每节点一个定长环形缓冲（2880 点 = 24h @30s），支撑 1h/6h/24h 查询
+- **聚合层**：1m × 7d、5m × 30d、1h × 365d 三级桶，支撑 7d/30d/365d 查询；
+  桶内保存平均值、CPU 峰值、网络增量与样本数，内存约 70MB @ 40 节点满保留期
 - 默认每 60 秒把状态快照写入 `data/state.json`（`-save-interval` 可调，10s–1h；gzip 压缩 JSON，先写 `.tmp` 再 rename，保证原子性）
+- 聚合历史每 5 分钟单独写入 `data/history.json`，与主快照解耦；主快照体积不随保留期增长
 - 启动时自动恢复；兼容旧版本写出的明文 JSON，首次保存后自动转为 gzip
-- 快照带 `schemaVersion`（当前为 2）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
-  避免新结构被旧程序静默读成零值；v2 新增通知队列、投递统计与静默期，旧版 v1/无版本快照仍可直接载入
+- 历史缺失或损坏时自动用 24h 原始点回填，损坏文件隔离为 `history.json.corrupt-<时间>`；
+  正常重启只回放上次落盘之后的原始点，不会重复累计
+- 快照带 `schemaVersion`（当前为 3）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
+  避免新结构被旧程序静默读成零值；v2 新增通知队列、投递统计与静默期，
+  v3 仅提升版本号（历史聚合写入独立文件），旧版 v1/v2/无版本快照仍可直接载入
 - 快照损坏会隔离为 `state.json.corrupt-<时间>` 并拒绝启动，
   而不是静默以空库运行（否则全部节点与令牌会凭空消失）
 
@@ -270,7 +277,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
 > 使用前需要构建机安装 `make`。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.4.0`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.5.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 
 ### 2. 预览 UI（可选）
@@ -398,7 +405,7 @@ runuser -u rollcall-agent -- \
 | `-save-interval` | `60s` | 自动保存快照间隔（10s–1h）；退出时还会强制保存一次 |
 | `-cny-rate` | `7.2` | CNY 折算 USD 的汇率（仅用于成本聚合展示） |
 | `-admin-token` | 自动生成 | 管理令牌，显式指定时至少 16 字符 |
-| `-data` | `./data` | 数据目录（state.json / admin.token，均为 0600） |
+| `-data` | `./data` | 数据目录（state.json / history.json / admin.token，均为 0600） |
 | `-version` | false | 打印版本号后退出 |
 
 ### 管理 API
@@ -432,6 +439,7 @@ runuser -u rollcall-agent -- \
 
 管理接口与 CSV 导出要求请求头 `X-Admin-Token`（写操作不接受 Basic 密码）。
 令牌首次启动时自动生成到 `data/admin.token`（0600），也可用 `-admin-token` 显式指定。
+`/api/` 下的 JSON 与 CSV 响应在客户端支持时自动 gzip 压缩：365 天曲线从约 2.5MB 降到约 300KB，慢速链路下也能正常打开。
 
 仪表盘只读接口（包含主机名、内核、服务商、价格、到期日等资产信息，不再匿名开放）：
 
@@ -440,7 +448,7 @@ runuser -u rollcall-agent -- \
 | GET | `/api/overview` | KPI 汇总 |
 | GET | `/api/nodes` | 节点列表与最新指标 |
 | GET | `/api/nodes/{id}` | 节点详情 |
-| GET | `/api/nodes/{id}/series?range=1h\|6h\|24h` | 历史时序 |
+| GET | `/api/nodes/{id}/series?range=1h\|6h\|24h\|7d\|30d\|365d` | 历史时序（长范围自动降采样） |
 | GET | `/api/services` | 服务探测状态 |
 | GET | `/api/alerts` | 告警历史 |
 | GET | `/api/rules` | 告警规则 |
@@ -497,7 +505,7 @@ rollcall/
 │   └── agent/main.go        只读 Agent 入口
 ├── internal/
 │   ├── model/               数据结构（无依赖）
-│   ├── store/               环形缓冲 + JSON 快照
+│   ├── store/               环形缓冲 + 分层聚合 + JSON 快照
 │   ├── collect/             /proc 采集（linux / 非 linux 两套）
 │   ├── netguard/            出站地址策略（SSRF 防护，探测/通知共用）
 │   ├── probe/               HTTP/TCP 探测
@@ -571,7 +579,7 @@ rollcall/
 |---|---|
 | `GET /api/export/assets.csv` | 资产台账 + 当前状态 + 月摊成本合计 |
 | `GET /api/export/alerts.csv` | 告警历史（含开始/恢复时间、级别、说明） |
-| `GET /api/export/metrics.csv?node=<id>&range=1h\|6h\|24h` | 单节点全量采样（18 列） |
+| `GET /api/export/metrics.csv?node=<id>&range=1h\|6h\|24h\|7d\|30d\|365d` | 单节点采样；1h/6h/24h 为原始 18 列，长范围为桶均值/增量 15 列 |
 
 CSV 带 UTF-8 BOM，Excel 打开中文不乱码；文件名含时间戳。
 

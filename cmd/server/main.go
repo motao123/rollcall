@@ -147,7 +147,8 @@ func main() {
 	engine := alert.New(st)
 	engine.Start(15 * time.Second)
 	st.StartAutoSave(*saveInterval)
-	log.Printf("自动保存间隔: %s", *saveInterval)
+	st.StartHistoryAutoSave(store.HistorySaveInterval)
+	log.Printf("自动保存间隔: %s（历史聚合 %s）", *saveInterval, store.HistorySaveInterval)
 
 	// 服务探测循环
 	// 注意：演示模式下不发起真实探测，避免对本机产生意外外连
@@ -243,8 +244,12 @@ func main() {
 			log.Printf("HTTP 服务关闭超时: %v", err)
 		}
 		ob.Stop()
-		if err := st.Save(); err != nil {
-			log.Printf("退出前保存失败: %v", err)
+		saveErr := st.Save()
+		if err := st.SaveHistory(); err != nil {
+			log.Printf("退出前保存历史失败: %v", err)
+		}
+		if saveErr != nil {
+			log.Printf("退出前保存失败: %v", saveErr)
 		} else {
 			log.Printf("状态已保存，退出")
 		}

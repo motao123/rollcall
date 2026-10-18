@@ -9,7 +9,7 @@
 | 项目 | 默认位置 | 说明 |
 |---|---|---|
 | 服务端二进制 | `/opt/rollcall/rollcall-server` | systemd 单元 `rollcall-server.service` |
-| 服务端数据 | `/opt/rollcall/data` | `state.json`（快照）、`admin.token`，权限 0600 |
+| 服务端数据 | `/opt/rollcall/data` | `state.json`（主快照）、`history.json`（分层历史）、`admin.token`，权限 0600 |
 | 服务端单元 | `/etc/systemd/system/rollcall-server.service` | 以 `rollcall` 用户运行 |
 | Agent 二进制 | `/usr/local/bin/rollcall-agent` | systemd 单元 `rollcall-agent.service` |
 | Agent 配置 | `/etc/rollcall/agent.json` | `root:rollcall-agent 0640` |
@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.4.0
+make linux VERSION=v1.5.0
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -40,6 +40,8 @@ make linux VERSION=v1.4.0
 ```bash
 sudo cp /opt/rollcall/data/state.json \
         /var/backups/rollcall/state-$(date +%F-%H%M).json.gz
+sudo cp /opt/rollcall/data/history.json \
+        /var/backups/rollcall/history-$(date +%F-%H%M).json.gz
 sudo systemctl stop rollcall-server
 
 # 替换二进制与单元文件后
@@ -61,18 +63,20 @@ sudo systemctl restart rollcall-agent
 
 ### 快照版本与回滚
 
-`state.json` 带 `schemaVersion`（当前为 1）。旧程序遇到更高版本时会：
+`state.json` 带 `schemaVersion`（当前为 3；v3 仅提升版本号，历史聚合存放在独立的 `history.json`），
+`history.json` 自带独立版本号（当前为 1）。旧程序遇到更高版本时会：
 
-1. 把文件改名为 `state.json.newer-<时间>`；
+1. 把文件改名为 `state.json.newer-<时间>` / `history.json.newer-<时间>`；
 2. 拒绝启动并在日志中说明需要升级服务端。
 
-因此**回滚旧二进制前，必须先恢复升级前备份的快照**，否则旧程序会拒绝载入新格式数据：
+因此**回滚旧二进制前，必须先恢复升级前备份的两份文件**，否则旧程序会拒绝载入新格式数据：
 
 ```bash
 sudo systemctl stop rollcall-server
 sudo cp /var/backups/rollcall/state-<升级前时间>.json.gz /opt/rollcall/data/state.json
-sudo chown rollcall:rollcall /opt/rollcall/data/state.json
-sudo chmod 0600 /opt/rollcall/data/state.json
+sudo cp /var/backups/rollcall/history-<升级前时间>.json.gz /opt/rollcall/data/history.json
+sudo chown rollcall:rollcall /opt/rollcall/data/state.json /opt/rollcall/data/history.json
+sudo chmod 0600 /opt/rollcall/data/state.json /opt/rollcall/data/history.json
 # 换回旧二进制后启动
 sudo systemctl start rollcall-server
 ```
@@ -81,12 +85,15 @@ sudo systemctl start rollcall-server
 
 ## 3. 备份与恢复
 
-`state.json` 通过「写 `.tmp` → fsync → rename」原子替换，因此**运行中复制也是完整快照**（可能是最近一次自动保存，默认 60 秒前）：
+`state.json` 通过「写 `.tmp` → rename」原子替换，因此**运行中复制也是完整快照**（可能是最近一次自动保存，默认 60 秒前）。
+`history.json` 同样原子替换，落盘间隔为 5 分钟：
 
 ```bash
 sudo install -d -m 0700 -o root -g root /var/backups/rollcall
 sudo cp /opt/rollcall/data/state.json \
         /var/backups/rollcall/state-$(date +%F-%H%M).json.gz
+sudo cp /opt/rollcall/data/history.json \
+        /var/backups/rollcall/history-$(date +%F-%H%M).json.gz
 ```
 
 需要连管理令牌一起备份时打包整个数据目录，并确保备份文件不进 Git：
@@ -101,13 +108,31 @@ sudo chmod 0600 /var/backups/rollcall/data-$(date +%F).tgz
 ```bash
 sudo systemctl stop rollcall-server
 sudo cp /var/backups/rollcall/state-<时间>.json.gz /opt/rollcall/data/state.json
-sudo chown rollcall:rollcall /opt/rollcall/data/state.json
-sudo chmod 0600 /opt/rollcall/data/state.json
+sudo cp /var/backups/rollcall/history-<时间>.json.gz /opt/rollcall/data/history.json
+sudo chown rollcall:rollcall /opt/rollcall/data/state.json /opt/rollcall/data/history.json
+sudo chmod 0600 /opt/rollcall/data/state.json /opt/rollcall/data/history.json
 sudo systemctl start rollcall-server
 ```
 
 > 快照损坏时服务端不会以空库启动，而是把文件隔离为 `state.json.corrupt-<时间>`。
 > 确认备份可用后再删除隔离文件，否则会丢失全部节点与令牌。
+
+### 历史数据分层
+
+| 分辨率 | 保留期 | 用途 |
+|---|---|---|
+| 原始 30s | 24 小时 | 1h / 6h / 24h 查询 |
+| 1 分钟 | 7 天 | 7d 查询 |
+| 5 分钟 | 30 天 | 30d 查询 |
+| 1 小时 | 365 天 | 365d 查询 |
+
+- 聚合桶在内存中惰性分配，40 节点满保留期约占 70MB
+- 历史每 5 分钟写入 `history.json`；进程崩溃最多丢失该窗口的聚合点，
+  重启时会用 `state.json` 中的 24h 原始点回放补齐
+- `history.json` 缺失或损坏时，会自动从 24h 原始点重建；损坏文件隔离为
+  `history.json.corrupt-<时间>`，无需人工干预
+- 节点被删除时，其聚合历史一并删除
+- 回滚到 v1.4 或更早版本前，必须同时恢复备份的 `state.json` 与 `history.json`（见上一节）
 
 ---
 

@@ -113,6 +113,11 @@ type Store struct {
 	notifyStats  model.NotifyStats
 	notifySilent map[string]*model.Silence // scope(global|ruleID) -> 静默期
 
+	history       map[string]*nodeHistory
+	historyPath   string
+	historyDirty  bool
+	historySaveMu sync.Mutex
+
 	path    string
 	dirty   bool
 	loadErr error
@@ -135,7 +140,9 @@ func New(dataDir string) *Store {
 		settings:     map[string]string{},
 		notifyJobs:   map[string]*model.NotifyJob{},
 		notifySilent: map[string]*model.Silence{},
+		history:      map[string]*nodeHistory{},
 		path:         filepath.Join(dataDir, "state.json"),
+		historyPath:  filepath.Join(dataDir, "history.json"),
 		saveReq:      make(chan struct{}, 1),
 	}
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
@@ -143,6 +150,9 @@ func New(dataDir string) *Store {
 		return s
 	}
 	s.loadErr = s.load()
+	if s.loadErr == nil {
+		s.loadErr = s.loadHistory()
+	}
 	return s
 }
 
@@ -190,7 +200,9 @@ func decodeSnapshot(b []byte) ([]byte, error) {
 // SnapshotSchemaVersion 是当前快照结构版本。
 // 旧版快照没有该字段（解析为 0），仍按兼容格式载入；
 // 高于当前版本的文件必须显式拒绝，避免新结构被旧程序静默读成零值。
-const SnapshotSchemaVersion = 2
+//
+// v3 仅提升版本号：历史聚合写入独立的 history.json，主快照结构未变。
+const SnapshotSchemaVersion = 3
 
 type snapshot struct {
 	SchemaVersion int                         `json:"schemaVersion"`
@@ -484,6 +496,10 @@ func (s *Store) DeleteNode(id string) {
 	delete(s.nodes, id)
 	delete(s.series, id)
 	delete(s.hosts, id)
+	if _, ok := s.history[id]; ok {
+		delete(s.history, id)
+		s.historyDirty = true
+	}
 	now := time.Now().Unix()
 	for _, a := range s.alerts {
 		if a.NodeID == id && a.ResolvedAt == 0 {
@@ -555,7 +571,19 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 		r = NewRing(RingSize)
 		s.series[nodeID] = r
 	}
+	var prev model.Metrics
+	hasPrev := false
+	if r.n > 0 {
+		prev, hasPrev = r.Last()
+		// 同一秒重复上报会覆盖原始点；历史已计入上一份数据，
+		// 若再聚合一次会造成平均值与流量重复累计。
+		if m.TS <= prev.TS {
+			r.Add(m)
+			return
+		}
+	}
 	r.Add(m)
+	s.addHistoryLocked(nodeID, m, &prev, hasPrev)
 	if host.Hostname != "" {
 		s.hosts[nodeID] = host
 	}

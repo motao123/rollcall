@@ -345,15 +345,22 @@ async function viewNodeDetail(id) {
   ]);
   const n = detail.node, host = detail.host || {};
   const pts = series.points || [];
+  const resolution = series.resolution || 'raw';
+  // 聚合区间返回桶内平均值与增量；原始区间仍是累计计数器。
+  const bucketSec = { '1m': 60, '5m': 300, '1h': 3600 }[resolution] || 0;
   const cpuVals = pts.map((p) => p.cpuPct);
-  const memVals = pts.map((p) => pct(p.memUsed, p.memTotal));
-  const diskVals = pts.map((p) => pct(p.diskUsed, p.diskTotal));
+  const memVals = pts.map((p) => (typeof p.memPct === 'number' ? p.memPct : pct(p.memUsed, p.memTotal)));
+  const diskVals = pts.map((p) => (typeof p.diskPct === 'number' ? p.diskPct : pct(p.diskUsed, p.diskTotal)));
   // 网络用「速率」而非累计值：累计曲线在长时间窗口里几乎是一条直线，看不出波动
   const netVals = [];
-  for (let i = 1; i < pts.length; i++) {
-    const dt = (pts[i].ts - pts[i - 1].ts) || 1;
-    const d = (pts[i].netRx + pts[i].netTx) - (pts[i - 1].netRx + pts[i - 1].netTx);
-    netVals.push(Math.max(0, d / dt));
+  if (bucketSec > 0) {
+    for (const p of pts) netVals.push((p.netRxDelta + p.netTxDelta) / bucketSec);
+  } else {
+    for (let i = 1; i < pts.length; i++) {
+      const dt = (pts[i].ts - pts[i - 1].ts) || 1;
+      const d = (pts[i].netRx + pts[i].netTx) - (pts[i - 1].netRx + pts[i - 1].netTx);
+      netVals.push(Math.max(0, d / dt));
+    }
   }
   const loadVals = pts.map((p) => p.load1);
   const last = detail.latest || {};
@@ -379,7 +386,7 @@ async function viewNodeDetail(id) {
         </p>
       </div>
       <div class="range-tabs">
-        ${['1h', '6h', '24h'].map((r) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${r}</button>`).join('')}
+        ${['1h', '6h', '24h', '7d', '30d', '365d'].map((r) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${r}</button>`).join('')}
       </div>
     </div>
 
@@ -1172,6 +1179,9 @@ async function viewSettings() {
             <option value="1h">最近 1 小时</option>
             <option value="6h">最近 6 小时</option>
             <option value="24h" selected>最近 24 小时</option>
+            <option value="7d">最近 7 天</option>
+            <option value="30d">最近 30 天</option>
+            <option value="365d">最近 365 天</option>
           </select>
           <button class="btn" data-exp="metrics">指标 CSV</button>
         </div>

@@ -22,7 +22,15 @@ func buildStore(t testing.TB, nodes int) *Store {
 	if s, ok := storeCache[nodes]; ok {
 		return s
 	}
+	s := newBenchStore(t, nodes)
+	storeCache[nodes] = s
+	return s
+}
 
+// newBenchStore 创建不进入缓存的生产规模 Store。
+// 不同 Benchmark 函数之间不能共享缓存：t.TempDir() 会在前一个
+// Benchmark 结束后删除目录，后一个函数复用缓存会写入已消失的路径。
+func newBenchStore(t testing.TB, nodes int) *Store {
 	s := New(t.TempDir())
 	now := time.Now().Unix()
 	for i := 0; i < nodes; i++ {
@@ -41,7 +49,6 @@ func buildStore(t testing.TB, nodes int) *Store {
 	}
 	s.UpsertService(&model.Service{ID: NewID("s"), Name: "svc", Type: "tcp", Target: "1.2.3.4:80", Interval: 60, Enabled: true})
 	s.UpsertRule(&model.AlertRule{ID: NewID("r"), Name: "规则", Metric: "cpu", Op: "gt", Threshold: 90, Enabled: true})
-	storeCache[nodes] = s
 	return s
 }
 

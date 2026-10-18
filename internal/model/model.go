@@ -181,6 +181,24 @@ type Point struct {
 	V float64 `json:"v"`
 }
 
+// HistoryPoint 是降采样后的历史点，用于 7 天/30 天/365 天查询。
+// 聚合只保留平均值、CPU 峰值、样本数与网络增量，不复制完整 Metrics。
+type HistoryPoint struct {
+	TS         int64   `json:"ts"`
+	CPUPct     float64 `json:"cpuPct"` // 桶内平均
+	CPUMax     float64 `json:"cpuMax"` // 桶内峰值
+	MemPct     float64 `json:"memPct"`
+	MemUsed    uint64  `json:"memUsed"`
+	MemTotal   uint64  `json:"memTotal"`
+	DiskPct    float64 `json:"diskPct"`
+	DiskUsed   uint64  `json:"diskUsed"`
+	DiskTotal  uint64  `json:"diskTotal"`
+	Load1      float64 `json:"load1"`
+	NetRxDelta uint64  `json:"netRxDelta"`
+	NetTxDelta uint64  `json:"netTxDelta"`
+	Count      uint32  `json:"count"`
+}
+
 // Overview 是总览页的聚合数据。
 type Overview struct {
 	Nodes       int        `json:"nodes"`

@@ -2,6 +2,7 @@
 package web
 
 import (
+	"compress/gzip"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
@@ -137,7 +138,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
-	return withCommon(s.withAuthGuard(withAuth(mux, s)))
+	return withCommon(withGzip(s.withAuthGuard(withAuth(mux, s))))
 }
 
 // requireAdmin 保护仪表盘只读接口。
@@ -235,6 +236,96 @@ func pathNeedsNoBasic(path string) bool {
 		return true
 	}
 	return false
+}
+
+// withGzip 对 /api/ 下的 JSON/CSV 响应做透明压缩。
+// 365 天曲线可达 2MB 以上，经 SSH 隧道或慢速链路传输时浏览器会长时间挂起；
+// 压缩后通常降到几百 KB，且客户端不声明 gzip 时行为完全不变。
+func withGzip(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("Vary", "Accept-Encoding")
+		if !acceptsGzip(r.Header.Get("Accept-Encoding")) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		gw := &gzipResponseWriter{ResponseWriter: w}
+		defer func() { _ = gw.Close() }()
+		h.ServeHTTP(gw, r)
+	})
+}
+
+// acceptsGzip 解析 Accept-Encoding，显式 q=0 视为拒绝。
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		fields := strings.Split(strings.TrimSpace(part), ";")
+		if !strings.EqualFold(strings.TrimSpace(fields[0]), "gzip") &&
+			!strings.EqualFold(strings.TrimSpace(fields[0]), "x-gzip") {
+			continue
+		}
+		for _, p := range fields[1:] {
+			p = strings.TrimSpace(p)
+			if strings.HasPrefix(p, "q=") && strings.TrimPrefix(p, "q=") == "0" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// gzipResponseWriter 延迟到内容类型确定后再决定是否压缩：
+// http.Error 的 text/plain、304 空响应等不应被声明为 gzip。
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+	gzipBody    bool
+	gz          *gzip.Writer
+}
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	if g.wroteHeader {
+		return
+	}
+	g.wroteHeader = true
+	g.status = code
+	ct := g.Header().Get("Content-Type")
+	g.gzipBody = code >= 200 && code != http.StatusNoContent && code != http.StatusNotModified &&
+		(strings.HasPrefix(ct, "application/json") || strings.HasPrefix(ct, "text/csv"))
+	if !g.gzipBody {
+		g.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (g *gzipResponseWriter) Write(p []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if !g.gzipBody {
+		return g.ResponseWriter.Write(p)
+	}
+	if g.gz == nil {
+		g.Header().Del("Content-Length")
+		g.Header().Set("Content-Encoding", "gzip")
+		g.ResponseWriter.WriteHeader(g.status)
+		g.gz = gzip.NewWriter(g.ResponseWriter)
+	}
+	return g.gz.Write(p)
+}
+
+func (g *gzipResponseWriter) Close() error {
+	if g.gz != nil {
+		return g.gz.Close()
+	}
+	if g.wroteHeader && g.gzipBody {
+		// 类型可压缩却没有正文（如 200 空 JSON）：不声明 gzip，直接收尾。
+		g.ResponseWriter.WriteHeader(g.status)
+	}
+	return nil
 }
 
 func withCommon(h http.Handler) http.Handler {
@@ -400,19 +491,27 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// /api/nodes/{id}/series?range=1h
+	// /api/nodes/{id}/series?range=1h|6h|24h|7d|30d|365d
 	if len(parts) > 1 && parts[1] == "series" {
 		rng := r.URL.Query().Get("range")
-		window := int64(3600)
-		switch rng {
-		case "6h":
-			window = 6 * 3600
-		case "24h":
-			window = 24 * 3600
+		if rng == "" {
+			rng = "1h"
+		}
+		window, resolution, ok := historyRange(rng)
+		if !ok {
+			fail(w, 400, "unknown range: "+rng)
+			return
 		}
 		since := time.Now().Unix() - window
-		pts := s.st.Series(id, since)
-		writeJSON(w, 200, map[string]any{"node": n, "range": rng, "points": pts})
+		var pts any
+		if resolution == store.HistoryResolutionRaw {
+			pts = s.st.Series(id, since)
+		} else {
+			pts = s.st.HistorySeries(id, resolution, since)
+		}
+		writeJSON(w, 200, map[string]any{
+			"node": n, "range": rng, "resolution": resolution, "points": pts,
+		})
 		return
 	}
 
@@ -424,6 +523,26 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		"lastSeen": ts,
 		"online":   time.Now().Unix()-ts <= store.OnlineWindow,
 	})
+}
+
+// historyRange 把查询范围映射为时间窗口与分辨率：
+// 24h 以内使用原始 30s 点；更长范围逐级降采样，避免一次返回数十万点。
+func historyRange(rng string) (window int64, resolution string, ok bool) {
+	switch rng {
+	case "1h":
+		return int64(time.Hour / time.Second), store.HistoryResolutionRaw, true
+	case "6h":
+		return int64(6 * time.Hour / time.Second), store.HistoryResolutionRaw, true
+	case "24h":
+		return int64(24 * time.Hour / time.Second), store.HistoryResolutionRaw, true
+	case "7d":
+		return int64(7 * 24 * time.Hour / time.Second), store.HistoryResolution1m, true
+	case "30d":
+		return int64(30 * 24 * time.Hour / time.Second), store.HistoryResolution5m, true
+	case "365d":
+		return int64(365 * 24 * time.Hour / time.Second), store.HistoryResolution1h, true
+	}
+	return 0, "", false
 }
 
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {

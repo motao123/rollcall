@@ -1,0 +1,296 @@
+package store
+
+import (
+	"math"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/motao/rollcall/internal/model"
+)
+
+// histBase 是 2023-11-15 00:00:00 UTC，可被 60/300/3600 整除。
+const histBase = int64(1700006400)
+
+func addHistSample(s *Store, id string, i int) {
+	s.AddMetrics(id, model.HostInfo{}, model.Metrics{
+		TS:       histBase + int64(i)*30,
+		CPUPct:   float64(i + 1),
+		Load1:    float64(i) / 10,
+		MemUsed:  2 << 30,
+		MemTotal: 8 << 30,
+		DiskUsed: 20 << 30, DiskTotal: 60 << 30,
+		NetRx: 1000 + uint64(100*i),
+		NetTx: 2000 + uint64(50*i),
+	})
+}
+
+func approx(t *testing.T, got, want float64) {
+	t.Helper()
+	if math.Abs(got-want) > 0.01 {
+		t.Fatalf("got %.4f, want %.4f", got, want)
+	}
+}
+
+func TestHistoryAggregation(t *testing.T) {
+	s := New(t.TempDir())
+	for i := 0; i < 20; i++ { // 10 分钟，每 30 秒一个点
+		addHistSample(s, "n1", i)
+	}
+
+	counts := s.HistoryCounts("n1")
+	if counts[HistoryResolution1m] != 10 || counts[HistoryResolution5m] != 2 || counts[HistoryResolution1h] != 1 {
+		t.Fatalf("桶数量不符: %+v", counts)
+	}
+
+	m1 := s.HistorySeries("n1", HistoryResolution1m, histBase)
+	if len(m1) != 10 {
+		t.Fatalf("1m 点数 %d，want 10", len(m1))
+	}
+	if m1[0].TS != histBase || m1[0].Count != 2 {
+		t.Fatalf("首个 1m 桶异常: %+v", m1[0])
+	}
+	approx(t, m1[0].CPUPct, 1.5)
+	approx(t, m1[0].CPUMax, 2)
+	approx(t, m1[0].MemPct, 25)
+	approx(t, m1[0].DiskPct, 100.0/3)
+	approx(t, m1[0].Load1, 0.05)
+	if m1[0].NetRxDelta != 100 || m1[0].NetTxDelta != 50 {
+		t.Fatalf("首个桶流量增量异常: rx=%d tx=%d", m1[0].NetRxDelta, m1[0].NetTxDelta)
+	}
+	approx(t, float64(m1[1].CPUPct), 3.5)
+
+	m5 := s.HistorySeries("n1", HistoryResolution5m, histBase)
+	if len(m5) != 2 || m5[0].Count != 10 {
+		t.Fatalf("5m 聚合异常: %+v", m5)
+	}
+	approx(t, m5[0].CPUPct, 5.5)
+	if m5[0].NetRxDelta != 900 {
+		t.Fatalf("5m 接收增量 %d，want 900", m5[0].NetRxDelta)
+	}
+
+	h1 := s.HistorySeries("n1", HistoryResolution1h, histBase)
+	if len(h1) != 1 || h1[0].Count != 20 {
+		t.Fatalf("1h 聚合异常: %+v", h1)
+	}
+	approx(t, h1[0].CPUPct, 10.5)
+	approx(t, h1[0].CPUMax, 20)
+	if h1[0].NetRxDelta != 1900 || h1[0].NetTxDelta != 950 {
+		t.Fatalf("1h 流量增量异常: rx=%d tx=%d", h1[0].NetRxDelta, h1[0].NetTxDelta)
+	}
+	if h1[0].MemUsed == 0 || h1[0].DiskUsed == 0 {
+		t.Fatalf("聚合桶未回算出已用字节: %+v", h1[0])
+	}
+
+	// since 过滤：只返回桶起始时间不早于 since 的桶。
+	got := s.HistorySeries("n1", HistoryResolution1m, histBase+300)
+	if len(got) != 5 || got[0].TS != histBase+300 {
+		t.Fatalf("since 过滤异常: len=%d first=%+v", len(got), got)
+	}
+}
+
+func TestBucketRingRetention(t *testing.T) {
+	r := &bucketRing{interval: 60, size: 3}
+	for _, ts := range []int64{600, 660, 720, 780} {
+		r.add(model.Metrics{TS: ts, CPUPct: float64(ts / 60)}, nil, false)
+	}
+	got := r.slice()
+	if len(got) != 3 {
+		t.Fatalf("保留桶数 %d，want 3", len(got))
+	}
+	for i, want := range []int64{660, 720, 780} {
+		if got[i].Index != want {
+			t.Fatalf("第 %d 个桶 index=%d，want %d", i, got[i].Index, want)
+		}
+	}
+	// 同桶追加不应新增桶。
+	r.add(model.Metrics{TS: 799, CPUPct: 99}, nil, false)
+	if n := len(r.slice()); n != 3 {
+		t.Fatalf("同桶追加后桶数 %d，want 3", n)
+	}
+}
+
+func TestHistoryPersistsAndReplays(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	for i := 0; i < 20; i++ {
+		addHistSample(s, "n1", i)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s.SaveHistory(); err != nil {
+		t.Fatalf("SaveHistory: %v", err)
+	}
+	fi, err := os.Stat(filepath.Join(dir, "history.json"))
+	if err != nil {
+		t.Fatalf("history.json 未生成: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("history.json 权限 %o，want 600", fi.Mode().Perm())
+	}
+
+	s2 := New(dir)
+	if err := s2.LoadErr(); err != nil {
+		t.Fatalf("重载: %v", err)
+	}
+	counts := s2.HistoryCounts("n1")
+	if counts[HistoryResolution1m] != 10 || counts[HistoryResolution5m] != 2 || counts[HistoryResolution1h] != 1 {
+		t.Fatalf("重载后桶数量不符: %+v", counts)
+	}
+	// 恢复到已聚合到的时间点后继续上报，不应重复累计。
+	for i := 20; i < 30; i++ {
+		addHistSample(s2, "n1", i)
+	}
+	h1 := s2.HistorySeries("n1", HistoryResolution1h, histBase)
+	if len(h1) != 1 || h1[0].Count != 30 {
+		t.Fatalf("增量恢复后聚合异常: %+v", h1)
+	}
+	if h1[0].NetRxDelta != 2900 || h1[0].NetTxDelta != 1450 {
+		t.Fatalf("重启后流量重复累计: rx=%d tx=%d", h1[0].NetRxDelta, h1[0].NetTxDelta)
+	}
+}
+
+func TestHistoryRebuildsFromRaw(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	for i := 0; i < 20; i++ {
+		addHistSample(s, "n1", i)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// 不写 history.json，模拟旧版本升级或历史文件丢失。
+	s2 := New(dir)
+	if err := s2.LoadErr(); err != nil {
+		t.Fatalf("重载: %v", err)
+	}
+	counts := s2.HistoryCounts("n1")
+	if counts[HistoryResolution1m] != 10 || counts[HistoryResolution5m] != 2 || counts[HistoryResolution1h] != 1 {
+		t.Fatalf("回填桶数量不符: %+v", counts)
+	}
+	h1 := s2.HistorySeries("n1", HistoryResolution1h, histBase)
+	// 回填时首个原始点没有前值，流量只累计 19 次增量。
+	if len(h1) != 1 || h1[0].NetRxDelta != 1900 {
+		t.Fatalf("回填结果异常: %+v", h1)
+	}
+}
+
+func TestHistoryCorruptFileQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	for i := 0; i < 20; i++ {
+		addHistSample(s, "n1", i)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "history.json"), []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("写入损坏文件: %v", err)
+	}
+
+	s2 := New(dir)
+	if err := s2.LoadErr(); err != nil {
+		t.Fatalf("损坏历史应回填而不是失败: %v", err)
+	}
+	if counts := s2.HistoryCounts("n1"); counts[HistoryResolution1m] != 10 {
+		t.Fatalf("损坏后回填异常: %+v", counts)
+	}
+	baks, _ := filepath.Glob(filepath.Join(dir, "history.json.corrupt-*"))
+	if len(baks) != 1 {
+		t.Fatalf("损坏文件未隔离: %v", baks)
+	}
+}
+
+func TestHistoryNewerSchemaRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "history.json"),
+		[]byte(`{"schemaVersion":99,"nodes":{}}`), 0o600); err != nil {
+		t.Fatalf("写入新版本文件: %v", err)
+	}
+	s := New(dir)
+	if s.LoadErr() == nil {
+		t.Fatal("更高 schema 版本应拒绝启动")
+	}
+	baks, _ := filepath.Glob(filepath.Join(dir, "history.json.newer-*"))
+	if len(baks) != 1 {
+		t.Fatalf("新版本文件未隔离: %v", baks)
+	}
+}
+
+func TestDeleteNodeRemovesHistory(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	s.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
+	for i := 0; i < 5; i++ {
+		addHistSample(s, "n1", i)
+	}
+	s.DeleteNode("n1")
+	if counts := s.HistoryCounts("n1"); counts[HistoryResolution1m] != 0 {
+		t.Fatalf("删除节点后历史仍存在: %+v", counts)
+	}
+	if err := s.SaveHistory(); err != nil {
+		t.Fatalf("SaveHistory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "history.json")); err != nil {
+		t.Fatalf("history.json 未生成: %v", err)
+	}
+}
+
+// TestHistoryConcurrentAccess 复现「写入聚合 + 定期落盘 + 查询」并发路径。
+// 没有 -race 时，map 并发读写仍会触发 runtime 的 fatal error。
+func TestHistoryConcurrentAccess(t *testing.T) {
+	s := New(t.TempDir())
+	s.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			addHistSample(s, "n1", i)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := s.SaveHistory(); err != nil {
+					t.Errorf("SaveHistory: %v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		_ = s.HistorySeries("n1", HistoryResolution1m, histBase)
+		_ = s.HistoryCounts("n1")
+	}
+	close(stop)
+	wg.Wait()
+}
+
+func BenchmarkSaveHistory40Nodes(b *testing.B) {
+	s := newBenchStore(b, 40)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.mu.Lock()
+		s.historyDirty = true
+		s.mu.Unlock()
+		if err := s.SaveHistory(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

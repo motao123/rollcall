@@ -2,10 +2,13 @@ package web
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -740,5 +743,154 @@ func TestMetricsExposeNotifyQueue(t *testing.T) {
 		if !bytes.Contains(w.Body.Bytes(), []byte(want)) {
 			t.Fatalf("指标缺失 %q:\n%s", want, w.Body.String())
 		}
+	}
+}
+
+// TestNodeSeriesRangeResolution 验证长范围自动切换到聚合分辨率，
+// 并且聚合点带有增量字段供前端与 CSV 使用。
+func TestNodeSeriesRangeResolution(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	now := time.Now().Unix()
+	for ts := now - 7200; ts <= now; ts += 30 {
+		st.AddMetrics("n1", model.HostInfo{}, model.Metrics{
+			TS: ts, CPUPct: 10, Load1: 1,
+			MemUsed: 1 << 30, MemTotal: 4 << 30,
+			DiskUsed: 1 << 30, DiskTotal: 10 << 30,
+			NetRx: uint64(ts), NetTx: uint64(ts / 2),
+		})
+	}
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	h := srv.Handler()
+	get := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	cases := []struct {
+		rng, resolution string
+		minPts          int
+	}{
+		{"1h", "raw", 100},
+		{"6h", "raw", 200},
+		{"24h", "raw", 200},
+		{"7d", "1m", 100},
+		{"30d", "5m", 20},
+		{"365d", "1h", 1},
+	}
+	for _, c := range cases {
+		w := get("/api/nodes/n1/series?range=" + c.rng)
+		if w.Code != 200 {
+			t.Fatalf("%s 返回 %d: %s", c.rng, w.Code, w.Body.String())
+		}
+		var got struct {
+			Resolution string           `json:"resolution"`
+			Points     []map[string]any `json:"points"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%s 响应解析失败: %v", c.rng, err)
+		}
+		if got.Resolution != c.resolution {
+			t.Errorf("%s 分辨率 %q，want %q", c.rng, got.Resolution, c.resolution)
+		}
+		if len(got.Points) < c.minPts {
+			t.Errorf("%s 点数 %d，want ≥%d", c.rng, len(got.Points), c.minPts)
+		}
+		if c.resolution != "raw" && len(got.Points) > 0 {
+			if _, ok := got.Points[0]["count"]; !ok {
+				t.Errorf("%s 聚合点缺少 count", c.rng)
+			}
+			if _, ok := got.Points[0]["netRxDelta"]; !ok {
+				t.Errorf("%s 聚合点缺少 netRxDelta", c.rng)
+			}
+		}
+	}
+
+	if w := get("/api/nodes/n1/series?range=2y"); w.Code != 400 {
+		t.Errorf("未知范围应 400，实际 %d", w.Code)
+	}
+
+	w := get("/api/export/metrics.csv?node=n1&range=7d")
+	if w.Code != 200 {
+		t.Fatalf("7d 导出返回 %d: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("分辨率")) || !bytes.Contains(w.Body.Bytes(), []byte(",1m,")) {
+		t.Errorf("7d 导出缺少聚合列: %s", w.Body.String())
+	}
+}
+
+// TestGzipAPIResponses 验证长范围 JSON 与 CSV 在客户端声明 gzip 时被压缩，
+// 未声明时保持原样，避免慢速链路上大响应长时间挂起。
+func TestGzipAPIResponses(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	now := time.Now().Unix()
+	for ts := now - 7200; ts <= now; ts += 30 {
+		st.AddMetrics("n1", model.HostInfo{}, model.Metrics{
+			TS: ts, CPUPct: 10, Load1: 1,
+			MemUsed: 1 << 30, MemTotal: 4 << 30,
+			DiskUsed: 1 << 30, DiskTotal: 10 << 30,
+			NetRx: uint64(ts), NetTx: uint64(ts / 2),
+		})
+	}
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	h := srv.Handler()
+
+	do := func(path string, acceptGzip bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+		if acceptGzip {
+			req.Header.Set("Accept-Encoding", "gzip, deflate")
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	readBody := func(t *testing.T, w *httptest.ResponseRecorder) []byte {
+		t.Helper()
+		if enc := w.Header().Get("Content-Encoding"); enc != "gzip" {
+			t.Fatalf("Content-Encoding=%q，want gzip（header=%v）", enc, w.Header())
+		}
+		zr, err := gzip.NewReader(w.Body)
+		if err != nil {
+			t.Fatalf("响应不是合法 gzip: %v", err)
+		}
+		defer zr.Close()
+		body, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("解压失败: %v", err)
+		}
+		return body
+	}
+
+	for _, path := range []string{"/api/nodes/n1/series?range=7d", "/api/overview"} {
+		gz := do(path, true)
+		if gz.Code != 200 {
+			t.Fatalf("%s 返回 %d", path, gz.Code)
+		}
+		if !strings.Contains(gz.Header().Get("Vary"), "Accept-Encoding") {
+			t.Errorf("%s 缺少 Vary: Accept-Encoding", path)
+		}
+		plain := do(path, false)
+		if enc := plain.Header().Get("Content-Encoding"); enc != "" {
+			t.Errorf("%s 未声明 gzip 却返回 Content-Encoding=%q", path, enc)
+		}
+		if !bytes.Equal(readBody(t, gz), plain.Body.Bytes()) {
+			t.Errorf("%s 解压内容与未压缩响应不一致", path)
+		}
+		if gz.Body.Len() >= plain.Body.Len() {
+			t.Errorf("%s 压缩后 %d 字节，未小于原始 %d 字节", path, gz.Body.Len(), plain.Body.Len())
+		}
+	}
+
+	csv := do("/api/export/metrics.csv?node=n1&range=7d", true)
+	if csv.Code != 200 {
+		t.Fatalf("CSV 导出返回 %d", csv.Code)
+	}
+	if !bytes.Contains(readBody(t, csv), []byte("分辨率")) {
+		t.Error("压缩后的 CSV 内容不正确")
 	}
 }
