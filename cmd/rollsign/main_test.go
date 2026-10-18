@@ -25,6 +25,7 @@ func writeAsset(t *testing.T, dir, name string) string {
 func TestBuildManifestRejectsDuplicateAssetKeys(t *testing.T) {
 	dir := t.TempDir()
 	p := writeAsset(t, dir, "rollcall-agent-linux-amd64")
+	p2 := writeAsset(t, dir, "rollcall-agent-linux-arm64")
 
 	_, err := buildManifest(
 		[]string{"linux-amd64=" + p, "linux-amd64=" + p},
@@ -34,7 +35,7 @@ func TestBuildManifestRejectsDuplicateAssetKeys(t *testing.T) {
 	}
 
 	m, err := buildManifest(
-		[]string{"linux-amd64=" + p, "linux-arm64=" + p},
+		[]string{"linux-amd64=" + p, "linux-arm64=" + p2},
 		"v1.7.0", 1700000000, "https://example.com/releases/v1.7.0", false)
 	if err != nil {
 		t.Fatalf("不同平台键应通过: %v", err)
@@ -44,5 +45,17 @@ func TestBuildManifestRejectsDuplicateAssetKeys(t *testing.T) {
 	}
 	if m.Version != "1.7.0" {
 		t.Fatalf("版本应去掉 v 前缀，实际 %q", m.Version)
+	}
+
+	// 不同目录下的同名文件会生成相同下载地址，必须拒绝
+	sub := filepath.Join(dir, "arm64")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p3 := writeAsset(t, sub, "rollcall-agent-linux-amd64")
+	if _, err := buildManifest(
+		[]string{"linux-amd64=" + p, "linux-arm64=" + p3},
+		"v1.7.0", 1700000000, "https://example.com/releases/v1.7.0", false); err == nil {
+		t.Fatal("同名资产会生成冲突的下载地址，应报错")
 	}
 }

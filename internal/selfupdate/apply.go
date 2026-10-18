@@ -294,6 +294,11 @@ func checkELF(path string) error {
 	if hdr[5] != 1 { // EI_DATA=litte endian
 		return errors.New("更新包不是小端 ELF")
 	}
+	// e_type 必须可执行：ET_EXEC(2) 或 ET_DYN(3, PIE，现代 Go 默认)。
+	// ET_REL(1) 目标文件、ET_CORE(4) 内核转储装上去只会 exec 失败。
+	if etype := binary.LittleEndian.Uint16(hdr[16:18]); etype != 2 && etype != 3 {
+		return fmt.Errorf("更新包不是可执行 ELF（e_type=%d）", etype)
+	}
 	machine := binary.LittleEndian.Uint16(hdr[18:20])
 	want, ok := map[string]uint16{
 		"amd64": 62, "arm64": 183, "386": 3, "arm": 40,

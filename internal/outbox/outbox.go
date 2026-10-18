@@ -28,7 +28,8 @@ type Config struct {
 	Backoff     []time.Duration
 }
 
-// DefaultConfig 返回生产环境参数：5 次尝试，30s→1h 退避。
+// DefaultConfig 返回生产环境参数：最多 5 次尝试（首投 + 4 次重试），
+// 退避 30s→30m；MaxAttempts 与 Backoff 长度必须匹配，否则最后一档永远用不到。
 func DefaultConfig() Config {
 	return Config{
 		Workers:     8,
@@ -39,7 +40,6 @@ func DefaultConfig() Config {
 			2 * time.Minute,
 			10 * time.Minute,
 			30 * time.Minute,
-			time.Hour,
 		},
 	}
 }
@@ -331,6 +331,9 @@ func (m *Manager) work(job *model.NotifyJob) {
 		Link:     job.Link,
 	})
 	okAny, errs := resultSummary(results)
+	// 发送可能耗时数十秒：状态时间戳与退避基准都要用发送结束后的时间，
+	// 否则 NextAttemptAt 会偏早、LastAttempt 也不准。
+	now = time.Now().Unix()
 	if okAny {
 		if errs != "" {
 			log.Printf("通知部分通道失败（已至少送达一个通道）: %s", errs)
@@ -340,6 +343,7 @@ func (m *Manager) work(job *model.NotifyJob) {
 	}
 
 	attempts := job.Attempts + 1
+	// MaxAttempts 是总尝试次数（含首投），与 Backoff 的档数一一对应。
 	if attempts >= m.cfg.MaxAttempts {
 		log.Printf("通知投递失败，已重试 %d 次放弃: %s (%s)", attempts, job.Title, errs)
 		m.st.NotifyJobFailed(job.ID, errs, now)

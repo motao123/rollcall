@@ -323,6 +323,11 @@ func reportEndpoint(server string, allowInsecure bool) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("server 仅支持 http/https: %q", server)
 	}
+	// 只接受「协议 + 主机 + 可选端口」：带路径、查询串、片段或用户信息时，
+	// 简单拼接 /api/report 会得到意料之外的地址（甚至把凭据写进 URL）。
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("server 不能包含路径、查询串、片段或用户信息: %q", server)
+	}
 	if u.Scheme == "http" && !allowInsecure && !isLoopbackHost(u.Hostname()) {
 		return "", fmt.Errorf("server 使用明文 HTTP 会泄露节点令牌，请改用 https 或显式加 -allow-insecure")
 	}

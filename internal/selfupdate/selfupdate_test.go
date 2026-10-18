@@ -26,6 +26,7 @@ func fakeELF(marker string) []byte {
 	b[4] = 2 // 64 位
 	b[5] = 1 // 小端
 	machine := map[string]uint16{"amd64": 62, "arm64": 183, "386": 3, "arm": 40}[runtime.GOARCH]
+	binary.LittleEndian.PutUint16(b[16:18], 2) // e_type=ET_EXEC
 	binary.LittleEndian.PutUint16(b[18:20], machine)
 	copy(b[20:], marker)
 	return b

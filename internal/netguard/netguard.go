@@ -26,6 +26,18 @@ type Policy struct {
 
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
+// reservedIPv4 是不可路由的保留网段：文档/基准测试网段与 240/4（含广播地址）。
+// 它们永远不是真实服务，放行只会产生误导性的「可达」结果，
+// 也可能被用于广播/放大探测。
+var reservedIPv4 = []*net.IPNet{
+	{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)},    // TEST-NET-1
+	{IP: net.IPv4(198, 51, 100, 0), Mask: net.CIDRMask(24, 32)}, // TEST-NET-2
+	{IP: net.IPv4(203, 0, 113, 0), Mask: net.CIDRMask(24, 32)},  // TEST-NET-3
+	{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)},   // 基准测试
+	{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)},    // IETF 协议分配
+	{IP: net.IPv4(240, 0, 0, 0), Mask: net.CIDRMask(4, 32)},     // 保留 + 广播
+}
+
 // metadataIPs 是云厂商元数据服务的固定地址，必须**无条件**拦截。
 //
 // 169.254.169.254 等链路本地地址已由 IsLinkLocalUnicast 覆盖；
@@ -53,9 +65,16 @@ func (p Policy) CheckIP(ip net.IP) error {
 			return fmt.Errorf("目标地址 %s 是云厂商元数据服务，始终禁止访问", ip)
 		}
 	}
-	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 0 {
+	if ip4 := ip.To4(); ip4 != nil {
 		// 0.0.0.0/8（this network）在部分系统上会被路由到本机
-		return fmt.Errorf("目标地址 %s 属于禁止访问的保留网段", ip)
+		if ip4[0] == 0 {
+			return fmt.Errorf("目标地址 %s 属于禁止访问的保留网段", ip)
+		}
+		for _, n := range reservedIPv4 {
+			if n.Contains(ip4) {
+				return fmt.Errorf("目标地址 %s 属于不可路由的保留网段", ip)
+			}
+		}
 	}
 	if !p.AllowPrivate {
 		// CGNAT 100.64/10 也归入内网（Tailscale 等组网使用该段）
@@ -109,6 +128,10 @@ func (p Policy) DialContext(ctx context.Context, network, addr string) (net.Conn
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
+	// 超时必须覆盖整个拨号过程（DNS 解析 + 建连），而不是只作用于
+	// 单次操作：解析慢或黑洞目标会绕过 net.Dialer.Timeout。
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	d := net.Dialer{Timeout: timeout}
 
 	if ip := net.ParseIP(host); ip != nil {

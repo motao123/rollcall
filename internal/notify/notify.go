@@ -208,9 +208,12 @@ func (c *Config) Redacted() *Config {
 	}
 	for _, ch := range c.Channels {
 		sk := secretKeys(ch.Type)
+		// 未知类型时 secretKeys 返回 nil，无法判断哪些字段敏感；
+		// 宁可将全部非空字段脱敏，也不能把潜在凭据明文下发。
+		_, known := defOf(ch.Type)
 		opts := make(map[string]string, len(ch.Options))
 		for k, v := range ch.Options {
-			if sk[k] && v != "" {
+			if v != "" && (!known || sk[k]) {
 				opts[k] = mask(v)
 			} else {
 				opts[k] = v
@@ -240,10 +243,18 @@ func (c *Config) MergeSecrets(old *Config) {
 	}
 	prev := map[string]ChannelConfig{}
 	for _, ch := range old.Channels {
+		if ch.ID == "" {
+			continue
+		}
 		prev[ch.ID] = ch
 	}
 	for i := range c.Channels {
 		ch := &c.Channels[i]
+		if ch.ID == "" {
+			// 无 ID 的通道无法与旧配置一一对应；按空串合并会让多个
+			// 空 ID 通道互相覆盖掩码，导致密钥被清空或串用。
+			continue
+		}
 		o, ok := prev[ch.ID]
 		if !ok || o.Type != ch.Type {
 			continue

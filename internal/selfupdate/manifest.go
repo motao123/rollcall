@@ -360,15 +360,74 @@ func (a version) compare(b version) int {
 	if b.pre == "" {
 		return -1
 	}
-	if a.pre > b.pre {
+	// 预发布标识按 semver 规则比较：数字段按数值、分段逐位比较。
+	return comparePre(a.pre, b.pre)
+}
+
+// comparePre 比较两个预发布标识（a/b 均非空）。
+// semver：以 . 分段逐位比较；数字段按数值，数字段低于非数字段；
+// 前缀相同时段数少的更小（1.0.0-alpha < 1.0.0-alpha.1）。
+func comparePre(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		xn, xok := digits(as[i])
+		yn, yok := digits(bs[i])
+		switch {
+		case xok && yok:
+			if xn != yn {
+				if xn > yn {
+					return 1
+				}
+				return -1
+			}
+		case xok:
+			return -1
+		case yok:
+			return 1
+		default:
+			if as[i] != bs[i] {
+				if as[i] > bs[i] {
+					return 1
+				}
+				return -1
+			}
+		}
+	}
+	switch {
+	case len(as) < len(bs):
+		return -1
+	case len(as) > len(bs):
 		return 1
 	}
-	return -1
+	return 0
+}
+
+// digits 把纯数字段转成整数；非纯数字返回 ok=false。
+// 上限截断到 1e9，仅用于比较，避免恶意超长数字溢出。
+func digits(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		if n < 1e9 {
+			n = n*10 + int(c-'0')
+		}
+	}
+	return n, true
 }
 
 // Download 下载资产到 dir（必须与可执行文件同目录），校验大小与 SHA-256。
 // 返回的临时文件权限为 0600，由 Apply 调整为原可执行文件权限。
 func (u *Updater) Download(ctx context.Context, a Asset, dir string) (string, error) {
+	// 大小边界只在 VerifyEnvelope 里检查；Download 是导出方法，
+	// 调用方可能传入自行构造的 Asset，这里必须再校验一次。
+	if a.Size < MinAssetSize || a.Size > MaxAssetSize {
+		return "", fmt.Errorf("更新资产大小 %d 超出允许范围", a.Size)
+	}
 	if err := CheckURL(a.URL, u.AllowInsecure); err != nil {
 		return "", fmt.Errorf("更新资产地址: %w", err)
 	}

@@ -62,11 +62,27 @@ func NewRunner(cfg Config) *Runner {
 
 // ValidateService 在入库前校验探测目标，返回用户可读的错误。
 func (r *Runner) ValidateService(sv model.Service) error {
-	switch strings.ToLower(sv.Type) {
+	typ := strings.ToLower(sv.Type)
+	switch typ {
 	case "http", "https":
 		u, err := url.Parse(strings.TrimSpace(sv.Target))
 		if err != nil || u.Host == "" {
 			return errors.New("HTTP 目标需为完整 URL，例如 https://example.com/health")
+		}
+		// 类型 https 必须配 https 目标：否则 CertDays 永远是 -1，
+		// 证书到期监控会静默失效。反过来 type=http 允许探测 https 站点
+		// （只是把 http/https 都当作 HTTP 探测，证书天数仍会采集）。
+		if typ == "https" && u.Scheme != "https" {
+			return errors.New("类型 https 的目标必须使用 https://")
+		}
+		if u.User != nil {
+			return errors.New("HTTP 目标不能包含用户名/密码")
+		}
+		if p := u.Port(); p != "" {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 1 || n > 65535 {
+				return errors.New("HTTP 端口必须在 1–65535 之间")
+			}
 		}
 		if err := r.policy.CheckURL(u); err != nil {
 			return err
@@ -200,7 +216,9 @@ func parseTCPTarget(target string) (string, error) {
 	if err != nil || n < 1 || n > 65535 {
 		return "", errors.New("TCP 端口必须在 1–65535 之间")
 	}
-	return net.JoinHostPort(host, port), nil
+	// 回写规范化后的数字端口：Atoi 接受 "+80"/"080"，
+	// 但下游拨号会按原始字符串解释，校验与执行必须一致。
+	return net.JoinHostPort(host, strconv.Itoa(n)), nil
 }
 
 // trimErr 压缩网络错误信息，避免把完整堆栈写进数据库。

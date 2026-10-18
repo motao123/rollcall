@@ -159,29 +159,41 @@ func buildManifest(assets []string, version string, publishedAt int64, baseURL s
 		PublishedAt: publishedAt,
 		Assets:      make(map[string]selfupdate.Asset, len(assets)),
 	}
+	baseNames := map[string]string{}
 	for _, spec := range assets {
 		key, path, _ := strings.Cut(spec, "=")
 		if _, dup := m.Assets[key]; dup {
 			return nil, fmt.Errorf("-asset 平台键重复: %s", key)
 		}
 		st, err := os.Stat(path)
-		if err != nil || !st.Mode().IsRegular() {
-			return nil, fmt.Errorf("资产 %s 不可读: %v", key, err)
+		if err != nil {
+			return nil, fmt.Errorf("资产 %s 不可读: %w", key, err)
 		}
-		if st.Size() < selfupdate.MinAssetSize || st.Size() > selfupdate.MaxAssetSize {
-			return nil, fmt.Errorf("资产 %s 大小 %d 超出允许范围", key, st.Size())
+		if !st.Mode().IsRegular() {
+			return nil, fmt.Errorf("资产 %s 不是普通文件: %s", key, path)
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("读取资产 %s 失败: %v", key, err)
+			return nil, fmt.Errorf("读取资产 %s 失败: %w", key, err)
 		}
+		// 用实际读到的字节数而非 Stat 的大小：两者之间文件可能被替换，
+		// 清单里的 Size 必须与 SHA-256 覆盖的内容一致。
+		size := int64(len(b))
+		if size < selfupdate.MinAssetSize || size > selfupdate.MaxAssetSize {
+			return nil, fmt.Errorf("资产 %s 大小 %d 超出允许范围", key, size)
+		}
+		base := filepath.Base(path)
+		if prev, dup := baseNames[base]; dup {
+			return nil, fmt.Errorf("资产 %s 与 %s 的文件名相同（%s），下载地址会冲突", key, prev, base)
+		}
+		baseNames[base] = key
 		sum := sha256.Sum256(b)
-		url := strings.TrimRight(baseURL, "/") + "/" + filepath.Base(path)
+		url := strings.TrimRight(baseURL, "/") + "/" + base
 		if err := selfupdate.CheckURL(url, allowInsecure); err != nil {
 			return nil, fmt.Errorf("资产 %s 地址无效: %v", key, err)
 		}
 		m.Assets[key] = selfupdate.Asset{
-			URL: url, SHA256: hex.EncodeToString(sum[:]), Size: st.Size(),
+			URL: url, SHA256: hex.EncodeToString(sum[:]), Size: size,
 		}
 	}
 	return m, nil

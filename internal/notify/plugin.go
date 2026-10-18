@@ -137,6 +137,11 @@ func normalizeField(idx int, f Field) (Field, error) {
 	if f.Label == "" {
 		return f, fmt.Errorf("字段 %s 缺少 label", f.Key)
 	}
+	// 与顶层 label 保持一致的上限：字段 label 会原样透出到前端表单，
+	// 不加限制时单个字段就能接近整个清单的大小上限。
+	if len([]rune(f.Label)) > 40 {
+		return f, fmt.Errorf("字段 %s 的 label 不超过 40 个字符", f.Key)
+	}
 	switch f.Type {
 	case "", "text":
 		f.Type = "text"
@@ -238,7 +243,7 @@ func loadPluginFile(root, path string) (*plugin, error) {
 	}
 	for _, kv := range m.Env {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || !pluginEnvRe.MatchString(k) || len(v) > 512 {
+		if !ok || !pluginEnvRe.MatchString(k) || len(v) > 512 || strings.ContainsRune(v, 0) {
 			return nil, fmt.Errorf("env 项无效: %q", kv)
 		}
 		up := strings.ToUpper(k)

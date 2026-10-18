@@ -36,6 +36,11 @@ func TestCheckIPPolicy(t *testing.T) {
 		// 落在 CGNAT / ULA 段内的云元数据地址，即使允许私网也必须拒绝
 		{"100.100.100.200", true, true}, // 阿里云 metadata
 		{"fd00:ec2::254", true, true},   // AWS IPv6 metadata
+		// 不可路由的保留网段：即使允许私网也应拒绝
+		{"203.0.113.9", true, true}, // TEST-NET-3
+		{"198.18.0.1", true, true},  // 基准测试网段
+		{"240.0.0.1", true, true},   // 240/4 保留
+		{"192.0.0.8", true, true},   // IETF 协议分配
 		// metadata / 链路本地始终禁止，即使显式允许私网
 		{"169.254.169.254", true, true},
 		{"fe80::1", true, true},
