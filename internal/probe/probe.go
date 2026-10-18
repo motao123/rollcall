@@ -140,7 +140,28 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 	}
 	req.Header.Set("User-Agent", "motao-rollcall/1.1 (+availability check)")
 
-	resp, err := r.client.Do(req)
+	// resp 是跳转链的**最后一跳**，它的 TLS 描述的是跳转目标的证书。
+	// 目标 301 到 http:// 或别的域名时，用 resp.TLS 取天数会得到
+	// 「无 TLS(-1)」或「另一台主机的证书」，证书到期监控静默失效。
+	// 这里在 CheckRedirect 里抓首跳的 TLS 状态，重定向判定仍走原有策略。
+	var firstTLS *tls.ConnectionState
+	cli := *r.client
+	baseRedirect := r.client.CheckRedirect
+	cli.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if firstTLS == nil && next.Response != nil && next.Response.TLS != nil {
+			firstTLS = next.Response.TLS
+		}
+		if baseRedirect != nil {
+			return baseRedirect(next, via)
+		}
+		// 未配置策略时保留 Go 的默认跳转上限（DefaultCheckRedirect 的行为）。
+		if len(via) >= 10 {
+			return errors.New("重定向次数过多")
+		}
+		return nil
+	}
+
+	resp, err := cli.Do(req)
 	res.LatencyMs = int(time.Since(start).Milliseconds())
 	if err != nil {
 		res.Detail = trimErr(err)
@@ -155,12 +176,21 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 		resp.StatusCode == 401 || resp.StatusCode == 403
 	if !res.OK {
 		res.Detail = "status " + strconv.Itoa(resp.StatusCode)
+	} else if resp.Request != nil && resp.Request.URL.Host != u.Host {
+		// 跨主机/跨协议跳转：最终响应不代表配置目标的健康状态，
+		// 至少要让它在详情里可见，避免「配了 A、一直在看 B」。
+		res.Detail = "redirected to " + resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
 	}
 
 	// TLS 证书剩余天数。默认握手已校验证书链，能走到这里说明链有效；
 	// 仅在显式开启 InsecureTLS 时链未验证，此时天数只作展示。
-	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-		res.CertDays = certDaysLeft(resp.TLS.PeerCertificates[0].NotAfter)
+	// 优先用首跳（配置目标本身）的证书；没有跳转时首跳就是最终响应。
+	tlsState := firstTLS
+	if tlsState == nil {
+		tlsState = resp.TLS
+	}
+	if tlsState != nil && len(tlsState.PeerCertificates) > 0 {
+		res.CertDays = certDaysLeft(tlsState.PeerCertificates[0].NotAfter)
 	}
 }
 

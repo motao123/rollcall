@@ -267,10 +267,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "rollcall_build_info{version=%s,go=%s} 1\n", q(version.Version), q(runtime.Version()))
 
 	// 汇总
-	views := s.buildNodeViews()
+	// 只统计状态，不构造完整视图：/metrics 每次抓取都会跑，
+	// buildNodeViews 会为每个节点复制最近 20 分钟的原始序列并建告警映射，
+	// 这些在抓取路径上完全用不到（节点多时是 O(n × 点数) 的额外分配）。
+	nodes := s.st.Nodes()
 	online, stale, offline, noData := 0, 0, 0, 0
-	for _, v := range views {
-		switch v.State {
+	for _, n := range nodes {
+		_, ts, _ := s.st.Latest(n.ID)
+		switch store.NodeState(ts, now) {
 		case model.NodeStateOnline:
 			online++
 		case model.NodeStateStale:
@@ -282,7 +286,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	help("rollcall_nodes_total", "Total registered nodes.", "gauge")
-	gauge("rollcall_nodes_total", nil, float64(len(views)))
+	gauge("rollcall_nodes_total", nil, float64(len(nodes)))
 	help("rollcall_nodes_online", "Nodes reporting within the online window.", "gauge")
 	gauge("rollcall_nodes_online", nil, float64(online))
 	help("rollcall_nodes_stale", "Nodes whose last report is late but not yet offline.", "gauge")
@@ -376,15 +380,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 				return float64(now - v.LastSeen)
 			}},
 	}
+	lite := s.buildNodeViewsLite()
 	for _, m := range nodeMetrics {
 		help(m.name, m.help, m.typ)
-		for _, v := range views {
+		for _, v := range lite {
 			gauge(m.name, []string{"id=" + q(v.ID), "name=" + q(v.Name)}, m.get(v))
 		}
 	}
 
 	help("rollcall_node_state", "Current node display state (1 for the active state).", "gauge")
-	for _, v := range views {
+	for _, v := range lite {
 		gauge("rollcall_node_state", []string{"id=" + q(v.ID), "name=" + q(v.Name), "state=" + q(v.State)}, 1)
 	}
 

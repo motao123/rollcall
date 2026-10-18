@@ -271,26 +271,36 @@ func main() {
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			// 不能直接 log.Fatal：它走 os.Exit(1)，会跳过 main 里所有 defer
+			// （ob.Stop），退出前的最终落盘也永远不会执行 —— 丢掉的正是最近
+			// 一个快照周期内的状态（待投递通知、探测结果）。
+			shutdown(srv, ob, st, "HTTP 服务异常")
+			log.Fatalf("%v", err)
 		}
 	case <-ctx.Done():
-		log.Printf("收到退出信号，正在关闭并保存状态…")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutCtx); err != nil {
-			log.Printf("HTTP 服务关闭超时: %v", err)
-		}
-		ob.Stop()
-		saveErr := st.Save()
-		if err := st.SaveHistory(); err != nil {
-			log.Printf("退出前保存历史失败: %v", err)
-		}
-		if saveErr != nil {
-			log.Printf("退出前保存失败: %v", saveErr)
-		} else {
-			log.Printf("状态已保存，退出")
-		}
+		shutdown(srv, ob, st, "收到退出信号")
 	}
+}
+
+// shutdown 关闭 HTTP 服务、排空通知队列并落盘。
+// 正常退出与异常退出共用同一路径，避免后者丢掉最后一个快照周期。
+func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, reason string) {
+	log.Printf("%s，正在关闭并保存状态…", reason)
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("HTTP 服务关闭超时: %v", err)
+	}
+	ob.Stop()
+	saveErr := st.Save()
+	if err := st.SaveHistory(); err != nil {
+		log.Printf("退出前保存历史失败: %v", err)
+	}
+	if saveErr != nil {
+		log.Printf("退出前保存失败: %v", saveErr)
+		return
+	}
+	log.Printf("状态已保存，退出")
 }
 
 // ensureDefaultRules 只在从未初始化过的实例上播种默认规则。

@@ -34,6 +34,7 @@ package collect
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -290,7 +291,7 @@ func readNetDev() (rx, tx uint64) {
 			continue
 		}
 		iface := strings.TrimSpace(line[:i])
-		if iface == "lo" || strings.HasPrefix(iface, "veth") || strings.HasPrefix(iface, "docker") {
+		if skipIface(iface) {
 			continue
 		}
 		f := strings.Fields(line[i+1:])
@@ -303,6 +304,31 @@ func readNetDev() (rx, tx uint64) {
 		tx += t
 	}
 	return
+}
+
+// sysClassNet 是网卡拓扑信息的根目录，测试中可替换。
+var sysClassNet = "/sys/class/net"
+
+// skipIface 判断是否应跳过该网卡的计数。
+//
+// 只看名字不够：bond0 与其 slave（eth0/eth1）、网桥与容器 veth 会把
+// 同一批报文重复累加，累计流量放大 2–3 倍，而历史层正是用这些累计值
+// 做差分算流量。这里按拓扑补充两条判据：
+//   - 有 master 链接 = 从设备，其流量已计入主设备；
+//   - 容器/网桥侧的虚拟网卡按名字前缀跳过（无 master 但同样重复）。
+func skipIface(name string) bool {
+	if name == "" || name == "lo" {
+		return true
+	}
+	for _, p := range []string{"veth", "docker", "br-", "cni", "cali", "flannel", "kube"} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(sysClassNet, name, "master")); err == nil {
+		return true
+	}
+	return false
 }
 
 // readTCPConns 统计 ESTABLISHED(01) 状态的 TCP 连接数。

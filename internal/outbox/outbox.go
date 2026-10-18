@@ -26,6 +26,11 @@ type Config struct {
 	Tick        time.Duration // 调度轮询间隔
 	MaxAttempts int           // 单任务最大投递次数
 	Backoff     []time.Duration
+	// DrainTimeout 是 Stop 等待在途投递完成的上限，0 表示按 Workers 推导。
+	// 固定 20 秒不够：notify.Send 串行遍历通道，单个 HTTP 通道就有 12 秒超时，
+	// 超时后 Stop 返回但 worker 仍在写库，调用方随后的落盘会记下旧状态，
+	// 下次启动重复投递同一条告警。
+	DrainTimeout time.Duration
 }
 
 // DefaultConfig 返回生产环境参数：最多 5 次尝试（首投 + 4 次重试），
@@ -41,6 +46,9 @@ func DefaultConfig() Config {
 			10 * time.Minute,
 			30 * time.Minute,
 		},
+		// 8 个 worker 各最多一次 12 秒的 HTTP 超时，留一倍余量；
+		// 上限 60 秒，避免拖过 systemd 默认的 TimeoutStopSec。
+		DrainTimeout: 30 * time.Second,
 	}
 }
 
@@ -197,10 +205,25 @@ func (m *Manager) Stop() {
 		m.workWG.Wait()
 		close(done)
 	}()
+	budget := m.cfg.DrainTimeout
+	if budget <= 0 {
+		// 未显式配置时按 worker 数推导：每个 worker 至少可能卡在一个
+		// 通道超时上，固定 20 秒在多通道配置下必然不够。
+		budget = time.Duration(m.cfg.Workers) * 12 * time.Second
+		if budget > 60*time.Second {
+			budget = 60 * time.Second
+		}
+	}
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
-		log.Printf("通知队列关闭超时，未完成任务将在重启后重试")
+	case <-timer.C:
+		m.mu.Lock()
+		left := m.inFlight
+		m.mu.Unlock()
+		log.Printf("通知队列关闭超时（%s），仍有 %d 个投递在途；这些任务保持 pending，重启后会重试",
+			budget, left)
 	}
 }
 

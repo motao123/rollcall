@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -90,9 +91,11 @@ func LoadPlugins(dir string) error {
 	if err != nil || !fi.IsDir() {
 		return fmt.Errorf("插件目录不存在或不是目录: %s", root)
 	}
-	// 全局可写目录意味着任意本地用户都能替换插件；显式开启也不应接受。
-	if fi.Mode().Perm()&0o002 != 0 {
-		return fmt.Errorf("插件目录不能是全局可写: %s", root)
+	// 组/他人可写目录意味着本机其他用户都能替换插件；显式开启也不应接受。
+	// Windows 的 Mode().Perm() 恒为 0666/0777（ACL 不映射到 permission bits），
+	// 该检查在那里没有意义，只会把功能整体拒之门外。
+	if err := checkTrustedDir(root); err != nil {
+		return err
 	}
 
 	entries, err := os.ReadDir(root)
@@ -173,8 +176,8 @@ func loadPluginFile(root, path string) (*plugin, error) {
 	if !st.Mode().IsRegular() || st.Size() > maxPluginManifest {
 		return nil, fmt.Errorf("清单必须是小于 %dKB 的普通文件", maxPluginManifest>>10)
 	}
-	if st.Mode().Perm()&0o002 != 0 {
-		return nil, errors.New("清单不能是全局可写")
+	if err := checkNoWritablePath(root, real); err != nil {
+		return nil, err
 	}
 	b, err := os.ReadFile(real)
 	if err != nil {
@@ -296,10 +299,59 @@ func resolvePluginCommand(root, raw string) (string, error) {
 	if fi.Mode().Perm()&0o111 == 0 {
 		return "", errors.New("command 缺少可执行权限")
 	}
-	if fi.Mode().Perm()&0o002 != 0 {
-		return "", errors.New("command 不能是全局可写")
+	// 只检查最终文件不够：中间目录可写时，本机其他用户可以在
+	// 「校验」与「exec」之间把 command 换成任意程序。
+	if err := checkNoWritablePath(root, real); err != nil {
+		return "", err
 	}
 	return real, nil
+}
+
+// permChecksEnabled 表示当前平台能否用 permission bits 判断可写性。
+// Windows 上 os.Stat 恒返回 0666/0777，任何「组/他人可写」判断都会误杀。
+var permChecksEnabled = runtime.GOOS != "windows"
+
+// checkTrustedDir 校验插件根目录本身不被组/他人改写。
+func checkTrustedDir(dir string) error {
+	if !permChecksEnabled {
+		return nil
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("插件目录不可用: %w", err)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("插件目录不能是同组或其他用户可写（权限 %04o）: %s", fi.Mode().Perm(), dir)
+	}
+	return nil
+}
+
+// checkNoWritablePath 校验从 root 到 target 的每一级目录与文件都不可被
+// 组/其他用户改写。symlink 已在 resolvePluginCommand / loadPluginFile 里
+// 解析为真实路径并确认仍在 root 之内。
+func checkNoWritablePath(root, target string) error {
+	if !permChecksEnabled {
+		return nil
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return errors.New("路径越出插件目录")
+	}
+	cur := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		fi, err := os.Stat(cur)
+		if err != nil {
+			return err
+		}
+		if fi.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s 可被同组或其他用户改写（权限 %04o）", cur, fi.Mode().Perm())
+		}
+	}
+	return nil
 }
 
 func insideDir(root, path string) bool {
