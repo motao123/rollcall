@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -43,6 +44,10 @@ type Server struct {
 	outbox     *outbox.Manager
 	notifyErr  error
 
+	// trustedProxies 是允许提交 X-Forwarded-For 的反向代理网段。
+	// 为空时只信任回环（见 defaultTrustedProxies）。
+	trustedProxies []*net.IPNet
+
 	testMu   sync.Mutex
 	lastTest time.Time
 }
@@ -55,6 +60,9 @@ type Config struct {
 	PanelLink  string          // 面板对外地址，拼进通知正文
 	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
 	Outbox     *outbox.Manager // 通知投递队列；nil 时不外发通知
+	// TrustedProxies 是可信反向代理网段；nil 时仅信任回环。
+	// 跨机代理必须显式配置，否则无法识别真实客户端 IP。
+	TrustedProxies []*net.IPNet
 }
 
 func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server {
@@ -62,10 +70,15 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 	if rate <= 0 {
 		rate = 7.2
 	}
+	trusted := cfg.TrustedProxies
+	if trusted == nil {
+		trusted = defaultTrustedProxies
+	}
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
 		panelLink: cfg.PanelLink, cnyRate: rate,
-		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox}
+		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
+		trustedProxies: trusted}
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
 		srv.notifyErr = err

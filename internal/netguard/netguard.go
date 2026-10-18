@@ -50,6 +50,35 @@ var reservedIPv4 = []*net.IPNet{
 var metadataIPs = []net.IP{
 	net.IPv4(100, 100, 100, 200),
 	net.ParseIP("fd00:ec2::254"),
+	net.ParseIP("fd20:ce::254"), // GCP IPv6 metadata（落在 ULA 内）
+}
+
+// reservedIPv6 是不应访问的 IPv6 保留/过渡网段。
+//
+// 其中 Teredo / 6to4 / NAT64 会内嵌 IPv4 地址，构成对 IPv4 检查的直接绕过：
+// `64:ff9b::a9fe:a9fe` 在 NAT64 环境会落到 169.254.169.254，
+// `2002:0a00:0001::` 会落到 10.0.0.1 —— 即使 AllowPrivate=false 也一样。
+var reservedIPv6 = mustCIDRs(
+	"fec0::/10",      // 站点本地（已废弃）
+	"2001:db8::/32",  // 文档
+	"2001:2::/48",    // 基准测试
+	"2001::/32",      // Teredo（内嵌 IPv4）
+	"2002::/16",      // 6to4（内嵌 IPv4）
+	"64:ff9b::/96",   // NAT64（内嵌 IPv4）
+	"64:ff9b:1::/48", // NAT64 本地
+	"100::/64",       // 丢弃前缀
+)
+
+func mustCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("netguard: 非法内置 CIDR " + c)
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // CheckIP 返回该 IP 是否允许访问。
@@ -63,6 +92,15 @@ func (p Policy) CheckIP(ip net.IP) error {
 	for _, m := range metadataIPs {
 		if ip.Equal(m) {
 			return fmt.Errorf("目标地址 %s 是云厂商元数据服务，始终禁止访问", ip)
+		}
+	}
+	// IPv6 保留/过渡网段必须在 AllowPrivate 之前拦截：
+	// 6to4 / NAT64 / Teredo 内嵌 IPv4，可绕过上面的 IPv4 检查。
+	if ip.To4() == nil {
+		for _, n := range reservedIPv6 {
+			if n.Contains(ip) {
+				return fmt.Errorf("目标地址 %s 属于不可路由的 IPv6 保留网段", ip)
+			}
 		}
 	}
 	if ip4 := ip.To4(); ip4 != nil {

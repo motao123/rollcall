@@ -47,6 +47,8 @@ func main() {
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
 	allowPrivateNotify := flag.Bool("allow-private-notify", false, "允许通知通道访问回环/私网目标（自建 Gotify/Bark/Webhook 时使用）")
 	notifyPlugins := flag.String("notify-plugins", "", "通知插件目录（显式启用本地插件，目录内 *.json 清单）")
+	trustedProxies := flag.String("trusted-proxies", "",
+		"可信反向代理网段（逗号分隔 CIDR，如 127.0.0.1/32,10.0.0.0/8）；留空仅信任回环")
 	saveInterval := flag.Duration("save-interval", 60*time.Second, "自动保存快照间隔（10s–1h）")
 	history1m := flag.Duration("history-1m-retention", 7*24*time.Hour, "1 分钟聚合层保留时长（默认 7 天）")
 	history5m := flag.Duration("history-5m-retention", 30*24*time.Hour, "5 分钟聚合层保留时长（默认 30 天）")
@@ -233,9 +235,13 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 	ob := outbox.New(st, outbox.DefaultConfig())
+	trustedNets, err := web.ParseTrustedProxies(*trustedProxies)
+	if err != nil {
+		log.Fatalf("-trusted-proxies 无效: %v", err)
+	}
 	ws := web.New(st, runner, engine, web.Config{
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass, PanelLink: *panelLink,
-		CNYRate: *cnyRate, Outbox: ob,
+		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)

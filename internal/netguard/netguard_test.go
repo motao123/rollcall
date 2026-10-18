@@ -41,6 +41,13 @@ func TestCheckIPPolicy(t *testing.T) {
 		{"198.18.0.1", true, true},  // 基准测试网段
 		{"240.0.0.1", true, true},   // 240/4 保留
 		{"192.0.0.8", true, true},   // IETF 协议分配
+		// IPv6 保留/过渡网段（6to4/NAT64 内嵌 IPv4，可绕过 IPv4 检查）
+		{"2001:db8::1", true, true},
+		{"64:ff9b::a9fe:a9fe", true, true},
+		{"2002:0a00:0001::1", true, true},
+		{"fec0::1", true, true},
+		{"fd20:ce::254", true, true},     // GCP IPv6 metadata
+		{"2606:4700::1111", true, false}, // 公网 IPv6 应放行
 		// metadata / 链路本地始终禁止，即使显式允许私网
 		{"169.254.169.254", true, true},
 		{"fe80::1", true, true},
