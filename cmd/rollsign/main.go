@@ -127,6 +127,14 @@ func sign(args []string) {
 	if len(assets) == 0 {
 		fatal("至少提供一个 -asset")
 	}
+	// 必须在读取私钥、计算哈希之前拦下危险输出路径：
+	// os.WriteFile 会直接截断目标文件，-out 指向私钥或资产会静默毁掉它，
+	// 而命令仍会打印「已写入」。
+	if *out != "" {
+		if err := checkOutputPath(*out, *keyPath, assets); err != nil {
+			fatal("%v", err)
+		}
+	}
 
 	priv := loadKey(*keyPath)
 	m, err := buildManifest(assets, *ver, *published, *baseURL, *allowInsecure)
@@ -146,6 +154,38 @@ func sign(args []string) {
 		fatal("写入清单失败: %v", err)
 	}
 	fmt.Printf("已写入 %s（版本 %s，%d 个资产）\n", *out, m.Version, len(m.Assets))
+}
+
+// checkOutputPath 拒绝把 -out 指向私钥或任一资产文件。
+// 这两类文件被 os.WriteFile 截断后无法恢复：私钥丢失意味着再也无法签发更新，
+// 资产被覆盖意味着已计算的 SHA-256 与实际文件对不上。
+func checkOutputPath(out, key string, assets []string) error {
+	if samePath(out, key) {
+		return fmt.Errorf("-out 不能指向私钥文件: %s", out)
+	}
+	for _, spec := range assets {
+		_, path, _ := strings.Cut(spec, "=")
+		if samePath(out, path) {
+			return fmt.Errorf("-out 不能覆盖资产文件: %s", path)
+		}
+	}
+	return nil
+}
+
+// samePath 判断两个路径是否指向同一文件。
+// 同时存在时用 os.SameFile（可识别硬链接），否则退化为清理后的绝对路径比较。
+func samePath(a, b string) bool {
+	aa, err1 := filepath.Abs(a)
+	bb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if fi, err := os.Stat(aa); err == nil {
+		if fj, err := os.Stat(bb); err == nil {
+			return os.SameFile(fi, fj)
+		}
+	}
+	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }
 
 // buildManifest 计算每个资产的 SHA-256 与大小，组装待签名清单。

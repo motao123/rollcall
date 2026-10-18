@@ -22,6 +22,34 @@ func writeAsset(t *testing.T, dir, name string) string {
 //
 // 同一平台键写两次时 map 只留最后一个，签出的清单看起来完全正常，
 // 却少了一个架构 —— 该平台此后收不到任何更新。
+// TestCheckOutputPathRejectsKeyAndAssets 防止 -out 覆盖私钥或资产。
+//
+// os.WriteFile 会直接截断目标文件：把 -out 写成私钥路径会毁掉唯一的签名密钥，
+// 写成资产路径会让已计算的 SHA-256 与实际文件不一致，而命令仍报「已写入」。
+func TestCheckOutputPathRejectsKeyAndAssets(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "rollsign.key")
+	if err := os.WriteFile(key, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asset := writeAsset(t, dir, "rollcall-agent-linux-amd64")
+
+	if err := checkOutputPath(key, key, []string{"linux-amd64=" + asset}); err == nil {
+		t.Fatal("-out 指向私钥应被拒绝")
+	}
+	if err := checkOutputPath(asset, key, []string{"linux-amd64=" + asset}); err == nil {
+		t.Fatal("-out 指向资产应被拒绝")
+	}
+	// 语法不同但指向同一文件
+	if err := checkOutputPath(filepath.Join(dir, ".", "rollsign.key"), key, nil); err == nil {
+		t.Fatal("等价路径应被识别")
+	}
+	if err := checkOutputPath(filepath.Join(dir, "manifest.json"), key,
+		[]string{"linux-amd64=" + asset}); err != nil {
+		t.Fatalf("正常输出路径不应被拒绝: %v", err)
+	}
+}
+
 func TestBuildManifestRejectsDuplicateAssetKeys(t *testing.T) {
 	dir := t.TempDir()
 	p := writeAsset(t, dir, "rollcall-agent-linux-amd64")
