@@ -52,7 +52,7 @@ body{
 .wrap{max-width:960px;margin:0 auto;padding:34px 20px 70px}
 header{display:flex;align-items:baseline;gap:12px;margin-bottom:6px;flex-wrap:wrap}
 h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
-.sub{color:var(--fg3);font-size:12.5px}
+.sub{color:var(--fg2);font-size:12.5px}
 .banner{
   margin:14px 0 22px;padding:11px 15px;border-radius:var(--r);
   display:flex;align-items:center;gap:10px;font-size:13px;font-weight:550;
@@ -78,7 +78,7 @@ h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
 .bars i{flex:1;border-radius:2px;background:var(--ok);min-width:2px;opacity:.92}
 .bars i.bad{background:var(--crit)}
 .bars i.gap{background:var(--line)}
-.bars-legend{grid-column:1/-1;display:flex;justify-content:space-between;font-size:10.5px;color:var(--fg3);margin-top:4px}
+.bars-legend{grid-column:1/-1;display:flex;justify-content:space-between;font-size:10.5px;color:var(--fg2);margin-top:4px}
 .pct{font-size:12.5px;font-weight:650}
 .pct.ok{color:var(--ok)} .pct.warn{color:var(--warn)} .pct.crit{color:var(--crit)}
 .svc{display:flex;align-items:center;gap:10px;padding:10px 16px;
@@ -86,7 +86,7 @@ h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
 .svc .name{font-weight:600}
 .svc .lat{margin-left:auto;color:var(--fg2);font-size:12px}
 footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);
-  color:var(--fg3);font-size:11.5px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  color:var(--fg2);font-size:11.5px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .skel{background:var(--line);border-radius:6px;height:52px;margin-bottom:8px;
   animation:sh 1.3s infinite;background-size:200% 100%}
 @keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}

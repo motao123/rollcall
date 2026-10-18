@@ -388,9 +388,23 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	help("rollcall_node_state", "Current node display state (1 for the active state).", "gauge")
+	// 每个状态都输出 1/0，而不是只输出当前那一条。
+	// 只输出当前状态时，节点一旦切换状态，旧序列是「消失」而不是归 0 ——
+	// Prometheus 里这意味着无法用 rate/absent 判断状态迁移，
+	// 告警规则也只能看到「此刻是什么」，看不到「刚才是别的」。
+	states := []string{
+		model.NodeStateOnline, model.NodeStateStale,
+		model.NodeStateOffline, model.NodeStateNoData,
+	}
+	help("rollcall_node_state", "Node display state (1 for the current state, 0 otherwise).", "gauge")
 	for _, v := range lite {
-		gauge("rollcall_node_state", []string{"id=" + q(v.ID), "name=" + q(v.Name), "state=" + q(v.State)}, 1)
+		for _, st := range states {
+			val := 0.0
+			if v.State == st {
+				val = 1
+			}
+			gauge("rollcall_node_state", []string{"id=" + q(v.ID), "name=" + q(v.Name), "state=" + q(st)}, val)
+		}
 	}
 
 	// 历史分层：每节点保留的桶数，用于观察降采样是否按预期累积

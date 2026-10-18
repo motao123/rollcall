@@ -43,7 +43,8 @@ jobs:
 
       - name: gofmt
         run: |
-          out=$(gofmt -s -l cmd internal)
+          # 扫 . 而不是 cmd internal：其它目录新增的 Go 源码也要受同一约束。
+          out=$(gofmt -s -l .)
           if [ -n "$out" ]; then
             echo "以下文件未格式化，请运行 make fmt："
             echo "$out"

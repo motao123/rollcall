@@ -50,8 +50,10 @@ linux:
 demo: server
 	./$(BINARY_SERVER) -addr 127.0.0.1:9188 -demo
 
+# 扫全仓而不是只扫 cmd/internal：根目录或 tools/ 下的 Go 文件
+# 同样会进 CI 的格式检查，这里保持一致。
 fmt:
-	gofmt -w -s cmd internal
+	gofmt -w -s .
 
 vet:
 	go vet ./...
@@ -69,4 +71,4 @@ clean:
 clean-data:
 	@test "$(CONFIRM)" = "yes" || { echo "拒绝执行：请使用 make clean-data CONFIRM=yes"; exit 1; }
 	@echo "将删除 $(CURDIR)/data（监控历史与令牌）"
-	rm -rf "$(CURDIR)/data"
+	@test -n "$(CURDIR)" && test -d "$(CURDIR)/data" && rm -rf "$(CURDIR)/data"

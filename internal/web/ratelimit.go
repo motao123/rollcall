@@ -196,6 +196,11 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// Unwrap 让 http.ResponseController 能拿到原始 ResponseWriter。
+// 没有它时，SetReadDeadline / Flush / Hijack 这类能力在包了限速中间件后
+// 全部失效（Go 1.20+ 的标准探测方式就是 Unwrap）。
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // withAuthGuard 在路由外层执行失败限速与审计日志。
 // levelOf 由路由表反查，只有受保护级别的 2xx 才会清零失败计数。
 func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authLevel) http.Handler {
