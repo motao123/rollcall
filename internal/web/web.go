@@ -194,6 +194,8 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/rule-meta", authAdmin, http.HandlerFunc(s.handleRuleMeta)},
 		{"/api/admin/silences", authAdmin, http.HandlerFunc(s.handleAdminSilences)},
 		{"/api/admin/silences/", authAdmin, http.HandlerFunc(s.handleAdminSilenceByScope)},
+		{"/api/admin/notify/jobs", authAdmin, http.HandlerFunc(s.handleAdminNotifyJobs)},
+		{"/api/admin/notify/jobs/", authAdmin, http.HandlerFunc(s.handleAdminNotifyJobByID)},
 		{"/api/export/", authAdmin, http.HandlerFunc(s.handleExport)},
 		{"/metrics", authMetrics, http.HandlerFunc(s.handleMetrics)},
 
@@ -1688,7 +1690,14 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, updated)
 
 	case http.MethodDelete:
-		s.st.DeleteRule(id)
+		active := s.st.ActiveAlertsByRule(id)
+		if !s.st.DeleteRule(id) {
+			fail(w, 404, "rule not found")
+			return
+		}
+		if s.engine != nil {
+			s.engine.RecoverClosed(active, "规则已删除")
+		}
 		writeJSON(w, 200, map[string]any{"deleted": id})
 
 	default:

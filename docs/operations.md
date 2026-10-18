@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.6.0
+make linux VERSION=v1.6.1
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -209,6 +209,9 @@ sudo systemctl restart rollcall-server
   `通知队列已满（2000 条），拒绝新任务: ...`，并累计到 `rollcall_notify_rejected_total`。
   若该计数持续增长，说明通道响应慢或告警过于密集，应先修通道。
 - 队列深度、送达/失败/重试/静默拦截/队列满拒绝与最近成功时间见 `/metrics` 与告警页。
+- 设置页「通知队列」列出最近 100 条任务及最近错误；修复通道后可对失败/被拦截任务手动重试，
+  重试会重置尝试次数并立即唤醒调度器。
+- 规则停用、删除或收紧定向范围时，被关闭的活跃告警会补发恢复通知（正文注明原因），不再静默消失。
 
 ---
 

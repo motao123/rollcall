@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.6.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.6.1**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -130,6 +130,9 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 - **通知静默**：支持全局或单规则静默（1 小时 / 6 小时 / 24 小时 / 7 天，可填备注）。
   静默期间告警仍正常记录与恢复，仅拦截外发；到期自动恢复
 - 队列深度、送达/失败/重试/静默拦截/队列满拒绝与最近成功时间均可在告警页与 `/metrics` 查看
+- **队列可运维**：设置页列出最近 100 条任务（状态、尝试次数、最近错误），失败或被静默拦截的任务
+  可在修复通道后手动重试，重试会重置尝试次数并立即唤醒调度器
+- **变更留痕**：规则停用、删除或收紧定向范围导致活跃告警被关闭时，会补发恢复通知，不再静默消失
 
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
@@ -288,7 +291,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
 > 使用前需要构建机安装 `make`。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.6.0`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.6.1`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -440,6 +443,8 @@ runuser -u rollcall-agent -- \
 | GET | `/api/admin/rule-meta` | 规则表单元数据（指标/级别/时长选项，需令牌） |
 | GET | `/api/admin/silences` | 当前生效的通知静默 |
 | PUT/DELETE | `/api/admin/silences/{global\|ruleId}` | 设置（`{"minutes":60,"reason":"..."}`）/ 取消静默 |
+| GET | `/api/admin/notify/jobs` | 通知队列最近 100 条任务与累计统计 |
+| POST | `/api/admin/notify/jobs/{id}/retry` | 手动重试失败/被拦截任务（重置尝试次数） |
 
 公开接口（无需任何凭据）：
 

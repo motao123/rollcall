@@ -5,7 +5,6 @@ package alert
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -98,6 +97,26 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 	})
 }
 
+// RecoverClosed 为因管理操作关闭的告警补发恢复通知，并清理引擎内跟踪状态。
+// Evaluate 只处理启用中的规则，规则停用/删除/改向关闭的告警否则会静默消失。
+func (e *Engine) RecoverClosed(alerts []*model.Alert, reason string) {
+	for _, a := range alerts {
+		if a == nil {
+			continue
+		}
+		key := a.RuleID + "|" + a.NodeID
+		e.mu.Lock()
+		delete(e.active, key)
+		delete(e.since, key)
+		delete(e.lastAt, key)
+		e.mu.Unlock()
+
+		cp := *a
+		cp.Message = fmt.Sprintf("%s 的「%s」已恢复（%s）", a.NodeName, a.RuleName, reason)
+		e.send(&cp, true)
+	}
+}
+
 // Start 启动后台评估循环。
 func (e *Engine) Start(every time.Duration) {
 	go func() {
@@ -126,18 +145,8 @@ func (e *Engine) Evaluate() {
 
 	for _, rule := range rules {
 		if !rule.Enabled {
-			// 停用规则：关闭其遗留的活跃告警，避免僵尸条目
-			if e.st.ResolveRuleAlerts(rule.ID) > 0 {
-				e.mu.Lock()
-				for k := range e.active {
-					if strings.HasPrefix(k, rule.ID+"|") {
-						delete(e.active, k)
-						delete(e.since, k)
-						delete(e.lastAt, k)
-					}
-				}
-				e.mu.Unlock()
-			}
+			// 停用规则：关闭遗留活跃告警并补发恢复通知，避免静默消失
+			e.RecoverClosed(e.st.ResolveRuleAlerts(rule.ID), "规则已停用")
 			continue
 		}
 		for _, n := range nodes {
@@ -146,11 +155,21 @@ func (e *Engine) Evaluate() {
 				// 规则改为定向后，原先命中但已不在范围内的节点需要关闭告警，
 				// 否则会留下永远无人恢复的「进行中」条目。
 				e.mu.Lock()
+				prev := e.active[key]
 				delete(e.since, key)
 				delete(e.active, key)
 				delete(e.lastAt, key)
 				e.mu.Unlock()
-				e.st.ResolveAlert(rule.ID, n.ID)
+				if e.st.ResolveAlert(rule.ID, n.ID) {
+					if prev == nil {
+						prev = &model.Alert{
+							RuleID: rule.ID, RuleName: rule.Name,
+							NodeID: n.ID, NodeName: n.Name,
+							Severity: rule.Severity,
+						}
+					}
+					e.RecoverClosed([]*model.Alert{prev}, "规则范围已调整")
+				}
 				continue
 			}
 			seen[key] = struct{}{}

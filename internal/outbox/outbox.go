@@ -189,6 +189,9 @@ func (m *Manager) signal() {
 	}
 }
 
+// Wake 唤醒调度器立即检查队列，供手动重试后立刻投递。
+func (m *Manager) Wake() { m.signal() }
+
 func (m *Manager) loop() {
 	defer m.loopWG.Done()
 	ticker := time.NewTicker(m.cfg.Tick)

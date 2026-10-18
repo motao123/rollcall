@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/motao/rollcall/internal/alert"
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/store"
 )
 
@@ -1135,5 +1137,118 @@ func TestGzipAPIResponses(t *testing.T) {
 	}
 	if !bytes.Contains(readBody(t, csv), []byte("分辨率")) {
 		t.Error("压缩后的 CSV 内容不正确")
+	}
+}
+
+func TestAdminNotifyJobsListAndRetry(t *testing.T) {
+	const token = "test-admin-token-1234567890"
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{AdminToken: token})
+	now := time.Now().Unix()
+	if !st.EnqueueNotifyJob(&model.NotifyJob{
+		ID: "nj1", RuleID: "r1", Title: "节点失联", Status: model.NotifyFailed,
+		Attempts: 5, LastError: "boom", CreatedAt: now,
+	}) {
+		t.Fatal("入队失败")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/notify/jobs", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("无令牌读取队列应 401，实际 %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/notify/jobs", nil)
+	req.Header.Set("X-Admin-Token", token)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("读取队列返回 %d", w.Code)
+	}
+	var out struct {
+		Stats model.NotifyStats  `json:"stats"`
+		Jobs  []*model.NotifyJob `json:"jobs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("解析队列响应: %v", err)
+	}
+	if len(out.Jobs) != 1 || out.Jobs[0].ID != "nj1" || out.Jobs[0].Status != model.NotifyFailed {
+		t.Fatalf("队列内容异常: %+v", out.Jobs)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/notify/jobs/nj1/retry", nil)
+	req.Header.Set("X-Admin-Token", token)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("手动重试返回 %d: %s", w.Code, w.Body.String())
+	}
+	jobs := st.NotifyJobs(10)
+	if len(jobs) != 1 || jobs[0].Status != model.NotifyPending || jobs[0].Attempts != 0 || jobs[0].LastError != "" {
+		t.Fatalf("重试后任务状态异常: %+v", jobs)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/notify/jobs/nj1/retry", nil)
+	req.Header.Set("X-Admin-Token", token)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("重复重试应 409，实际 %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/notify/jobs/missing/retry", nil)
+	req.Header.Set("X-Admin-Token", token)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("重试不存在的任务应 404，实际 %d", w.Code)
+	}
+}
+
+func TestDeleteRuleSendsRecoveryNotification(t *testing.T) {
+	const token = "test-admin-token-1234567890"
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	st.UpsertRule(&model.AlertRule{
+		ID: "r1", Name: "节点失联", Metric: "offline", Op: "gt",
+		Severity: "critical", Enabled: true,
+	})
+	now := time.Now().Unix()
+	if created, ok := st.OpenAlert(&model.Alert{
+		ID: "a1", RuleID: "r1", RuleName: "节点失联",
+		NodeID: "n1", NodeName: "节点一", Severity: "critical", StartedAt: now,
+	}); !created || !ok {
+		t.Fatal("准备活跃告警失败")
+	}
+
+	e := alert.New(st)
+	srv := New(st, nil, e, Config{AdminToken: token})
+	var sent []notify.Message
+	e.SetNotifier(func(m notify.Message) { sent = append(sent, m) })
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/rules/r1", nil)
+	req.Header.Set("X-Admin-Token", token)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("删除规则返回 %d: %s", w.Code, w.Body.String())
+	}
+	if st.ActiveAlertCount() != 0 {
+		t.Fatalf("删除规则后仍有 %d 条活跃告警", st.ActiveAlertCount())
+	}
+	if len(sent) != 1 || !sent[0].Resolved || sent[0].AlertID != "a1" {
+		t.Fatalf("删除规则应补发 1 条恢复通知，实际 %+v", sent)
+	}
+	if !strings.Contains(sent[0].Body, "规则已删除") {
+		t.Errorf("恢复通知未说明删除原因: %q", sent[0].Body)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/admin/rules/r_missing", nil)
+	req.Header.Set("X-Admin-Token", token)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("删除不存在的规则应 404，实际 %d", w.Code)
 	}
 }

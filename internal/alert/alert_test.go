@@ -29,6 +29,9 @@ func TestDisabledRuleResolvesItsAlerts(t *testing.T) {
 	if got := st.ActiveAlertCount(); got != 1 {
 		t.Fatalf("触发告警失败: ActiveAlertCount=%d, 期望 1", got)
 	}
+	active := st.ActiveAlerts()
+	var sent []notify.Message
+	e.SetNotifier(func(m notify.Message) { sent = append(sent, m) })
 
 	// 停用规则
 	st.UpsertRule(&model.AlertRule{
@@ -39,6 +42,12 @@ func TestDisabledRuleResolvesItsAlerts(t *testing.T) {
 	e.Evaluate()
 	if got := st.ActiveAlertCount(); got != 0 {
 		t.Errorf("停用规则后活跃告警未关闭: got %d, 期望 0", got)
+	}
+	if len(sent) != 1 || !sent[0].Resolved || sent[0].AlertID != active[0].ID {
+		t.Fatalf("停用规则应补发 1 条恢复通知，实际 %+v", sent)
+	}
+	if !containsStr(sent[0].Body, "规则已停用") {
+		t.Errorf("恢复通知未说明停用原因: %q", sent[0].Body)
 	}
 
 	// 引擎状态也应被清理，否则随规则/节点增删无限增长
@@ -66,12 +75,22 @@ func TestDeletedRuleResolvesItsAlerts(t *testing.T) {
 	if got := st.ActiveAlertCount(); got != 1 {
 		t.Fatalf("前置条件失败: ActiveAlertCount=%d", got)
 	}
+	active := st.ActiveAlerts()
+	var sent []notify.Message
+	e.SetNotifier(func(m notify.Message) { sent = append(sent, m) })
 
 	if !st.DeleteRule("r_off") {
 		t.Fatal("DeleteRule 返回 false")
 	}
 	if got := st.ActiveAlertCount(); got != 0 {
 		t.Errorf("删除规则后仍有活跃告警: got %d", got)
+	}
+	e.RecoverClosed(active, "规则已删除")
+	if len(sent) != 1 || !sent[0].Resolved || sent[0].AlertID != active[0].ID {
+		t.Fatalf("删除规则应补发 1 条恢复通知，实际 %+v", sent)
+	}
+	if !containsStr(sent[0].Body, "规则已删除") {
+		t.Errorf("恢复通知未说明删除原因: %q", sent[0].Body)
 	}
 
 	e.Evaluate() // 不应 panic，且状态应清空
@@ -198,7 +217,9 @@ func TestRuleScopeLimitsAndResolvesAlerts(t *testing.T) {
 		t.Fatalf("定向规则应只告警 n1，实际 %+v", active)
 	}
 
-	// 改为只针对 n2：n1 的旧告警必须关闭
+	// 改为只针对 n2：n1 的旧告警必须关闭并补发恢复通知
+	var sent []notify.Message
+	e.SetNotifier(func(m notify.Message) { sent = append(sent, m) })
 	st.UpsertRule(&model.AlertRule{
 		ID: "r_off", Name: "节点失联", Metric: "offline", Op: "gt",
 		Duration: 0, Severity: "critical", Enabled: true, NodeIDs: []string{"n2"},
@@ -207,6 +228,15 @@ func TestRuleScopeLimitsAndResolvesAlerts(t *testing.T) {
 	active = st.ActiveAlerts()
 	if len(active) != 1 || active[0].NodeID != "n2" {
 		t.Fatalf("改向后应只剩 n2 的告警，实际 %+v", active)
+	}
+	var resolved []notify.Message
+	for _, m := range sent {
+		if m.Resolved {
+			resolved = append(resolved, m)
+		}
+	}
+	if len(resolved) != 1 || resolved[0].NodeID != "n1" || !containsStr(resolved[0].Body, "规则范围已调整") {
+		t.Fatalf("规则改向应补发 n1 的恢复通知，实际 %+v", sent)
 	}
 
 	e.mu.Lock()

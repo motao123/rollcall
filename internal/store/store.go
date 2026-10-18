@@ -808,6 +808,21 @@ func (s *Store) ActiveAlerts() []*model.Alert {
 	return out
 }
 
+// ActiveAlertsByRule 返回某规则名下未恢复告警的副本。
+// 删除规则前先取快照，删除后再据此补发恢复通知。
+func (s *Store) ActiveAlertsByRule(ruleID string) []*model.Alert {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.Alert, 0)
+	for _, a := range s.alerts {
+		if a.RuleID == ruleID && a.ResolvedAt == 0 {
+			cp := *a
+			out = append(out, &cp)
+		}
+	}
+	return out
+}
+
 // OpenAlert 断言/维持一条告警；返回是否为新建、以及节点与规则是否仍然存在。
 //
 // 存在性必须与写入在同一把锁内确认：否则「评估时节点还在、写入前被删除」
@@ -961,21 +976,22 @@ func (s *Store) DeleteRule(id string) bool {
 	return true
 }
 
-// ResolveRuleAlerts 关闭某规则名下所有未恢复的告警，返回关闭条数。
+// ResolveRuleAlerts 关闭某规则名下所有未恢复的告警，返回被关闭告警的副本。
 // 规则被停用或删除时调用，避免遗留永远无法自愈的「进行中」告警：
 // 引擎只对启用中的规则跑恢复分支，停用规则的告警再没有别的关闭路径。
-func (s *Store) ResolveRuleAlerts(ruleID string) int {
+func (s *Store) ResolveRuleAlerts(ruleID string) []*model.Alert {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
-	n := 0
+	var closed []*model.Alert
 	for _, a := range s.alerts {
 		if a.RuleID == ruleID && a.ResolvedAt == 0 {
 			a.ResolvedAt = now
-			n++
+			cp := *a
+			closed = append(closed, &cp)
 		}
 	}
-	return n
+	return closed
 }
 
 // ---------- 通知队列与静默 ----------
@@ -1141,6 +1157,76 @@ func (s *Store) NotifyJobSuppressed(id, by, reason string, now int64) bool {
 	s.mu.Unlock()
 	s.RequestSave()
 	return true
+}
+
+var (
+	ErrNotifyJobNotFound = errors.New("通知任务不存在")
+	ErrNotifyJobPending  = errors.New("通知任务已在队列中")
+	ErrNotifyJobSent     = errors.New("通知任务已投递成功")
+)
+
+// NotifyJobs 返回最近的通知任务副本，未完成与失败任务排在前面。
+func (s *Store) NotifyJobs(limit int) []*model.NotifyJob {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.NotifyJob, 0, len(s.notifyJobs))
+	for _, j := range s.notifyJobs {
+		cp := *j
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, k int) bool {
+		ri, rk := notifyStatusRank(out[i].Status), notifyStatusRank(out[k].Status)
+		if ri != rk {
+			return ri < rk
+		}
+		if out[i].CreatedAt != out[k].CreatedAt {
+			return out[i].CreatedAt > out[k].CreatedAt
+		}
+		return out[i].ID > out[k].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func notifyStatusRank(status string) int {
+	switch status {
+	case model.NotifyPending:
+		return 0
+	case model.NotifyFailed:
+		return 1
+	case model.NotifySuppressed:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// RetryNotifyJob 把失败或被拦截的任务重新放回队列，并重置尝试次数。
+func (s *Store) RetryNotifyJob(id string, now int64) error {
+	s.mu.Lock()
+	j, ok := s.notifyJobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return ErrNotifyJobNotFound
+	}
+	switch j.Status {
+	case model.NotifyPending:
+		s.mu.Unlock()
+		return ErrNotifyJobPending
+	case model.NotifySent:
+		s.mu.Unlock()
+		return ErrNotifyJobSent
+	}
+	j.Status = model.NotifyPending
+	j.Attempts = 0
+	j.LastError = ""
+	j.SuppressedBy = ""
+	j.NextAttemptAt = now
+	s.mu.Unlock()
+	s.RequestSave()
+	return nil
 }
 
 // NotifyStats 返回队列深度与累计投递统计。

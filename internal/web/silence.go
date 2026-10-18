@@ -2,12 +2,56 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/store"
 )
+
+// ---------- 通知队列管理 ----------
+
+func (s *Server) handleAdminNotifyJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"stats": s.st.NotifyStats(),
+		"jobs":  s.st.NotifyJobs(100),
+	})
+}
+
+func (s *Server) handleAdminNotifyJobByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/notify/jobs/")
+	if !strings.HasSuffix(rest, "/retry") {
+		fail(w, 404, "not found")
+		return
+	}
+	id := strings.TrimSuffix(rest, "/retry")
+	if id == "" || strings.Contains(id, "/") {
+		fail(w, 404, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		fail(w, 405, "method not allowed")
+		return
+	}
+	err := s.st.RetryNotifyJob(id, time.Now().Unix())
+	switch {
+	case err == nil:
+		if s.outbox != nil {
+			s.outbox.Wake()
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "id": id})
+	case errors.Is(err, store.ErrNotifyJobNotFound):
+		fail(w, 404, err.Error())
+	default:
+		fail(w, 409, err.Error())
+	}
+}
 
 // ---------- 通知静默 ----------
 //

@@ -1060,12 +1060,15 @@ async function viewSettings() {
   }
 
   let nodes = [], services = [], cfg = null, chans = [], defs = [];
+  let queue = { stats: {}, jobs: [] };
   let loadErr = '';
   try {
-    [nodes, services] = await Promise.all([
+    const [n, svc, q] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
+      adminApi('/api/admin/notify/jobs'),
     ]);
+    nodes = n; services = svc; queue = q || queue;
     const st = await adminApi('/api/admin/settings');
     cfg = st.notify || {};
     chans = st.channels || [];
@@ -1091,6 +1094,11 @@ async function viewSettings() {
   }
 
   const t = cfg.telegram || {}, w = cfg.webhook || {}, m = cfg.email || {};
+  const qJobs = queue.jobs || [], qStats = queue.stats || {};
+  const qBadge = {
+    pending: ['warn', '待投递'], failed: ['crit', '失败'],
+    suppressed: ['mute', '已拦截'], sent: ['ok', '已送达'],
+  };
 
   $('#view').innerHTML = `
     <section class="section">
@@ -1203,6 +1211,32 @@ async function viewSettings() {
 
     <section class="section">
       <div class="section-head">
+        <h2 class="section-title">通知队列</h2>
+        <span class="section-meta">待投递 ${qStats.pending || 0} · 失败 ${qStats.failed || 0} · 已送达 ${qStats.sent || 0} · 重试 ${qStats.retries || 0} · 拒收 ${qStats.rejected || 0}</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
+        <tbody>${qJobs.map((j) => {
+          const [cls, label] = qBadge[j.status] || ['mute', j.status];
+          const canRetry = j.status === 'failed' || j.status === 'suppressed';
+          return `<tr>
+            <td><span class="badge ${cls}">${label}</span></td>
+            <td class="strong" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.title)}">${esc(j.title)}</td>
+            <td style="font-size:11.5px">${esc(j.ruleName || j.ruleId || '—')}<div class="field-hint">${esc(j.nodeName || j.nodeId || '—')}${j.resolved ? ' · 恢复通知' : ''}</div></td>
+            <td class="num mono">${j.attempts || 0}</td>
+            <td class="mono" style="font-size:11.5px">${clock(j.createdAt)}</td>
+            <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.lastError || '')}">${esc(j.lastError || '—')}</td>
+            <td class="num">${canRetry ? `<button class="btn tiny" data-retry-job="${esc(j.id)}">重试</button>` : '<span class="state-text">—</span>'}</td>
+          </tr>`;
+        }).join('') || `<tr><td colspan="7"><div class="empty">队列为空</div></td></tr>`}</tbody>
+      </table></div>
+      <p class="field-hint" style="margin:8px 0 0">
+        失败或被静默拦截的任务可在修复通道后手动重试，重试会重置尝试次数；此处仅显示最近 100 条，累计值见 /metrics。
+      </p>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
         <h2 class="section-title">数据导出</h2>
         <span class="section-meta">CSV 带 BOM，Excel 可直接打开；指标导出含 24 小时全量采样</span>
       </div>
@@ -1232,6 +1266,20 @@ async function viewSettings() {
 
   // 事件绑定
   $('#chgTok').onclick = () => { lsDel(LS_TOKEN, LS_TOKEN_LEGACY); viewSettings(); };
+
+  $$('[data-retry-job]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await adminApi('/api/admin/notify/jobs/' + encodeURIComponent(b.dataset.retryJob) + '/retry', { method: 'POST' });
+        toast('已重新入队');
+        viewSettings();
+      } catch (e) {
+        toast('重试失败：' + e.message, 'err');
+        b.disabled = false;
+      }
+    };
+  });
 
   // CSV 导出：带令牌下载为文件
   $$('[data-exp]').forEach((b) => {
