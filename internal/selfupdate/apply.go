@@ -221,6 +221,13 @@ func Apply(exe, downloaded, newVersion string) error {
 		_ = os.Remove(StatePath(exe))
 		return fmt.Errorf("设置新版本权限失败: %w", err)
 	}
+	// chmod 也是元数据写入：内容 fsync 之后再改权限，崩溃可能让文件
+	// 以旧模式（0600，无可执行位）回来。内核拒绝 exec 时 HandleStartup
+	// 根本没机会运行，启动计数与 .prev 回滚全部失效，只能人工救。
+	if err := syncFileMode(downloaded); err != nil {
+		_ = os.Remove(StatePath(exe))
+		return err
+	}
 	if err := os.Rename(downloaded, exe); err != nil {
 		_ = os.Remove(StatePath(exe))
 		return fmt.Errorf("替换可执行文件失败: %w", err)
@@ -357,4 +364,28 @@ func syncDir(dir string) {
 	}
 	_ = d.Sync()
 	_ = d.Close()
+}
+
+// syncFileMode 在 chmod 之后重新 fsync，让权限变更随文件内容一起持久化。
+// 只 syncDir 只能保证目录项落盘，元数据可能仍是旧模式。
+func syncFileMode(path string) error {
+	// 用读写句柄打开：Windows 的 FlushFileBuffers 需要写权限，
+	// 只读句柄会直接 Access denied。
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		f, err = os.Open(path)
+		if err != nil {
+			return fmt.Errorf("打开新版本以同步权限失败: %w", err)
+		}
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		if runtime.GOOS == "windows" {
+			// Windows 的可执行权限来自 ACL 而不是 mode bits，
+			// 不存在「权限位没落盘」这类问题，失败不应阻断更新。
+			return nil
+		}
+		return fmt.Errorf("同步新版本权限失败: %w", err)
+	}
+	return nil
 }

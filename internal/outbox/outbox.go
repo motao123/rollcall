@@ -384,7 +384,7 @@ func (m *Manager) work(job *model.NotifyJob) {
 	backoff := m.cfg.Backoff[(attempts-1)%len(m.cfg.Backoff)]
 	log.Printf("通知投递失败，%s 后重试（第 %d/%d 次）: %s (%s)",
 		backoff, attempts, m.cfg.MaxAttempts, job.Title, errs)
-	m.st.NotifyJobRetry(job.ID, errs, now+int64(backoff/time.Second), now)
+	m.st.NotifyJobRetry(job.ID, errs, now+int64(backoff/time.Second))
 }
 
 // resultSummary 汇总逐通道结果。任一通道成功即视为已送达，

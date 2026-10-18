@@ -80,11 +80,18 @@ func seedDemo(st *store.Store) {
 		}
 		var total uint64 = 26_000_000_000
 		first := true
+		var lastTS int64
 		// 固定开机时刻：Uptime 是「t 时刻的自开机时长」，必须随 t 单调不减。
 		// 原实现用 `now-t + 13 天`，越早的样本算出的值越大（365 天前的点
 		// 约 378 天、最新点只有 13 天），导出与历史曲线里看起来像每次采样都重启。
 		bootAt := now - 365*86400 - 86400*13
 		addSample := func(t int64) {
+			// 收尾样本与最后一段的末帧可能落在同一秒：重复写同一条会被
+			// 环形缓冲按「时间不前进」覆盖，注释里说的「补一帧」并不成立。
+			if t == lastTS {
+				return
+			}
+			lastTS = t
 			phase := float64(t%86400) / 86400 * 2 * math.Pi
 			// 日间高、夜间低的双峰曲线 + 抖动
 			wave := 0.55 + 0.35*math.Sin(phase-math.Pi/2)
@@ -93,11 +100,13 @@ func seedDemo(st *store.Store) {
 			cpu := clampF(sp.baseCPU*wave*1.15+noise, 0.4, 99)
 			mem := clampF(sp.baseMem+wave*9+noise*0.5, 5, 97)
 
-			// 制造两个正在发生的告警场景（最近 1 小时持续越界）
-			if sp.name == "武汉-独服" && t > now-3600 {
+			// 制造两个正在发生的告警场景（最近 1 小时持续越界）。
+			// 按 ID 匹配：展示名可以随时改（改完场景就静默失效），
+			// 而节点引用一直以 ID 为准。
+			if sp.id == "n15" && t > now-3600 {
 				cpu = clampF(89+noise*0.6, 0, 99)
 			}
-			if sp.name == "netcup-RS1000" && t > now-3600 {
+			if sp.id == "n06" && t > now-3600 {
 				mem = clampF(91+noise*0.4, 0, 97)
 			}
 
@@ -173,6 +182,11 @@ func seedDemo(st *store.Store) {
 			}
 			if rnd.Float64() < 0.004 {
 				ok = false
+			}
+			if !ok {
+				// 失败探测没有响应时延；保留 30~149ms 会让 UI 与接口
+				// 出现「超时但延迟很低」的矛盾数据，也与 s5 场景不一致。
+				lat = 0
 			}
 			st.AddServiceResult(model.ServiceResult{
 				ServiceID: sv.ID, TS: t, OK: ok, LatencyMs: lat, CertDays: cd,

@@ -76,21 +76,45 @@ func (c *Collector) Host() model.HostInfo {
 				}
 			}
 		}
-		if b, err := os.ReadFile("/proc/cpuinfo"); err == nil {
-			for _, line := range strings.Split(string(b), "\n") {
-				if strings.HasPrefix(line, "model name") {
-					if i := strings.Index(line, ":"); i > 0 {
-						h.CPUModel = strings.TrimSpace(line[i+1:])
-					}
-					break
-				}
-			}
-		}
+		h.CPUModel = readCPUModel()
 		// 虚拟化类型：KVM / VMware / 物理机
 		h.Virt = detectVirt()
 		c.host = h
 	})
 	return c.host
+}
+
+// cpuModelKeys 是各架构 /proc/cpuinfo 里表示型号的键。
+// x86 用 "model name"，arm64 用 "Hardware" 或 "Processor"，
+// s390x 用 "processor 0: version = ..."，ppc64 用 "cpu"。
+var cpuModelKeys = []string{"model name", "hardware", "processor", "cpu model", "cpu"}
+
+// readCPUModel 提取 CPU 型号。
+// 只认 "model name" 时，arm64 机器的型号永远是空字符串（面板上不可见）。
+// procCPUInfo 是 cpuinfo 路径，测试中可替换。
+var procCPUInfo = "/proc/cpuinfo"
+
+func readCPUModel() string {
+	b, err := os.ReadFile(procCPUInfo)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(b), "\n")
+	for _, key := range cpuModelKeys {
+		for _, line := range lines {
+			i := strings.Index(line, ":")
+			if i <= 0 {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(line[:i]), key) {
+				continue
+			}
+			if v := strings.TrimSpace(line[i+1:]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // detectVirt 判断虚拟化类型。
@@ -101,11 +125,29 @@ func (c *Collector) Host() model.HostInfo {
 // 按 systemd-detect-virt 的思路优先读 /sys 与 DMI。
 func detectVirt() string {
 	if b, err := os.ReadFile("/sys/hypervisor/type"); err == nil {
-		switch v := strings.TrimSpace(string(b)); {
-		case v != "":
-			if len(v) > 1 {
-				return strings.ToUpper(v[:1]) + v[1:]
-			}
+		// 该文件给的是小写标识（xen / kvm / vmware …）。
+		// 原样首字母大写会产出 "Kvm"、"Hyperv" 这类半成品，
+		// 与 DMI 分支的 "KVM"/"Hyper-V" 不一致。
+		switch v := strings.ToLower(strings.TrimSpace(string(b))); v {
+		case "xen":
+			return "Xen"
+		case "kvm":
+			return "KVM"
+		case "vmware":
+			return "VMware"
+		case "hyperv", "microsoft":
+			return "Hyper-V"
+		case "qemu":
+			return "QEMU"
+		case "bochs":
+			return "Bochs"
+		case "parallels":
+			return "Parallels"
+		case "bhyve":
+			return "bhyve"
+		case "":
+			// 落到 DMI 分支
+		default:
 			return v
 		}
 	}

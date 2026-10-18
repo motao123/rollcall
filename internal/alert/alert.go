@@ -73,14 +73,17 @@ func (e *Engine) SetLink(link string) {
 func (e *Engine) send(a *model.Alert, resolved bool) {
 	e.mu.Lock()
 	fn, link := e.notify, e.link
-	if fn == nil {
-		e.mu.Unlock()
-		return
-	}
 	if resolved {
+		// 已恢复的条目必须无条件清掉，包括通知器为 nil 的情况
+		// （engine.Start 早于 web.New 装通知器、或 Outbox=nil 时会被置空）。
+		// 放在 nil 判断之后 return 会让 lastAt 永久残留，同一 key 下次越界
+		// 时就会拿一个陈旧时间做「重复提醒」判断。
 		delete(e.lastAt, a.RuleID+"|"+a.NodeID)
 	}
 	e.mu.Unlock()
+	if fn == nil {
+		return
+	}
 
 	fn(notify.Message{
 		Title:    a.RuleName,

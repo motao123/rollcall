@@ -1,0 +1,10 @@
+//go:build !linux
+
+package notify
+
+import "os/exec"
+
+// prepareProcess 在其他平台上保持默认行为（只结束直接子进程）。
+// 进程组 API 是 Linux/Unix 语义，Windows 需要 Job Object，
+// 而插件功能实际只部署在 Linux 服务端，这里不做伪实现。
+func prepareProcess(cmd *exec.Cmd) {}

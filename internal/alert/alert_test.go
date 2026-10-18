@@ -312,3 +312,27 @@ func TestRecoverClosedPurgesWholeRule(t *testing.T) {
 		t.Fatalf("该规则下的引擎状态未清空，残留 %d 项", left)
 	}
 }
+
+// TestResolvedClearsLastAtWithoutNotifier 是回归测试。
+//
+// 恢复分支的清理原来写在「通知器非空」之后：engine.Start 早于 web.New
+// 装通知器、或 Outbox=nil 让配置把通知器置空时，已恢复告警的 lastAt
+// 永远留着。它同时还在 seen 里，轮末清理也带不走 —— 同一 key 下次越界
+// 会拿一个陈旧时间做「重复提醒」判断。
+func TestResolvedClearsLastAtWithoutNotifier(t *testing.T) {
+	st := store.New(t.TempDir())
+	e := New(st) // 不设置通知器
+	key := "r1|n1"
+	e.mu.Lock()
+	e.lastAt[key] = time.Now().Unix()
+	e.mu.Unlock()
+
+	e.send(&model.Alert{ID: "a1", RuleID: "r1", NodeID: "n1"}, true)
+
+	e.mu.Lock()
+	_, left := e.lastAt[key]
+	e.mu.Unlock()
+	if left {
+		t.Fatal("通知器为空时，已恢复告警的 lastAt 仍未被清理")
+	}
+}

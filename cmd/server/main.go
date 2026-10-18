@@ -108,8 +108,8 @@ func main() {
 			log.Fatalf("管理令牌不可用: %v", err)
 		}
 	}
-	if *adminToken != "" && len(*adminToken) < 16 {
-		log.Fatal("-admin-token 至少需要 16 个字符；留空可自动生成 192 位令牌")
+	if *adminToken != "" && len(*adminToken) < minAdminTokenLen {
+		log.Fatalf("-admin-token 至少需要 %d 个字符；留空可自动生成 192 位令牌", minAdminTokenLen)
 	}
 	if adm != "" {
 		log.Printf("管理 API 已启用（X-Admin-Token，令牌长度 %d）", len(adm))
@@ -169,6 +169,11 @@ func main() {
 	st.StartHistoryAutoSave(store.HistorySaveInterval)
 	log.Printf("自动保存间隔: %s（历史聚合 %s）", *saveInterval, store.HistorySaveInterval)
 
+	// bgStop 用于关停时先停掉生产侧（探测循环）：
+	// 否则最终快照之后仍会有 AddServiceResult 写入，那些结果永远不会落盘，
+	// 而且关机期间还在对外发起探测。
+	bgStop := make(chan struct{})
+
 	// 服务探测循环
 	// 注意：演示模式下不发起真实探测，避免对本机产生意外外连
 	if !*demo {
@@ -222,9 +227,21 @@ func main() {
 						}
 					}
 				}
-				<-t.C
+				select {
+				case <-t.C:
+				case <-bgStop:
+					return
+				}
 			}
 		}()
+	}
+
+	stopProducers := func() {
+		select {
+		case <-bgStop:
+		default:
+			close(bgStop)
+		}
 	}
 
 	srv := &http.Server{
@@ -274,22 +291,33 @@ func main() {
 			// 不能直接 log.Fatal：它走 os.Exit(1)，会跳过 main 里所有 defer
 			// （ob.Stop），退出前的最终落盘也永远不会执行 —— 丢掉的正是最近
 			// 一个快照周期内的状态（待投递通知、探测结果）。
-			shutdown(srv, ob, st, "HTTP 服务异常")
+			shutdown(srv, ob, st, stopProducers, "HTTP 服务异常")
 			log.Fatalf("%v", err)
 		}
 	case <-ctx.Done():
-		shutdown(srv, ob, st, "收到退出信号")
+		shutdown(srv, ob, st, stopProducers, "收到退出信号")
 	}
 }
 
 // shutdown 关闭 HTTP 服务、排空通知队列并落盘。
 // 正常退出与异常退出共用同一路径，避免后者丢掉最后一个快照周期。
-func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, reason string) {
+//
+// 顺序有意为之：
+//  1. 先停生产侧（探测循环），否则保存之后仍有结果写入并永久丢失；
+//  2. Shutdown 超时则 Close 强制断开剩余连接 —— 否则那些 handler 会被
+//     进程退出直接掐掉，正在提交的管理变更写一半；
+//  3. 排空通知队列；4. 最后落盘，让哨兵记录覆盖在途投递的最终状态。
+func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProducers func(), reason string) {
+	started := time.Now()
 	log.Printf("%s，正在关闭并保存状态…", reason)
+	if stopProducers != nil {
+		stopProducers()
+	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
-		log.Printf("HTTP 服务关闭超时: %v", err)
+		log.Printf("HTTP 服务关闭超时，强制断开剩余连接: %v", err)
+		_ = srv.Close()
 	}
 	ob.Stop()
 	saveErr := st.Save()
@@ -300,7 +328,7 @@ func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, reason stri
 		log.Printf("退出前保存失败: %v", saveErr)
 		return
 	}
-	log.Printf("状态已保存，退出")
+	log.Printf("状态已保存，退出（关停耗时 %.1fs）", time.Since(started).Seconds())
 }
 
 // ensureDefaultRules 只在从未初始化过的实例上播种默认规则。
@@ -332,6 +360,9 @@ func isLoopbackListen(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// minAdminTokenLen 是管理令牌的最小长度（与自动生成的 48 位十六进制对齐取整）。
+const minAdminTokenLen = 16
+
 // loadOrCreateAdminToken 从数据目录读取管理令牌，不存在则生成并落盘（权限 0600）。
 // 读取失败（权限、IO 错误、文件为空）必须报错而不是悄悄换新令牌 ——
 // 那会让所有已保存令牌的面板与脚本立即失效，且原因难以排查。
@@ -342,6 +373,12 @@ func loadOrCreateAdminToken(dir string) (string, error) {
 		v := strings.TrimSpace(string(b))
 		if v == "" {
 			return "", fmt.Errorf("令牌文件 %s 为空，请删除后重启以重新生成", p)
+		}
+		// 与 -admin-token 同一强度策略。只校验命令行参数时，
+		// 把文件截断/换成一个短字符串就能绕过「至少 16 字符」的要求。
+		if len(v) < minAdminTokenLen {
+			return "", fmt.Errorf("令牌文件 %s 只有 %d 个字符，不足 %d；请删除该文件后重启以重新生成，或恢复完整令牌",
+				p, len(v), minAdminTokenLen)
 		}
 		// 历史版本或手工拷贝可能留下 0644：收紧到 0600 再使用。
 		if err := os.Chmod(p, 0o600); err != nil {

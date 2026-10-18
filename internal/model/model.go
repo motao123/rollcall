@@ -139,7 +139,11 @@ type NotifyJob struct {
 	LastError     string  `json:"lastError,omitempty"`
 	Status        string  `json:"status"`
 	SentAt        int64   `json:"sentAt,omitempty"`
-	SuppressedBy  string  `json:"suppressedBy,omitempty"` // global 或规则 ID
+	// FinishedAt 是任务进入终态（sent/failed/suppressed）的时间。
+	// 只有 SentAt 时，失败与静默的任务没有时间戳，面板无法回答
+	// 「什么时候失败的」，而调用方一直在传这个时间。
+	FinishedAt   int64  `json:"finishedAt,omitempty"`
+	SuppressedBy string `json:"suppressedBy,omitempty"` // global 或规则 ID
 }
 
 // Silence 是一段通知静默期。Scope 为 "global" 或规则 ID。

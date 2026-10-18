@@ -543,13 +543,16 @@ func NewToken() string {
 
 func (s *Store) UpsertNode(n *model.Node) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.nodes[n.ID]; !ok {
 		if s.series[n.ID] == nil {
 			s.series[n.ID] = NewRing(RingSize)
 		}
 	}
 	s.nodes[n.ID] = n
+	s.mu.Unlock()
+	// 新增节点必须立刻落盘：只靠 60 秒自动快照时，这期间崩溃/重启
+	// 会连同它刚生成的上报令牌一起丢失，该 Agent 重启后直接 401。
+	s.RequestSave()
 }
 
 // DeleteNode 删除节点及其监控数据，并关闭其所有未恢复的告警。
@@ -708,11 +711,12 @@ func (s *Store) Series(nodeID string, since int64) []model.Metrics {
 
 func (s *Store) UpsertService(sv *model.Service) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.svcRes[sv.ID] == nil {
 		s.svcRes[sv.ID] = NewRing(ServiceRingSize)
 	}
 	s.services[sv.ID] = sv
+	s.mu.Unlock()
+	s.RequestSave()
 }
 
 func (s *Store) BackupServices() []*model.Service {
@@ -793,8 +797,10 @@ func (s *Store) ServiceLastFull(id string) (ts int64, latency int, ok bool, cert
 
 func (s *Store) UpsertRule(r *model.AlertRule) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.rules[r.ID] = r
+	s.mu.Unlock()
+	// 与删除路径保持同一持久性：新增/修改的规则也必须尽快落盘。
+	s.RequestSave()
 }
 
 func (s *Store) Rules() []*model.AlertRule {
@@ -1148,6 +1154,7 @@ func (s *Store) NotifyJobSent(id, lastError string, now int64) bool {
 	j.Attempts++
 	j.Status = model.NotifySent
 	j.SentAt = now
+	j.FinishedAt = now
 	j.LastError = lastError
 	j.NextAttemptAt = 0
 	s.notifyStats.Sent++
@@ -1158,7 +1165,9 @@ func (s *Store) NotifyJobSent(id, lastError string, now int64) bool {
 }
 
 // NotifyJobRetry 标记本轮失败并安排下一次重试。
-func (s *Store) NotifyJobRetry(id, lastError string, nextAt, now int64) bool {
+// 这里不接收时间戳：任务仍是 pending，没有「完成时间」可记；
+// 之前多传的 now 从未被使用，只会让人误以为写了什么。
+func (s *Store) NotifyJobRetry(id, lastError string, nextAt int64) bool {
 	s.mu.Lock()
 	j, ok := s.notifyJobs[id]
 	if !ok || j.Status != model.NotifyPending {
@@ -1187,6 +1196,7 @@ func (s *Store) NotifyJobFailed(id, lastError string, now int64) bool {
 	j.Status = model.NotifyFailed
 	j.LastError = lastError
 	j.NextAttemptAt = 0
+	j.FinishedAt = now
 	s.notifyStats.Failed++
 	s.mu.Unlock()
 	s.RequestSave()
@@ -1205,6 +1215,7 @@ func (s *Store) NotifyJobSuppressed(id, by, reason string, now int64) bool {
 	j.SuppressedBy = by
 	j.LastError = reason
 	j.NextAttemptAt = 0
+	j.FinishedAt = now
 	s.notifyStats.Suppressed++
 	s.mu.Unlock()
 	s.RequestSave()

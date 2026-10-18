@@ -88,8 +88,13 @@ func LoadPlugins(dir string) error {
 		return fmt.Errorf("插件目录不可用: %w", err)
 	}
 	fi, err := os.Stat(root)
-	if err != nil || !fi.IsDir() {
-		return fmt.Errorf("插件目录不存在或不是目录: %s", root)
+	if err != nil {
+		// 区分「不存在」与权限/IO 错误：把 EACCES 说成「不存在」会让运维
+		// 反复检查路径，实际是目录读不了。
+		return fmt.Errorf("检查插件目录 %s: %w", root, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("插件目录不是目录: %s", root)
 	}
 	// 组/他人可写目录意味着本机其他用户都能替换插件；显式开启也不应接受。
 	// Windows 的 Mode().Perm() 恒为 0666/0777（ACL 不映射到 permission bits），
@@ -418,6 +423,8 @@ func runPlugin(p *plugin, ch ChannelConfig, subject, body string, m Message) err
 	cmd := exec.CommandContext(ctx, p.path, p.args...)
 	cmd.Dir = p.dir
 	cmd.Env = p.env
+	// 超时要回收整棵进程树（平台相关：Linux 用独立进程组）。
+	prepareProcess(cmd)
 	// 插件可能再拉子进程；超时后不让孙进程持有管道把等待拖长。
 	cmd.WaitDelay = time.Second
 	cmd.Stdin = bytes.NewReader(payload)

@@ -205,11 +205,17 @@ func VerifyEnvelope(raw []byte, pub ed25519.PublicKey) (*Manifest, error) {
 
 // Fetch 拉取并验签清单。
 func (u *Updater) Fetch(ctx context.Context) (*Manifest, error) {
+	// Fetch 是导出方法，Updater 的字段也可写：不能假设调用方一定走 New。
+	// 重新校验 URL（否则改成 http:// 就绕过 New 里的 HTTPS 要求，
+	// 清单与签名可被中间人整体替换），并兜住零值 Updater 的 nil client。
+	if err := CheckURL(u.ManifestURL, u.AllowInsecure); err != nil {
+		return nil, fmt.Errorf("更新清单地址: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.ManifestURL, nil)
 	if err != nil {
 		return nil, errors.New("构造更新清单请求失败")
 	}
-	resp, err := u.client.Do(req)
+	resp, err := u.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("拉取更新清单失败: %w", netErr(err))
 	}
@@ -225,6 +231,15 @@ func (u *Updater) Fetch(ctx context.Context) (*Manifest, error) {
 		return nil, errors.New("更新清单超过大小限制")
 	}
 	return VerifyEnvelope(raw, u.PublicKey)
+}
+
+// httpClient 返回底层客户端；零值 Updater 也能工作，而不是空指针崩溃。
+// 未配置超时的客户端会无限等待，这里给一个保守默认值。
+func (u *Updater) httpClient() *http.Client {
+	if u.client != nil {
+		return u.client
+	}
+	return &http.Client{Timeout: 30 * time.Second}
 }
 
 // Candidate 返回适用于当前平台的资产；第二个返回值表示是否有更新。
@@ -375,15 +390,11 @@ func (a version) compare(b version) int {
 func comparePre(a, b string) int {
 	as, bs := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(as) && i < len(bs); i++ {
-		xn, xok := digits(as[i])
-		yn, yok := digits(bs[i])
+		xok, yok := isDigits(as[i]), isDigits(bs[i])
 		switch {
 		case xok && yok:
-			if xn != yn {
-				if xn > yn {
-					return 1
-				}
-				return -1
+			if c := cmpNumeric(as[i], bs[i]); c != 0 {
+				return c
 			}
 		case xok:
 			return -1
@@ -407,22 +418,45 @@ func comparePre(a, b string) int {
 	return 0
 }
 
-// digits 把纯数字段转成整数；非纯数字返回 ok=false。
-// 上限截断到 1e9，仅用于比较，避免恶意超长数字溢出。
-func digits(s string) (int, bool) {
+// isDigits 判断是否为纯数字段（空串不算）。
+func isDigits(s string) bool {
 	if s == "" {
-		return 0, false
+		return false
 	}
-	n := 0
 	for _, c := range s {
 		if c < '0' || c > '9' {
-			return 0, false
-		}
-		if n < 1e9 {
-			n = n*10 + int(c-'0')
+			return false
 		}
 	}
-	return n, true
+	return true
+}
+
+// cmpNumeric 比较两个纯数字段。
+//
+// 不能先转 int：32 位平台上 `n*10` 在 n 接近 1e9 时会回绕成负数，
+// 上限截断还会让 1.0.0-1000000000 与 1.0.0-10000000000 变成「相等」，
+// 于是 SameVersion/IsNewer 把不同版本判成同一个。
+// 改用「去前导零后先比长度、再比字典序」：无溢出也不丢失精度。
+func cmpNumeric(a, b string) int {
+	ta := strings.TrimLeft(a, "0")
+	tb := strings.TrimLeft(b, "0")
+	if ta == "" {
+		ta = "0"
+	}
+	if tb == "" {
+		tb = "0"
+	}
+	switch {
+	case len(ta) < len(tb):
+		return -1
+	case len(ta) > len(tb):
+		return 1
+	case ta < tb:
+		return -1
+	case ta > tb:
+		return 1
+	}
+	return 0
 }
 
 // Download 下载资产到 dir（必须与可执行文件同目录），校验大小与 SHA-256。
@@ -440,7 +474,7 @@ func (u *Updater) Download(ctx context.Context, a Asset, dir string) (string, er
 	if err != nil {
 		return "", errors.New("构造更新下载请求失败")
 	}
-	resp, err := u.client.Do(req)
+	resp, err := u.httpClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("下载更新失败: %w", netErr(err))
 	}

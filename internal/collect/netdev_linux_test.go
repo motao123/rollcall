@@ -5,6 +5,7 @@ package collect
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +48,34 @@ func TestSkipIfaceAvoidsDoubleCounting(t *testing.T) {
 		if got := skipIface(name); got != want {
 			t.Errorf("skipIface(%q) = %v，期望 %v", name, got, want)
 		}
+	}
+}
+
+// TestReadCPUModelSupportsNonX86 是回归测试。
+//
+// 只认 x86 的 "model name" 时，arm64 / ppc64 机器的 CPU 型号永远是空。
+func TestReadCPUModelSupportsNonX86(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cpuinfo")
+	content := "processor\t: 0\nBogoMIPS\t: 50.00\nFeatures\t: fp asimd evtstrm\n" +
+		"CPU implementer\t: 0x41\nHardware\t: BCM2835\nModel\t\t: Raspberry Pi 4\n\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := procCPUInfo
+	procCPUInfo = path
+	defer func() { procCPUInfo = old }()
+
+	if got := readCPUModel(); got != "BCM2835" {
+		t.Fatalf("arm64 型号应取 Hardware 字段，实际 %q", got)
+	}
+
+	// x86 仍优先取 model name
+	content = "processor\t: 0\nmodel name\t: Intel(R) Xeon(R) CPU E5-2680 v4\nHardware\t: ignored\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCPUModel(); !strings.Contains(got, "Xeon") {
+		t.Fatalf("x86 型号解析异常: %q", got)
 	}
 }
