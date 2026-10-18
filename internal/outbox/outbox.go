@@ -24,7 +24,7 @@ import (
 type Config struct {
 	Workers     int           // 同时投递的任务数
 	Tick        time.Duration // 调度轮询间隔
-	MaxAttempts int           // 单任务最大投递次数
+	MaxAttempts int           // 单任务最大投递次数（含首投：5 表示首投 + 4 次重试）
 	Backoff     []time.Duration
 	// DrainTimeout 是 Stop 等待在途投递完成的上限，0 表示按 Workers 推导。
 	// 固定 20 秒不够：notify.Send 串行遍历通道，单个 HTTP 通道就有 12 秒超时，

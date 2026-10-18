@@ -107,6 +107,16 @@ func (r *Runner) Do(sv model.Service) model.ServiceResult {
 		TS:        time.Now().Unix(),
 		CertDays:  -1,
 	}
+	// 防御性再校验：doHTTP/doTCP 各自只做了自己关心的检查（SSRF、端口），
+	// 而 port 范围、https 类型与目标协议是否一致、URL 内嵌凭据这些规则
+	// 只在入库路径（ValidateService）跑过。服务定义也可能来自
+	// state.json（手工编辑、旧版本数据），不能假设一定经过 API。
+	// 这里统一走一遍，避免「入库时合规、运行时不设防」。
+	if err := r.ValidateService(sv); err != nil {
+		res.OK = false
+		res.Detail = err.Error()
+		return res
+	}
 	switch strings.ToLower(sv.Type) {
 	case "http", "https":
 		r.doHTTP(sv, &res)

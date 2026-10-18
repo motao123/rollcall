@@ -88,8 +88,14 @@ h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
 footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);
   color:var(--fg2);font-size:11.5px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .skel{background:var(--line);border-radius:6px;height:52px;margin-bottom:8px;
-  animation:sh 1.3s infinite;background-size:200% 100%}
+  animation:sh 1.3s infinite,skelOut 1ms linear 12s forwards;background-size:200% 100%}
 @keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+/* 脚本被拦截或 404 时骨架屏会永远脉动下去。CSP 是 script-src 'self'，
+   不能内联脚本做超时检测，这里用纯 CSS 在 12 秒后退场并揭示提示；
+   脚本正常执行时 #nodes 会被整体替换，这两个动画自然失效。 */
+@keyframes skelOut{to{opacity:0;visibility:hidden}}
+#jsfail{margin:0 0 14px;display:none;animation:jsfailIn 1ms linear 12s forwards}
+@keyframes jsfailIn{to{display:block}}
 @media (max-width:640px){
   .wrap{padding:22px 14px 60px}
   .row{grid-template-columns:1fr}
@@ -109,6 +115,7 @@ html[data-density="compact"] .group{margin-bottom:18px}
   </header>
   <div id="banner"></div>
   <noscript><div class="banner bad"><span class="dot bad"></span>需要启用 JavaScript 才能显示实时状态。</div></noscript>
+  <div id="jsfail" class="banner bad"><span class="dot bad"></span>状态脚本未能加载（可能被浏览器扩展或 CSP 拦截），请刷新页面重试。</div>
   <div id="services"></div>
   <div id="nodes"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
   <footer>

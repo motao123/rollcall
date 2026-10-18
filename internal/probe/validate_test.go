@@ -54,3 +54,25 @@ func TestParseTCPTargetCanonicalPort(t *testing.T) {
 		t.Fatalf("+80 应被接受并规范化: %v", err)
 	}
 }
+
+// TestDoAppliesServiceValidation 是回归测试。
+//
+// doHTTP/doTCP 各自只做自己关心的检查，而「https 类型必须配 https 目标」
+// 「URL 不能内嵌凭据」「端口范围」这些规则只在 ValidateService 里。
+// 服务定义还可能来自 state.json（手工编辑、旧版本数据），
+// 绕过 API 就直接进入探测循环 —— 运行时必须自己也校验一遍。
+func TestDoAppliesServiceValidation(t *testing.T) {
+	r := NewRunner(Config{})
+	res := r.Do(model.Service{ID: "s1", Type: "https", Target: "http://127.0.0.1:9/"})
+	if res.OK {
+		t.Fatalf("协议不一致的探测被当作成功: %+v", res)
+	}
+	if !strings.Contains(res.Detail, "https") {
+		t.Fatalf("应按「类型 https 必须配 https 目标」拒绝，实际 detail=%q", res.Detail)
+	}
+
+	res = r.Do(model.Service{ID: "s2", Type: "http", Target: "https://user:pass@example.com/"})
+	if res.OK || !strings.Contains(res.Detail, "用户名") {
+		t.Fatalf("内嵌凭据的 URL 应被拒绝: %+v", res)
+	}
+}

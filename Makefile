@@ -7,6 +7,12 @@ BINARY_SIGN   := rollsign
 ifeq ($(origin VERSION),undefined)
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 endif
+# 显式传入空值（CI 里 VERSION: "" 之类）时兜底为 dev：
+# 否则 -X 会写成 Version=，二进制版本号变成空字符串，
+# /metrics 的 build_info 与 -version 输出都会缺一块。
+ifeq ($(strip $(VERSION)),)
+VERSION := dev
+endif
 # 单引号包裹：tag 名允许包含空格与 $()，不加引号会被 shell 当成语法解析。
 VERSION_FLAG := -X 'github.com/motao/rollcall/internal/version.Version=$(VERSION)'
 
