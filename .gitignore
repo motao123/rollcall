@@ -28,7 +28,9 @@
 *.log
 
 # 本地 Agent 配置（agent 默认 -config ./agent.json，内含节点上报令牌）
-/agent.json
+# 不锚定根目录：运维常在任意工作目录下用相对路径启动 Agent，
+# 只拦 /agent.json 等于只保护了文档里的那一种启动方式。
+agent.json
 
 # 工具链 / IDE / 系统产物
 .DS_Store
@@ -45,3 +47,9 @@ coverage.out
 *.pem
 *.p12
 *.pfx
+*.p8
+
+# 其他凭据载体：环境变量文件、导出的管理令牌
+.env
+.env.*
+admin.token

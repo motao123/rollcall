@@ -4,13 +4,20 @@ on:
   push:
   pull_request:
 
-# 同一分支的连续推送取消旧运行，避免占用 runner。
+# 只在 PR 上取消旧运行：push 到分支（尤其 main）时取消前一次，
+# 会让那个提交永远没有 test/race 的成功结果，branch protection 只能看到
+# cancelled —— 等于「未测试」（若该检查是必过项，还会挡住合并）。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+
+env:
+  # 非 tag 构建不要用 ref_name：PR 事件下它是 "123/merge"，
+  # 会把这个字符串原样嵌进二进制版本号。
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
 
 jobs:
   test:
@@ -21,7 +28,18 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.24.x"
+
+      # tag 名可以合法包含 $ ( ) ` 等字符。VERSION 最终会进入链接器参数，
+      # 先按白名单校验，避免任何形式的命令替换被带进构建。
+      - name: validate version
+        run: |
+          case "$VERSION" in
+            "" | *[!A-Za-z0-9._+-]*)
+              echo "::error::VERSION 含不安全字符，拒绝构建: $VERSION"
+              exit 1
+              ;;
+          esac
 
       - name: gofmt
         run: |
@@ -38,17 +56,14 @@ jobs:
       - name: go test
         run: go test ./...
 
-      # 非 tag 构建不要用 ref_name：PR 事件下它是 "123/merge"，
-      # 会把这个字符串嵌进二进制版本号。
       - name: cross build
-        env:
-          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
         run: make linux
 
       # 只编译 Linux 会漏掉 collect_other.go / reexec_other.go 等分支，
-      # 用 Windows 目标再编译一遍保证跨平台源码不被破坏。
+      # 用 Windows 目标再走一遍 vet —— 比 go build 多覆盖 _test.go，
+      # 避免仅存在于测试文件里的平台相关代码长期失修。
       - name: compile windows target
-        run: GOOS=windows GOARCH=amd64 go build ./...
+        run: GOOS=windows GOARCH=amd64 go vet ./...
 
   race:
     runs-on: ubuntu-latest
@@ -58,7 +73,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.24.x"
 
       # store 的并发快照回归测试在 -race 下会显著变慢（约 2 分钟），
       # 单独成 job，避免拖慢常规 test 反馈。
