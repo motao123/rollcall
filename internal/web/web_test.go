@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -496,6 +497,128 @@ func TestNodePUTUpdatesMetadataPreservesToken(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("非法输入 %s 应 400，实际 %d", b, w.Code)
 		}
+	}
+}
+
+// TestRotateNodeToken 验证令牌轮换：旧令牌立即失效、新令牌可上报，
+// 且轮换结果已落盘（重启后仍有效）。
+func TestRotateNodeToken(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	dir := t.TempDir()
+	st := store.New(dir)
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "old-token"})
+	srv := New(st, nil, nil, Config{AdminToken: adminTok})
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/nodes/n1/rotate-token", nil)
+	req.Header.Set("X-Admin-Token", adminTok)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET 轮换应 405，实际 %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/nodes/n1/rotate-token", nil)
+	req.Header.Set("X-Admin-Token", adminTok)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("轮换返回 %d: %s", w.Code, w.Body.String())
+	}
+	var view adminNodeView
+	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if view.Token == "" || view.Token == "old-token" || len(view.Token) < 32 {
+		t.Fatalf("未生成有效新令牌: %q", view.Token)
+	}
+
+	report := []byte(`{"nodeId":"n1","host":{"hostname":"h"},"metrics":{"cpuPct":1}}`)
+	send := func(token string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/report", bytes.NewReader(report))
+		req.Header.Set("X-Node-Token", token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := send("old-token"); code != http.StatusUnauthorized {
+		t.Errorf("旧令牌应失效，实际 %d", code)
+	}
+	if code := send(view.Token); code != http.StatusOK {
+		t.Errorf("新令牌应可上报，实际 %d", code)
+	}
+
+	re := store.New(dir)
+	if err := re.LoadErr(); err != nil {
+		t.Fatalf("重载快照: %v", err)
+	}
+	if got, _ := re.Node("n1"); got.Token != view.Token {
+		t.Errorf("新令牌未持久化: got %q", got.Token)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/nodes/nope/rotate-token", nil)
+	req.Header.Set("X-Admin-Token", adminTok)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("不存在的节点应 404，实际 %d", w.Code)
+	}
+}
+
+func TestNormalizeScope(t *testing.T) {
+	got := normalizeScope([]string{" prod ", "test", "prod", "", "  "})
+	if len(got) != 2 || got[0] != "prod" || got[1] != "test" {
+		t.Fatalf("去空白/去重失败: %#v", got)
+	}
+
+	many := make([]string, 250)
+	for i := range many {
+		many[i] = "g" + strconv.Itoa(i)
+	}
+	if got := normalizeScope(many); len(got) != 200 {
+		t.Errorf("作用域应截断到 200，实际 %d", len(got))
+	}
+	if got := normalizeScope(nil); len(got) != 0 {
+		t.Errorf("空输入应返回空切片，实际 %#v", got)
+	}
+}
+
+func TestMonthlyUsesConfiguredRate(t *testing.T) {
+	if got := monthly(86.4, "CNY", 7.2); got < 0.999 || got > 1.001 {
+		t.Errorf("CNY 按月折算错误: %.4f", got)
+	}
+	if got := monthly(86.4, "CNY", 0); got < 0.999 || got > 1.001 {
+		t.Errorf("汇率缺失应回退 7.2: %.4f", got)
+	}
+	if got := monthly(12, "USD", 7.2); got < 0.999 || got > 1.001 {
+		t.Errorf("USD 不应受汇率影响: %.4f", got)
+	}
+}
+
+func TestSendLimiterBounded(t *testing.T) {
+	l := newSendLimiter(2)
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	block := func() {
+		started <- struct{}{}
+		<-release
+	}
+	if !l.try(block) || !l.try(block) {
+		t.Fatal("前两个任务应被接收")
+	}
+	<-started
+	<-started
+	if l.try(func() {}) {
+		t.Fatal("并发已满时应拒绝新任务，而不是无限堆积 goroutine")
+	}
+	close(release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !l.try(func() {}) {
+		if time.Now().After(deadline) {
+			t.Fatal("任务结束后槽位未释放")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

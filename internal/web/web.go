@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -28,15 +29,17 @@ var assets embed.FS
 
 // Server 汇总所有依赖。
 type Server struct {
-	st         *store.Store
-	runner     *probe.Runner
-	engine     *alert.Engine
-	adminToken string
-	authUser   string
-	authPass   string
-	panelLink  string
-	limiter    *authFailureLimiter
-	notifyErr  error
+	st            *store.Store
+	runner        *probe.Runner
+	engine        *alert.Engine
+	adminToken    string
+	authUser      string
+	authPass      string
+	panelLink     string
+	cnyRate       float64
+	limiter       *authFailureLimiter
+	notifyLimiter *sendLimiter
+	notifyErr     error
 
 	testMu   sync.Mutex
 	lastTest time.Time
@@ -47,13 +50,19 @@ type Config struct {
 	AdminToken string // 管理 API 令牌（为空则不开放管理 API）
 	AuthUser   string // Basic Auth 用户名（为空则不启用）
 	AuthPass   string
-	PanelLink  string // 面板对外地址，拼进通知正文
+	PanelLink  string  // 面板对外地址，拼进通知正文
+	CNYRate    float64 // CNY→USD 折算汇率，<=0 时使用 7.2
 }
 
 func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server {
+	rate := cfg.CNYRate
+	if rate <= 0 {
+		rate = 7.2
+	}
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
-		panelLink: cfg.PanelLink, limiter: newAuthFailureLimiter()}
+		panelLink: cfg.PanelLink, cnyRate: rate,
+		limiter: newAuthFailureLimiter(), notifyLimiter: newSendLimiter(maxConcurrentNotify)}
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
 		srv.notifyErr = err
@@ -65,6 +74,35 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 
 // NotifyErr 返回启动时通知配置的解析错误，供 main 记录日志。
 func (s *Server) NotifyErr() error { return s.notifyErr }
+
+const maxConcurrentNotify = 8
+
+// sendLimiter 限制通知投递的并发数。
+// 大量告警同时爆发时（如整机房断网），不能无限起 goroutine 做外发 HTTP；
+// 队列满时宁可丢弃并记录，也不阻塞告警评估循环。
+type sendLimiter struct {
+	sem chan struct{}
+}
+
+func newSendLimiter(n int) *sendLimiter {
+	if n <= 0 {
+		n = maxConcurrentNotify
+	}
+	return &sendLimiter{sem: make(chan struct{}, n)}
+}
+
+func (l *sendLimiter) try(fn func()) bool {
+	select {
+	case l.sem <- struct{}{}:
+		go func() {
+			defer func() { <-l.sem }()
+			fn()
+		}()
+		return true
+	default:
+		return false
+	}
+}
 
 // applyNotifyConfig 把通知配置同步到告警引擎。
 func (s *Server) applyNotifyConfig(cfg *notify.Config) {
@@ -82,7 +120,9 @@ func (s *Server) applyNotifyConfig(cfg *notify.Config) {
 		if !snapshot.ShouldSend(m.Severity) {
 			return
 		}
-		go notify.Send(&snapshot, m) // 异步投递，避免阻塞评估循环
+		if !s.notifyLimiter.try(func() { notify.Send(&snapshot, m) }) {
+			log.Printf("通知并发已达上限 %d，丢弃一条 %s 级通知: %s", maxConcurrentNotify, m.Severity, m.Title)
+		}
 	})
 }
 
@@ -349,7 +389,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		// 成本只取决于价格，与是否登记到期日无关；
 		// 否则未填到期日的资产会在总览里凭空消失。
-		ov.MonthlyCost += monthly(v.Price, v.Currency)
+		ov.MonthlyCost += monthly(v.Price, v.Currency, s.cnyRate)
 		if v.ExpireAt != "" {
 			if days, ok := daysUntil(v.ExpireAt); ok && days >= 0 && days <= 30 {
 				ov.Expiring = append(ov.Expiring, v)
@@ -487,7 +527,7 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	var monthSum float64
 	for _, n := range nodes {
 		d, hasExp := daysUntil(n.ExpireAt)
-		mv := monthly(n.Price, n.Currency)
+		mv := monthly(n.Price, n.Currency, s.cnyRate)
 		monthSum += mv
 		rows = append(rows, row{
 			ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
@@ -744,10 +784,13 @@ func serviceUptime24(hist [][3]int64, now int64) (float64, bool) {
 
 func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
 
-func monthly(price float64, cur string) float64 {
-	// 简化：按月成本 = 年付价格 / 12；CNY 折算为 USD 仅用于聚合展示
+func monthly(price float64, cur string, cnyRate float64) float64 {
+	// 简化：按月成本 = 年付价格 / 12；CNY 按配置汇率折算为 USD 仅用于聚合展示
 	if cur == "CNY" {
-		return price / 12 / 7.2
+		if cnyRate <= 0 {
+			cnyRate = 7.2
+		}
+		return price / 12 / cnyRate
 	}
 	return price / 12
 }
@@ -871,8 +914,20 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/admin/nodes/")
+	rotate := strings.HasSuffix(id, "/rotate-token")
+	if rotate {
+		id = strings.TrimSuffix(id, "/rotate-token")
+	}
 	if id == "" {
 		fail(w, 400, "missing node id")
+		return
+	}
+	if rotate {
+		if r.Method != http.MethodPost {
+			fail(w, 405, "method not allowed")
+			return
+		}
+		s.handleRotateNodeToken(w, id)
 		return
 	}
 	switch r.Method {
@@ -924,6 +979,27 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		fail(w, 405, "method not allowed")
 	}
+}
+
+// handleRotateNodeToken 显式轮换节点上报令牌。
+// 普通台账编辑不会换令牌；只有调用该端点才轮换，并立即落盘，
+// 避免轮换后进程崩溃导致新令牌丢失、Agent 永久 401。
+func (s *Server) handleRotateNodeToken(w http.ResponseWriter, id string) {
+	old, ok := s.st.Node(id)
+	if !ok {
+		fail(w, 404, "node not found")
+		return
+	}
+	updated := *old
+	updated.Token = store.NewToken()
+	s.st.UpsertNode(&updated)
+	if err := s.st.Save(); err != nil {
+		s.st.UpsertNode(old)
+		fail(w, 500, "保存新令牌失败: "+err.Error())
+		return
+	}
+	log.Printf("节点令牌已轮换 id=%s", id)
+	writeJSON(w, 200, adminNodeView{Node: updated, Token: updated.Token})
 }
 
 // ---------- 服务探测管理 API ----------
@@ -1219,6 +1295,8 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			Duration  int      `json:"duration"`
 			Severity  string   `json:"severity"`
 			Enabled   *bool    `json:"enabled"`
+			NodeIDs   []string `json:"nodeIds"`
+			Groups    []string `json:"groups"`
 		}
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
@@ -1277,6 +1355,8 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			Duration:  duration,
 			Severity:  severity,
 			Enabled:   true,
+			NodeIDs:   normalizeScope(req.NodeIDs),
+			Groups:    normalizeScope(req.Groups),
 		}
 		if req.Enabled != nil {
 			rule.Enabled = *req.Enabled
@@ -1317,13 +1397,15 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		body := http.MaxBytesReader(w, r.Body, 16<<10)
 		var req struct {
-			Name      string   `json:"name"`
-			Metric    string   `json:"metric"`
-			Op        string   `json:"op"`
-			Threshold *float64 `json:"threshold"`
-			Duration  *int     `json:"duration"`
-			Severity  string   `json:"severity"`
-			Enabled   *bool    `json:"enabled"`
+			Name      string    `json:"name"`
+			Metric    string    `json:"metric"`
+			Op        string    `json:"op"`
+			Threshold *float64  `json:"threshold"`
+			Duration  *int      `json:"duration"`
+			Severity  string    `json:"severity"`
+			Enabled   *bool     `json:"enabled"`
+			NodeIDs   *[]string `json:"nodeIds"`
+			Groups    *[]string `json:"groups"`
 		}
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
@@ -1376,6 +1458,12 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 		if req.Enabled != nil {
 			updated.Enabled = *req.Enabled
 		}
+		if req.NodeIDs != nil {
+			updated.NodeIDs = normalizeScope(*req.NodeIDs)
+		}
+		if req.Groups != nil {
+			updated.Groups = normalizeScope(*req.Groups)
+		}
 		if updated.Metric == "offline" {
 			updated.Threshold = 0
 			updated.Op = "gt"
@@ -1409,6 +1497,33 @@ func (s *Server) ruleByID(id string) (*model.AlertRule, bool) {
 		}
 	}
 	return nil, false
+}
+
+// normalizeScope 清理规则定向范围：去空白、去重、丢弃空值。
+func normalizeScope(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+		if len(out) >= 200 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func validMetric(m string) bool {

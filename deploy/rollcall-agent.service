@@ -6,6 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# 专用低权限用户：Agent 只需读取 /proc，无需 root。
+# 创建：useradd --system --no-create-home --shell /usr/sbin/nologin rollcall-agent
+# 配置：/etc/rollcall 属组 rollcall-agent(0750)，agent.json 属主 root:rollcall-agent(0640)
+User=rollcall-agent
+Group=rollcall-agent
 ExecStart=/usr/local/bin/rollcall-agent -config /etc/rollcall/agent.json
 Restart=always
 RestartSec=10s

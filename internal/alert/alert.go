@@ -140,6 +140,17 @@ func (e *Engine) Evaluate() {
 		}
 		for _, n := range nodes {
 			key := rule.ID + "|" + n.ID
+			if !ruleApplies(rule, n) {
+				// 规则改为定向后，原先命中但已不在范围内的节点需要关闭告警，
+				// 否则会留下永远无人恢复的「进行中」条目。
+				e.mu.Lock()
+				delete(e.since, key)
+				delete(e.active, key)
+				delete(e.lastAt, key)
+				e.mu.Unlock()
+				e.st.ResolveAlert(rule.ID, n.ID)
+				continue
+			}
 			seen[key] = struct{}{}
 			val, breached := e.check(rule, n.ID, now)
 
@@ -239,6 +250,27 @@ func (e *Engine) Evaluate() {
 		}
 	}
 	e.mu.Unlock()
+}
+
+// ruleApplies 判断规则是否作用于该节点。
+// NodeIDs 与 Groups 都为空表示全部节点；否则按节点 ID 或分组做「或」匹配。
+func ruleApplies(rule *model.AlertRule, n *model.Node) bool {
+	if len(rule.NodeIDs) == 0 && len(rule.Groups) == 0 {
+		return true
+	}
+	for _, id := range rule.NodeIDs {
+		if id == n.ID {
+			return true
+		}
+	}
+	if n.Group != "" {
+		for _, g := range rule.Groups {
+			if g == n.Group {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // check 返回当前值与是否越界。

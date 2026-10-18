@@ -21,12 +21,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/motao/rollcall/internal/collect"
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/version"
 )
 
 type config struct {
@@ -60,7 +62,16 @@ func main() {
 	cfgPath := flag.String("config", "./agent.json", "配置文件路径")
 	once := flag.Bool("once", false, "只采集并上报一次（用于验证连通性）")
 	allowInsecure := flag.Bool("allow-insecure", false, "允许用明文 HTTP 连接非本机服务端（节点令牌会明文传输）")
+	showVersion := flag.Bool("version", false, "打印版本后退出")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("rollcall-agent %s\n", version.Version)
+		return
+	}
+	if runtime.GOOS != "linux" {
+		log.Printf("⚠ 当前平台 %s 仅用于 UI 调试，采集指标将全部为 0；生产请使用 Linux", runtime.GOOS)
+	}
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {

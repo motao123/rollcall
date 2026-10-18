@@ -12,10 +12,8 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/version"
 )
-
-// Version 是构建版本，写入 Prometheus build_info 与设置页。
-const Version = "1.2.0"
 
 // ---------- CSV 导出 ----------
 
@@ -104,7 +102,7 @@ func (s *Server) exportAssets(w http.ResponseWriter) {
 				days = int(time.Until(t).Hours() / 24)
 			}
 		}
-		mv := monthly(v.Price, v.Currency)
+		mv := monthly(v.Price, v.Currency, s.cnyRate)
 		monthSum += mv
 		online := "否"
 		if v.Online {
@@ -227,7 +225,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// 构建信息
 	help("rollcall_build_info", "Build information.", "gauge")
-	fmt.Fprintf(&b, "rollcall_build_info{version=%q,go=%q} 1\n", Version, runtime.Version())
+	fmt.Fprintf(&b, "rollcall_build_info{version=%q,go=%q} 1\n", version.Version, runtime.Version())
 
 	// 汇总
 	views := s.buildNodeViews()

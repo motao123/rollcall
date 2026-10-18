@@ -238,6 +238,45 @@ func TestOpenAlertRejectsDeletedTargets(t *testing.T) {
 	}
 }
 
+// TestSnapshotSchemaVersionRejectsNewer 防止新版快照被旧程序静默读成零值：
+// 更高版本必须隔离备份并报错，让运维先升级服务端，而不是带着残缺数据启动。
+func TestSnapshotSchemaVersionRejectsNewer(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte(`{"schemaVersion":999,"nodes":{"n1":{"id":"n1","name":"新结构"}}}`)
+	gz, err := encodeSnapshot(raw)
+	if err != nil {
+		t.Fatalf("encodeSnapshot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), gz, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := New(dir)
+	if st.LoadErr() == nil {
+		t.Fatal("高于当前版本的快照应返回 LoadErr")
+	}
+	if _, ok := st.Node("n1"); ok {
+		t.Fatal("拒绝载入后不应出现半截数据")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "state.json.newer-*")); len(matches) != 1 {
+		t.Fatalf("应隔离为新版备份，实际 %d 份", len(matches))
+	}
+}
+
+// TestSaveWritesSchemaVersion 确认新快照带版本号，供未来升级判断。
+func TestSaveWritesSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw := readSnapshotFile(t, filepath.Join(dir, "state.json"))
+	if !contains(string(raw), `"schemaVersion":1`) {
+		t.Fatalf("快照缺少 schemaVersion=1: %s", raw)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

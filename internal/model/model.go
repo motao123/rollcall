@@ -89,6 +89,9 @@ type AlertRule struct {
 	Duration  int     `json:"duration"` // 持续秒数
 	Severity  string  `json:"severity"` // info | warn | critical
 	Enabled   bool    `json:"enabled"`
+	// NodeIDs / Groups 为空表示对全部节点生效；非空时按「节点 ID 或分组」匹配。
+	NodeIDs []string `json:"nodeIds,omitempty"`
+	Groups  []string `json:"groups,omitempty"`
 }
 
 // Alert 是一条告警实例。

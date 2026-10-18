@@ -173,6 +173,69 @@ func TestRestartDoesNotDuplicateActiveAlertNotification(t *testing.T) {
 	}
 }
 
+// TestRuleScopeLimitsAndResolvesAlerts 验证定向规则只评估范围内节点，
+// 且规则收紧/改向时，原先命中但已不在范围内的告警会被关闭。
+func TestRuleScopeLimitsAndResolvesAlerts(t *testing.T) {
+	st := store.New(t.TempDir())
+	e := New(st)
+
+	st.UpsertNode(&model.Node{ID: "n1", Name: "生产一", Group: "prod"})
+	st.UpsertNode(&model.Node{ID: "n2", Name: "测试一", Group: "test"})
+	st.UpsertNode(&model.Node{ID: "n3", Name: "无分组"})
+
+	// 只对 prod 分组生效；n2/n3 从未上报也不应触发
+	st.UpsertRule(&model.AlertRule{
+		ID: "r_off", Name: "节点失联", Metric: "offline", Op: "gt",
+		Duration: 0, Severity: "critical", Enabled: true, Groups: []string{"prod"},
+	})
+	e.Evaluate()
+	active := st.ActiveAlerts()
+	if len(active) != 1 || active[0].NodeID != "n1" {
+		t.Fatalf("定向规则应只告警 n1，实际 %+v", active)
+	}
+
+	// 改为只针对 n2：n1 的旧告警必须关闭
+	st.UpsertRule(&model.AlertRule{
+		ID: "r_off", Name: "节点失联", Metric: "offline", Op: "gt",
+		Duration: 0, Severity: "critical", Enabled: true, NodeIDs: []string{"n2"},
+	})
+	e.Evaluate()
+	active = st.ActiveAlerts()
+	if len(active) != 1 || active[0].NodeID != "n2" {
+		t.Fatalf("改向后应只剩 n2 的告警，实际 %+v", active)
+	}
+
+	e.mu.Lock()
+	stateKeys := len(e.since) + len(e.active) + len(e.lastAt)
+	e.mu.Unlock()
+	if stateKeys != 3 { // 仅 n2 的 since/active/lastAt
+		t.Errorf("引擎状态应只保留 n2 的条目，实际 %d 条", stateKeys)
+	}
+}
+
+// TestRuleApplies 覆盖节点 ID、分组与全量三种匹配方式。
+func TestRuleApplies(t *testing.T) {
+	cases := []struct {
+		name string
+		rule *model.AlertRule
+		node *model.Node
+		want bool
+	}{
+		{"未定向匹配全部", &model.AlertRule{}, &model.Node{ID: "n1", Group: "prod"}, true},
+		{"节点ID命中", &model.AlertRule{NodeIDs: []string{"n1"}}, &model.Node{ID: "n1", Group: "x"}, true},
+		{"节点ID未命中", &model.AlertRule{NodeIDs: []string{"n2"}}, &model.Node{ID: "n1", Group: "prod"}, false},
+		{"分组命中", &model.AlertRule{Groups: []string{"prod"}}, &model.Node{ID: "n1", Group: "prod"}, true},
+		{"分组未命中", &model.AlertRule{Groups: []string{"prod"}}, &model.Node{ID: "n1", Group: "test"}, false},
+		{"节点无分组不被分组规则命中", &model.AlertRule{Groups: []string{"prod"}}, &model.Node{ID: "n1"}, false},
+		{"ID与分组为或关系", &model.AlertRule{NodeIDs: []string{"n9"}, Groups: []string{"prod"}}, &model.Node{ID: "n1", Group: "prod"}, true},
+	}
+	for _, c := range cases {
+		if got := ruleApplies(c.rule, c.node); got != c.want {
+			t.Errorf("%s: ruleApplies = %v, 期望 %v", c.name, got, c.want)
+		}
+	}
+}
+
 func containsStr(hay, needle string) bool {
 	for i := 0; i+len(needle) <= len(hay); i++ {
 		if hay[i:i+len(needle)] == needle {

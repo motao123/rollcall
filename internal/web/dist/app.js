@@ -487,10 +487,12 @@ async function viewServices() {
 }
 
 async function viewAlerts() {
-  const [d, rules, meta] = await Promise.all([
+  const canManage = !!adminToken();
+  const [d, rules, meta, nodes] = await Promise.all([
     api('/api/alerts'),
     api('/api/rules').catch(() => []),
     adminApi('/api/admin/rule-meta').catch(() => ({ metrics: [], severities: [], durations: [] })),
+    canManage ? adminApi('/api/admin/nodes').catch(() => []) : Promise.resolve([]),
   ]);
   const items = d.items || [];
   $('#navAlertCount').hidden = d.active === 0;
@@ -520,9 +522,10 @@ async function viewAlerts() {
           const cond = r.metric === 'offline'
             ? `超过 ${r.duration > 0 ? durText(r.duration) : '即刻'} 未上报`
             : `${esc(m ? m.label : r.metric)} ${r.op === 'lt' ? '低于' : '高于'} ${r.threshold}${unit}`;
+          const scope = ruleScopeText(r, nodes);
           return `<tr>
             <td class="strong">${esc(r.name)}</td>
-            <td style="font-size:12px">${cond}</td>
+            <td style="font-size:12px">${cond}${scope ? `<div class="field-hint">${esc(scope)}</div>` : ''}</td>
             <td class="num mono">${durText(r.duration)}</td>
             <td><span class="badge ${r.severity === 'critical' ? 'crit' : r.severity === 'warn' ? 'warn' : 'mute'}">${sevLabel[r.severity] || r.severity}</span></td>
             <td class="num">
@@ -562,8 +565,6 @@ async function viewAlerts() {
     </section>`;
 
   // ---- 事件绑定 ----
-  const canManage = !!adminToken();
-
   $$('[data-rule-toggle]').forEach((el) => {
     el.onchange = async () => {
       if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); el.checked = !el.checked; return; }
@@ -594,14 +595,26 @@ async function viewAlerts() {
     b.onclick = () => {
       if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
       const r = (rules || []).find((x) => x.id === b.dataset.ruleEdit);
-      if (r) openRuleDialog(r, meta);
+      if (r) openRuleDialog(r, meta, nodes);
     };
   });
 
   $('#addRuleBtn').onclick = () => {
     if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
-    openRuleDialog(null, meta);
+    openRuleDialog(null, meta, nodes);
   };
+}
+
+// ruleScopeText 把规则的定向范围转成可读文案。
+function ruleScopeText(r, nodes) {
+  const ids = r.nodeIds || [], groups = r.groups || [];
+  if (!ids.length && !groups.length) return '';
+  const nameOf = {};
+  (nodes || []).forEach((n) => { nameOf[n.id] = n.name; });
+  const parts = [];
+  if (ids.length) parts.push('节点：' + ids.map((id) => nameOf[id] || id).join('、'));
+  if (groups.length) parts.push('分组：' + groups.join('、'));
+  return parts.join('；');
 }
 
 function durText(sec) {
@@ -612,11 +625,17 @@ function durText(sec) {
 }
 
 // openRuleDialog 打开规则新建/编辑弹窗
-function openRuleDialog(rule, meta) {
+function openRuleDialog(rule, meta, nodes) {
   const editing = !!rule;
   const metrics = meta.metrics || [];
   const severities = meta.severities || [];
-  const r = rule || { name: '', metric: 'cpu', op: 'gt', threshold: 90, duration: 300, severity: 'warn', enabled: true };
+  const r = rule || { name: '', metric: 'cpu', op: 'gt', threshold: 90, duration: 300, severity: 'warn', enabled: true, nodeIds: [], groups: [] };
+  const scopedIDs = r.nodeIds || [];
+  const knownIDs = new Set((nodes || []).map((n) => n.id));
+  const nodeOptions = (nodes || []).map((n) =>
+    `<option value="${esc(n.id)}"${scopedIDs.includes(n.id) ? ' selected' : ''}>${esc(n.name)}</option>`)
+    .concat(scopedIDs.filter((id) => !knownIDs.has(id)).map((id) =>
+      `<option value="${esc(id)}" selected>${esc(id)}（节点已不存在）</option>`)).join('');
 
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
@@ -640,6 +659,16 @@ function openRuleDialog(rule, meta) {
       </label>
       ${selectField('持续时间', 'duration', String(r.duration), (meta.durations || []).map((x) => ({ v: String(x.value), t: x.label })))}
       ${selectField('告警级别', 'severity', r.severity, severities.map((x) => ({ v: x.value, t: x.label })))}
+      <label class="field">
+        <span class="field-label">定向节点（可多选，留空=全部）</span>
+        <select name="nodeIds" multiple size="4" style="min-height:86px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">${nodeOptions}</select>
+        <span class="field-hint">按住 Ctrl / Cmd 多选</span>
+      </label>
+      <label class="field">
+        <span class="field-label">定向分组（逗号分隔，留空=全部）</span>
+        <input name="groups" value="${esc((r.groups || []).join(', '))}" placeholder="prod, test">
+        <span class="field-hint">节点与分组建「或」关系；两者都留空表示全部节点</span>
+      </label>
       ${checkbox('启用该规则', 'enabled', r.enabled)}
       <div class="form-actions">
         <button class="btn primary" type="submit">${editing ? '保存修改' : '创建规则'}</button>
@@ -682,6 +711,7 @@ function openRuleDialog(rule, meta) {
     e.preventDefault();
     const d = formData(e.target);
     const isOffline = d.metric === 'offline';
+    const nodeSel = e.target.querySelector('[name=nodeIds]');
     const payload = {
       name: d.name,
       metric: d.metric,
@@ -689,6 +719,8 @@ function openRuleDialog(rule, meta) {
       duration: Number(d.duration) || 0,
       severity: d.severity,
       enabled: d.enabled,
+      nodeIds: nodeSel ? Array.from(nodeSel.selectedOptions).map((o) => o.value) : [],
+      groups: String(d.groups || '').split(',').map((s) => s.trim()).filter(Boolean),
     };
     if (!isOffline) payload.threshold = Number(d.threshold) || 0;
 
@@ -845,8 +877,9 @@ async function viewSettings() {
       <div class="panel panel-pad" style="max-width:560px">
         <div class="section-title" style="margin-bottom:6px">需要管理令牌</div>
         <p style="font-size:12.5px;color:var(--fg-2);margin:0 0 14px">
-          管理功能需要控制端生成的令牌。它位于服务端的数据目录（默认
-          <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>）。
+          管理功能需要控制端生成的令牌。它位于服务端数据目录（启动参数
+          <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">-data</code>
+          指定，默认 <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>）。
         </p>
         <form id="tokForm" class="form-grid">
           ${field('管理令牌', 'token', '', { type: 'password', placeholder: '粘贴 admin.token 内容', required: true })}
@@ -922,7 +955,8 @@ async function viewSettings() {
           <td>${esc(n.region || '—')}</td>
           <td>${esc(n.group || '—')}</td>
           <td class="mono">${esc(n.expireAt || '—')}</td>
-          <td class="num"><button class="btn tiny" data-edit-node="${esc(n.id)}">编辑</button>
+          <td class="num"><button class="btn tiny" data-agent-node="${esc(n.id)}">接入</button>
+            <button class="btn tiny" data-edit-node="${esc(n.id)}">编辑</button>
             <button class="btn tiny danger" data-del-node="${esc(n.id)}">删除</button></td>
         </tr>`).join('') || `<tr><td colspan="6"><div class="empty">暂无节点</div></td></tr>`}</tbody>
       </table></div>
@@ -1062,6 +1096,15 @@ async function viewSettings() {
       } finally {
         b.disabled = false;
       }
+    };
+  });
+
+  $$('[data-agent-node]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const n = await adminApi('/api/admin/nodes/' + encodeURIComponent(b.dataset.agentNode));
+        showAgentConfig(n);
+      } catch (e) { toast('读取接入信息失败：' + e.message, 'err'); }
     };
   });
 
@@ -1274,7 +1317,7 @@ function agentServerURL() {
   return configured || location.origin;
 }
 
-// showAgentConfig 在创建节点后弹出接入指引
+// showAgentConfig 展示（或轮换后重新展示）节点接入指引
 function showAgentConfig(node) {
   const server = agentServerURL();
   let host = '';
@@ -1287,34 +1330,57 @@ function showAgentConfig(node) {
     interval: 30,
   }, null, 2);
 
-  const install = `install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
-install -d -m 0750 /etc/rollcall
-# 将上面的 JSON 写入 /etc/rollcall/agent.json
-chmod 600 /etc/rollcall/agent.json
-# 在仓库目录安装 systemd 单元
+  const install = `# 1) 安装二进制与 systemd 单元（在仓库目录执行）
+install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
 install -m 0644 deploy/rollcall-agent.service /etc/systemd/system/
+
+# 2) 创建专用低权限用户（只需读 /proc，不需要 root）
+useradd --system --no-create-home --shell /usr/sbin/nologin rollcall-agent
+
+# 3) 写入配置，仅 root 与 Agent 用户可读
+install -d -m 0750 -o root -g rollcall-agent /etc/rollcall
+# 将上面的 JSON 写入 /etc/rollcall/agent.json，然后：
+chown root:rollcall-agent /etc/rollcall/agent.json
+chmod 0640 /etc/rollcall/agent.json
+
+# 4) 启动并验证一次上报（约 2 秒）
 systemctl daemon-reload
 systemctl enable --now rollcall-agent
 systemctl status rollcall-agent --no-pager
-# 验证一次上报（约 2 秒）
-rollcall-agent -config /etc/rollcall/agent.json -once`;
+runuser -u rollcall-agent -- /usr/local/bin/rollcall-agent -config /etc/rollcall/agent.json -once`;
 
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
   dlg.innerHTML = `<div class="modal">
-    <div class="modal-title">节点已创建 — 接入指引</div>
+    <div class="modal-title">节点接入指引</div>
     <p class="modal-sub">把这台机器的 Agent 指向控制端即可开始上报。</p>
     <pre class="code">${esc(cfg)}</pre>
     ${insecure ? '<p class="modal-sub" style="color:var(--warn)">当前控制端地址是明文 HTTP，非本机 Agent 会拒绝上报。请配置 HTTPS，或确认只在本机回环使用。</p>' : ''}
     <p class="modal-sub">在目标机器上执行：</p>
     <pre class="code">${esc(install)}</pre>
+    <p class="modal-sub" style="color:var(--warn)">令牌等同于该节点的上报凭据：轮换后旧令牌立即失效，需同步更新 agent.json 并重启 Agent。</p>
     <div class="form-actions">
+      <button class="btn danger" id="rotateTok" type="button">轮换令牌</button>
       <button class="btn primary" id="dlgOk">知道了</button>
     </div>
   </div>`;
   document.body.appendChild(dlg);
-  dlg.querySelector('#dlgOk').onclick = () => dlg.remove();
-  dlg.onclick = (e) => { if (e.target === dlg) dlg.remove(); };
+  const close = () => dlg.remove();
+  dlg.querySelector('#dlgOk').onclick = close;
+  dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  dlg.querySelector('#rotateTok').onclick = async (ev) => {
+    if (!confirm('确认轮换该节点的令牌？旧令牌会立即失效，现有 Agent 将停止上报，直到更新配置。')) return;
+    ev.target.disabled = true;
+    try {
+      const updated = await adminApi('/api/admin/nodes/' + encodeURIComponent(node.id) + '/rotate-token', { method: 'POST' });
+      close();
+      showAgentConfig(updated);
+      toast('令牌已轮换，请更新节点配置');
+    } catch (err) {
+      ev.target.disabled = false;
+      toast('轮换失败：' + err.message, 'err');
+    }
+  };
 }
 
 // showNodeEdit 编辑节点台账，避免为了改名/改价删除节点、丢失历史。

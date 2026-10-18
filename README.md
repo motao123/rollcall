@@ -2,6 +2,8 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
+当前版本 **v1.3.0**（`./rollcall-server -version` 可查）。
+
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
 ```
@@ -90,6 +92,9 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 - **规则可在界面增删改**：阈值、持续时间、级别、启停全部可调
   （`offline` 规则自动隐藏阈值输入框）；服务端做完整校验
   （metric 白名单、阈值区间 1–100、duration 0–86400、severity 白名单）
+- **规则可定向**：按节点或分组限定生效范围（`nodeIds` / `groups`，界面可选节点、填分组），
+  留空表示对所有节点生效；规则收紧后，超出范围的旧告警自动关闭
+- **节点令牌轮换**：设置页「节点管理 → 接入」可一键轮换，旧令牌立即失效，页面同步给出新的 agent.json
 
 **通知通道（10 个，参考 certimate / dnsmgr / domain-admin 设计）**
 
@@ -116,6 +121,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0�
 - SMTP 默认强制 TLS：465 隐式 TLS，587/25 必须 STARTTLS；不支持 STARTTLS 时拒绝明文发送凭据
 - 通知内容为「主题 + 正文」两段式，含节点、规则、当前值、级别、时间、面板链接
 - 支持重复提醒间隔（0 = 只通知一次）
+- **外发并发上限 8**：告警风暴时超出的通知会丢弃并写日志，避免 goroutine 与连接无限堆积
 
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
@@ -170,8 +176,10 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 对齐 Komari 的"无数据库"理念，同时保证重启不丢历史：
 
 - 每节点一个**定长环形缓冲**（2880 点 = 24h @30s），全量常驻内存约 30MB
-- 每分钟把状态快照写入 `data/state.json`（gzip 压缩 JSON，先写 `.tmp` 再 rename，保证原子性）
+- 默认每 60 秒把状态快照写入 `data/state.json`（`-save-interval` 可调，10s–1h；gzip 压缩 JSON，先写 `.tmp` 再 rename，保证原子性）
 - 启动时自动恢复；兼容旧版本写出的明文 JSON，首次保存后自动转为 gzip
+- 快照带 `schemaVersion`（当前为 1）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
+  避免新结构被旧程序静默读成零值
 - 快照损坏会隔离为 `state.json.corrupt-<时间>` 并拒绝启动，
   而不是静默以空库运行（否则全部节点与令牌会凭空消失）
 
@@ -254,6 +262,9 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 
 > 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
 > 使用前需要构建机安装 `make`。
+>
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.3.0`。直接 `go build` 时
+> 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 
 ### 2. 预览 UI（可选）
 
@@ -276,8 +287,11 @@ sudo systemctl enable --now rollcall-server
 curl -fsS http://127.0.0.1:19080/healthz
 ```
 
-若不需要探测/通知内网目标，请从 unit 的 `ExecStart` 中删除
-`-allow-private-probes -allow-private-notify`；这两个参数应仅在明确需要时开启。
+`deploy/rollcall-server.service` 默认**不开启**私网探测/通知。确需监控本机服务或向内网
+webhook 推送时，用 systemd drop-in 追加 `-allow-private-probes` / `-allow-private-notify`
+（写法见 [`docs/operations.md`](docs/operations.md)），不要直接修改模板默认值。
+
+> 日常运维（备份恢复、升级回滚、令牌轮换、故障排查）见 [`docs/operations.md`](docs/operations.md)。
 
 > 服务端收到 SIGINT/SIGTERM 后会停止接收新请求、等待在途请求结束并立即保存快照，
 > systemd 重启不会丢失最近一次自动保存（60 秒）之后的数据。
@@ -308,11 +322,15 @@ curl -s -X POST http://127.0.0.1:19080/api/admin/nodes \
 把 `rollcall-agent` 和 `deploy/rollcall-agent.service` 上传到目标节点后执行：
 
 ```bash
-# 1. 安装二进制与配置目录
+# 1. 安装二进制与 systemd 单元（在仓库目录执行）
 install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
-install -d -m 0750 /etc/rollcall
+install -m 0644 deploy/rollcall-agent.service /etc/systemd/system/
 
-# 2. 写入配置（server/nodeId/token 用上一步返回值）
+# 2. 创建专用低权限用户（Agent 只需读 /proc，不需要 root）
+useradd --system --no-create-home --shell /usr/sbin/nologin rollcall-agent
+install -d -m 0750 -o root -g rollcall-agent /etc/rollcall
+
+# 3. 写入配置（server/nodeId/token 用上一步返回值）
 #    server 必须是 https://...；仅本机回环可用 http://127.0.0.1:19080
 cat >/etc/rollcall/agent.json <<'EOF'
 {
@@ -322,15 +340,16 @@ cat >/etc/rollcall/agent.json <<'EOF'
   "interval": 30
 }
 EOF
-chmod 600 /etc/rollcall/agent.json
+chown root:rollcall-agent /etc/rollcall/agent.json
+chmod 0640 /etc/rollcall/agent.json
 
-# 3. 安装 systemd 单元
-install -m 0644 rollcall-agent.service /etc/systemd/system/
+# 4. 启动
 systemctl daemon-reload
 systemctl enable --now rollcall-agent
 
-# 4. 验证一次上报（失败会以非 0 退出，约 2 秒）
-rollcall-agent -config /etc/rollcall/agent.json -once
+# 5. 验证一次上报（失败会以非 0 退出，约 2 秒）
+runuser -u rollcall-agent -- \
+  /usr/local/bin/rollcall-agent -config /etc/rollcall/agent.json -once
 ```
 
 > `interval` 单位为秒，默认 30，**最大 60**：服务端 120 秒未收到上报即判定离线，
@@ -345,7 +364,7 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 
 > **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
 >
-> **安全默认（1.2.0 起）**：监听非回环地址时，未启用 Basic Auth 或未配置 TLS 会**直接拒绝启动**。
+> **安全默认**：监听非回环地址时，未启用 Basic Auth 或未配置 TLS 会**直接拒绝启动**。
 > 三种对外方式：
 > 1. 反向代理到 `127.0.0.1:19080`（推荐，由反代终止 TLS）；
 > 2. 内置 TLS：`-addr 0.0.0.0:19080 -tls-cert fullchain.pem -tls-key privkey.pem -auth user:<强密码>`；
@@ -369,8 +388,11 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 | `-allow-private-notify` | false | 允许通知通道访问内网/回环目标（自建 Gotify/Bark/Webhook） |
 | `-insecure-probe-tls` | false | 探测 HTTPS 时跳过证书校验（自签名目标） |
 | `-probe-interval` | `10s` | 探测调度粒度；每个服务按自身 `interval` 执行 |
+| `-save-interval` | `60s` | 自动保存快照间隔（10s–1h）；退出时还会强制保存一次 |
+| `-cny-rate` | `7.2` | CNY 折算 USD 的汇率（仅用于成本聚合展示） |
 | `-admin-token` | 自动生成 | 管理令牌，显式指定时至少 16 字符 |
 | `-data` | `./data` | 数据目录（state.json / admin.token，均为 0600） |
+| `-version` | false | 打印版本号后退出 |
 
 ### 管理 API
 
@@ -378,8 +400,9 @@ rollcall-agent -config /etc/rollcall/agent.json -once
 |---|---|---|
 | GET | `/api/admin/nodes` | 列出节点（含上报令牌） |
 | POST | `/api/admin/nodes` | 创建节点，服务端生成 id 与令牌 |
-| GET | `/api/admin/nodes/{id}` | 查看单个节点 |
+| GET | `/api/admin/nodes/{id}` | 查看单个节点（含上报令牌，用于重新接入） |
 | PUT | `/api/admin/nodes/{id}` | 编辑台账字段（保留 ID 与上报令牌） |
+| POST | `/api/admin/nodes/{id}/rotate-token` | 轮换上报令牌（旧令牌立即失效） |
 | DELETE | `/api/admin/nodes/{id}` | 删除节点 |
 | GET/POST | `/api/admin/services` | 列出 / 创建探测目标（`enabled` 默认 true） |
 | DELETE | `/api/admin/services/{id}` | 删除探测目标 |
@@ -470,10 +493,14 @@ rollcall/
 │   ├── netguard/            出站地址策略（SSRF 防护，探测/通知共用）
 │   ├── probe/               HTTP/TCP 探测
 │   ├── alert/               告警引擎
+│   ├── version/             构建版本号（ldflags 注入）
 │   └── web/
 │       ├── web.go           API + 内嵌静态资源
 │       └── dist/            index.html / app.js / style.css
-└── deploy/                  systemd 单元与配置样例
+├── deploy/                  systemd 单元与配置样例
+├── docs/operations.md       备份、升级、令牌轮换与故障排查
+├── .github/workflows/ci.yml gofmt / vet / test / 交叉编译
+└── LICENSE                  MIT
 ```
 
 ---
@@ -513,7 +540,6 @@ rollcall/
 2. 时序仅保留 24 小时，长期趋势需外接 TSDB
 3. 单实例单进程，无水平扩展设计（40 台规模绰绰有余）
 4. 无多用户与权限体系（管理令牌为单一凭据，适合个人/小团队）
-5. 告警规则不支持"按节点/分组"定向（当前规则对全部节点生效）
 
 ---
 

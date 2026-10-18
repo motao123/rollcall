@@ -178,14 +178,20 @@ func decodeSnapshot(b []byte) ([]byte, error) {
 	return raw, nil
 }
 
+// SnapshotSchemaVersion 是当前快照结构版本。
+// 旧版快照没有该字段（解析为 0），仍按兼容格式载入；
+// 高于当前版本的文件必须显式拒绝，避免新结构被旧程序静默读成零值。
+const SnapshotSchemaVersion = 1
+
 type snapshot struct {
-	Nodes    map[string]*model.Node      `json:"nodes"`
-	Hosts    map[string]model.HostInfo   `json:"hosts"`
-	Series   map[string][]model.Metrics  `json:"series"`
-	Services map[string]*model.Service   `json:"services"`
-	SvcRes   map[string][]model.Metrics  `json:"svcRes"`
-	Rules    map[string]*model.AlertRule `json:"rules"`
-	Alerts   []*model.Alert              `json:"alerts"`
+	SchemaVersion int                         `json:"schemaVersion"`
+	Nodes         map[string]*model.Node      `json:"nodes"`
+	Hosts         map[string]model.HostInfo   `json:"hosts"`
+	Series        map[string][]model.Metrics  `json:"series"`
+	Services      map[string]*model.Service   `json:"services"`
+	SvcRes        map[string][]model.Metrics  `json:"svcRes"`
+	Rules         map[string]*model.AlertRule `json:"rules"`
+	Alerts        []*model.Alert              `json:"alerts"`
 	// Tokens 单独持久化：model.Node.Token 标了 json:"-"，
 	// 不会随节点一起写入，否则重启后 Agent 全部认证失败。
 	Tokens   map[string]string `json:"tokens"`
@@ -212,6 +218,15 @@ func (s *Store) load() error {
 			return fmt.Errorf("快照损坏且无法隔离 %s: %w", s.path, err)
 		}
 		return fmt.Errorf("快照损坏，已备份到 %s: %w", bak, err)
+	}
+	if snap.SchemaVersion > SnapshotSchemaVersion {
+		bak := s.path + ".newer-" + time.Now().Format("20060102-150405")
+		if renameErr := os.Rename(s.path, bak); renameErr != nil {
+			return fmt.Errorf("快照 schema 版本 %d 高于当前支持的 %d，且无法备份 %s: %w",
+				snap.SchemaVersion, SnapshotSchemaVersion, s.path, renameErr)
+		}
+		return fmt.Errorf("快照 schema 版本 %d 高于当前支持的 %d，已备份到 %s；请升级服务端",
+			snap.SchemaVersion, SnapshotSchemaVersion, bak)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,16 +294,17 @@ func (s *Store) load() error {
 func (s *Store) Save() error {
 	s.mu.RLock()
 	snap := snapshot{
-		Nodes:    make(map[string]*model.Node, len(s.nodes)),
-		Hosts:    make(map[string]model.HostInfo, len(s.hosts)),
-		Services: make(map[string]*model.Service, len(s.services)),
-		Rules:    make(map[string]*model.AlertRule, len(s.rules)),
-		Alerts:   make([]*model.Alert, 0, len(s.alerts)),
-		Series:   make(map[string][]model.Metrics, len(s.series)),
-		SvcRes:   make(map[string][]model.Metrics, len(s.svcRes)),
-		Tokens:   make(map[string]string, len(s.nodes)),
-		Settings: make(map[string]string, len(s.settings)),
-		SavedAt:  time.Now().Unix(),
+		SchemaVersion: SnapshotSchemaVersion,
+		Nodes:         make(map[string]*model.Node, len(s.nodes)),
+		Hosts:         make(map[string]model.HostInfo, len(s.hosts)),
+		Services:      make(map[string]*model.Service, len(s.services)),
+		Rules:         make(map[string]*model.AlertRule, len(s.rules)),
+		Alerts:        make([]*model.Alert, 0, len(s.alerts)),
+		Series:        make(map[string][]model.Metrics, len(s.series)),
+		SvcRes:        make(map[string][]model.Metrics, len(s.svcRes)),
+		Tokens:        make(map[string]string, len(s.nodes)),
+		Settings:      make(map[string]string, len(s.settings)),
+		SavedAt:       time.Now().Unix(),
 	}
 	// 以下均为值类型或纯值字段结构体，解引用即得到独立副本
 	for k, n := range s.nodes {

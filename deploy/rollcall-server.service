@@ -13,9 +13,13 @@ WorkingDirectory=/opt/rollcall
 # 否则服务会拒绝启动；未启用 Basic Auth 直接对外监听需显式加 -allow-public
 # （仪表盘数据仍要求管理令牌，对外公开的只有 /status），
 # 明文 HTTP 暴露需显式加 -allow-insecure。
-# 探测与通知默认拒绝私网地址；本机服务探测（如 127.0.0.1:22）与本机自建
-# webhook 需显式开启对应开关；若全部使用公网目标，应删掉这两个参数。
-ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data -allow-private-probes -allow-private-notify
+# 探测与通知默认拒绝私网地址；只有确实需要探测本机服务（如 127.0.0.1:22）
+# 或向内网 webhook 推送时，才用 systemd drop-in 追加对应开关，例如：
+#   /etc/systemd/system/rollcall-server.service.d/private-targets.conf
+#   [Service]
+#   ExecStart=
+#   ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data -allow-private-probes -allow-private-notify
+ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcall/data
 Restart=always
 RestartSec=5s
 

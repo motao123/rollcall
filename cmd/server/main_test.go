@@ -1,6 +1,42 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/store"
+)
+
+// TestEnsureDefaultRulesDoesNotResurrect 回归测试：
+// 用户删光默认规则后重启，不能因为「规则数为 0」又播种一遍。
+func TestEnsureDefaultRulesDoesNotResurrect(t *testing.T) {
+	st := store.New(t.TempDir())
+	ensureDefaultRules(st)
+	if got := len(st.Rules()); got != 4 {
+		t.Fatalf("首次启动应播种 4 条默认规则，实际 %d", got)
+	}
+	if st.GetSetting("rulesInitialized") == "" {
+		t.Fatal("未写入初始化标记")
+	}
+
+	for _, r := range st.Rules() {
+		st.DeleteRule(r.ID)
+	}
+	ensureDefaultRules(st)
+	if got := len(st.Rules()); got != 0 {
+		t.Fatalf("删光规则后重启不应复活默认规则，实际 %d 条", got)
+	}
+}
+
+// TestEnsureDefaultRulesKeepsExisting 已有自定义规则的实例不应被塞入默认规则。
+func TestEnsureDefaultRulesKeepsExisting(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertRule(&model.AlertRule{ID: "custom", Name: "自定义", Metric: "cpu", Enabled: true})
+	ensureDefaultRules(st)
+	if got := len(st.Rules()); got != 1 {
+		t.Fatalf("已有规则时不应添加默认规则，实际 %d 条", got)
+	}
+}
 
 func TestIsLoopbackListen(t *testing.T) {
 	cases := []struct {

@@ -24,6 +24,7 @@ import (
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/probe"
 	"github.com/motao/rollcall/internal/store"
+	"github.com/motao/rollcall/internal/version"
 	"github.com/motao/rollcall/internal/web"
 )
 
@@ -42,13 +43,26 @@ func main() {
 	allowPrivateProbes := flag.Bool("allow-private-probes", false, "允许探测回环/私网/链路本地目标")
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
 	allowPrivateNotify := flag.Bool("allow-private-notify", false, "允许通知通道访问回环/私网目标（自建 Gotify/Bark/Webhook 时使用）")
+	saveInterval := flag.Duration("save-interval", 60*time.Second, "自动保存快照间隔（10s–1h）")
+	cnyRate := flag.Float64("cny-rate", 7.2, "CNY 折算 USD 的汇率（用于成本聚合）")
+	showVersion := flag.Bool("version", false, "打印版本后退出")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Printf("rollcall-server %s\n", version.Version)
+		return
+	}
 	if *probeEvery <= 0 {
 		log.Fatal("-probe-interval 必须大于 0")
 	}
 	if *probeEvery > 24*time.Hour {
 		log.Fatal("-probe-interval 不能超过 24h")
+	}
+	if *saveInterval < 10*time.Second || *saveInterval > time.Hour {
+		log.Fatal("-save-interval 必须在 10s–1h 之间")
+	}
+	if *cnyRate <= 0 || *cnyRate > 1000 {
+		log.Fatal("-cny-rate 必须在 0–1000 之间")
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		log.Fatal("-tls-cert 与 -tls-key 必须同时提供")
@@ -122,12 +136,7 @@ func main() {
 		log.Printf("演示数据已载入")
 	}
 
-	// 默认告警规则（仅当没有任何规则时）
-	if len(st.Rules()) == 0 {
-		for _, r := range alert.DefaultRules() {
-			st.UpsertRule(r)
-		}
-	}
+	ensureDefaultRules(st)
 
 	runner := probe.NewRunner(probe.Config{
 		AllowPrivate: *allowPrivateProbes,
@@ -136,7 +145,8 @@ func main() {
 	notify.SetAllowPrivateTargets(*allowPrivateNotify)
 	engine := alert.New(st)
 	engine.Start(15 * time.Second)
-	st.StartAutoSave(60 * time.Second)
+	st.StartAutoSave(*saveInterval)
+	log.Printf("自动保存间隔: %s", *saveInterval)
 
 	// 服务探测循环
 	// 注意：演示模式下不发起真实探测，避免对本机产生意外外连
@@ -191,6 +201,7 @@ func main() {
 	}
 	ws := web.New(st, runner, engine, web.Config{
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass, PanelLink: *panelLink,
+		CNYRate: *cnyRate,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)
@@ -235,7 +246,23 @@ func main() {
 	}
 }
 
-// isLoopbackListen 判断监听地址是否只绑定回环，包含 ":9080" 这种全接口写法。
+// ensureDefaultRules 只在从未初始化过的实例上播种默认规则。
+// 用持久化标记区分「全新实例」与「用户主动删光了所有规则」：
+// 后者重启时不应把规则复活。
+func ensureDefaultRules(st *store.Store) {
+	const key = "rulesInitialized"
+	if st.GetSetting(key) != "" {
+		return
+	}
+	if len(st.Rules()) == 0 {
+		for _, r := range alert.DefaultRules() {
+			st.UpsertRule(r)
+		}
+	}
+	st.SetSetting(key, "1")
+}
+
+// isLoopbackListen 判断监听地址是否只绑定回环，包含 ":19080" 这种全接口写法。
 func isLoopbackListen(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
@@ -280,10 +307,10 @@ func loadOrCreateAdminToken(dir string) (string, error) {
 	return tok, nil
 }
 
-// displayAddr 把 ":9188" / "127.0.0.1:9188" 归一化为可点击的地址。
+// displayAddr 把 ":19080" / "127.0.0.1:19080" 归一化为可点击的地址。
 func displayAddr(a string) string {
 	if a == "" {
-		return "127.0.0.1:9080"
+		return "127.0.0.1:19080"
 	}
 	if a[0] == ':' {
 		return "localhost" + a
