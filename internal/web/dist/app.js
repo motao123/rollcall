@@ -224,12 +224,16 @@ function nodeCard(n) {
   const spark = (n.spark || []).map((p) => p.v);
   const st = nodeState(n);
   const cardCls = n.state === 'offline' ? 'offline' : n.state === 'stale' ? 'stale' : '';
+  const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
+  const expireBadge = days != null && days <= 30
+    ? `<span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + ' 天'}</span>` : '';
 
   return `<article class="node-card ${cardCls} ${n.alerts > 0 ? 'alerting' : ''}" data-node="${esc(n.id)}">
     <div class="nc-head">
       <span class="dot ${st.tone}"></span>
       <span class="nc-name">${esc(n.name)}</span>
       <span class="nc-tag">${esc(n.provider || '—')}</span>
+      ${expireBadge}
       <span class="nc-status">${st.text}</span>
     </div>
     <div class="nc-bars">
@@ -241,7 +245,9 @@ function nodeCard(n) {
     <div class="nc-foot">
       <span class="mono">${esc(n.region || '—')}</span>
       <span class="sep">·</span>
-      <span class="mono">↑${hasData ? bytes(n.latest.netTx) : '—'}</span>
+      <span class="mono" title="累计入站">${hasData ? '↓' + bytes(n.latest.netRx) : '—'}</span>
+      <span class="sep">·</span>
+      <span class="mono" title="累计出站">${hasData ? '↑' + bytes(n.latest.netTx) : '—'}</span>
       <span class="sep">·</span>
       <span class="mono">${hasData ? dur(n.latest.uptime) : '—'}</span>
     </div>
@@ -262,6 +268,21 @@ async function viewOverview() {
   if (ov.offline) countParts.push(`离线 ${ov.offline}`);
   if (ov.noData) countParts.push(`待接入 ${ov.noData}`);
 
+  // 服务商分布：按 provider 聚合（空值归「未分类」）
+  const byProvider = new Map();
+  for (const n of lists) {
+    const p = n.provider || '未分类';
+    if (!byProvider.has(p)) byProvider.set(p, []);
+    byProvider.get(p).push(n);
+  }
+  const providerRows = [...byProvider.entries()]
+    .map(([p, ns]) => ({
+      p, ns,
+      online: ns.filter((n) => n.online).length,
+      cpu: ns.filter((n) => hasNodeData(n)).reduce((a, n) => a + (n.latest.cpuPct || 0), 0) / Math.max(1, ns.filter((n) => hasNodeData(n)).length),
+    }))
+    .sort((a, b) => b.ns.length - a.ns.length);
+
   $('#view').innerHTML = `
     <div class="kpis">
       ${kpi('节点总数', ov.nodes, '', countParts.join(' · '))}
@@ -270,6 +291,7 @@ async function viewOverview() {
       ${kpi('平均内存', ov.avgMem.toFixed(1), '%', '在线节点均值')}
       ${kpi('服务探测', `${ov.services - ov.svcDown}/${ov.services}`, '', ov.svcDown > 0 ? `${ov.svcDown} 个不可用` : '全部可用')}
       ${kpi('月度成本', '$' + ov.monthlyCost.toFixed(1), '', `${expiring.length} 台 30 天内到期`)}
+      ${kpi('累计流量', bytes(ov.trafficIn || 0), '↓', '↑ ' + bytes(ov.trafficOut || 0))}
     </div>
 
     ${alerting.length ? `
@@ -301,11 +323,26 @@ async function viewOverview() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">节点状态</h2>
-        <span class="section-meta">${lists.length} 台 · 点击查看详情</span>
+        <span class="section-meta">${lists.length} 台 · 按服务商分组</span>
+        <button class="btn primary" id="wizBtn" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
       </div>
-      <div class="node-grid">
-        ${lists.length ? lists.map(nodeCard).join('') : `<div class="empty">没有匹配的节点</div>`}
+      <div class="prov-strip">
+        ${providerRows.map((r) => `
+          <button class="prov-chip" data-prov="${esc(r.p)}" title="CPU 均值 ${r.cpu.toFixed(0)}%">
+            <span class="prov-name">${esc(r.p)}</span>
+            <span class="prov-cnt">${r.online}/${r.ns.length}</span>
+          </button>`).join('')}
       </div>
+      ${providerRows.map((r) => `
+      <div class="prov-group" data-prov-group="${esc(r.p)}">
+        <div class="prov-head">
+          <span class="prov-title">${esc(r.p)}</span>
+          <span class="prov-meta">${r.ns.length} 台 · 在线 ${r.online} · CPU 均值 ${r.cpu.toFixed(0)}%</span>
+        </div>
+        <div class="node-grid">
+          ${r.ns.map(nodeCard).join('')}
+        </div>
+      </div>`).join('') || `<div class="empty">没有匹配的节点</div>`}
     </section>
 
     ${expiring.length ? `
@@ -327,6 +364,14 @@ async function viewOverview() {
     </section>` : ''}
   `;
 
+  const wiz = $('#wizBtn');
+  if (wiz) wiz.onclick = showAgentWizard;
+  $$('.prov-chip').forEach((c) => {
+    c.onclick = () => {
+      const g = $(`.prov-group[data-prov-group="${CSS.escape(c.dataset.prov)}"]`);
+      if (g) g.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+  });
   bindNodeClicks();
 }
 
@@ -340,6 +385,7 @@ async function viewNodes() {
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
         <span class="section-meta">${list.length} 台</span>
+        <button class="btn primary" id="wizBtn2" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
       </div>
       <div class="table-wrap"><table>
         <thead><tr>
@@ -371,6 +417,9 @@ async function viewNodes() {
       </table></div>
     </section>`;
   bindNodeClicks();
+  const wiz2 = document.getElementById('wizBtn2');
+  if (wiz2) wiz2.onclick = showAgentWizard;
+
 }
 
 async function viewNodeDetail(id) {
@@ -1619,6 +1668,7 @@ function showAgentConfig(node) {
   let host = '';
   try { host = new URL(server).hostname; } catch (e) { host = ''; }
   const insecure = server.startsWith('http://') && !isLoopbackHost(host);
+  const oneCmd = `curl -fsSL ${server}/agent/install.sh | sh -s -- ${server} ${node.id} ${node.token}`;
   const cfg = JSON.stringify({
     server,
     nodeId: node.id,
@@ -1626,44 +1676,51 @@ function showAgentConfig(node) {
     interval: 30,
   }, null, 2);
 
-  const install = `# 1) 安装二进制与 systemd 单元（在仓库目录执行）
+  const manual = `# 手动安装（脚本不可用时的备选路径）
 install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
-install -m 0644 deploy/rollcall-agent.service /etc/systemd/system/
-
-# 2) 创建专用低权限用户（只需读 /proc，不需要 root）
-useradd --system --no-create-home --shell /usr/sbin/nologin rollcall-agent
-
-# 3) 写入配置，仅 root 与 Agent 用户可读
-install -d -m 0750 -o root -g rollcall-agent /etc/rollcall
-# 将上面的 JSON 写入 /etc/rollcall/agent.json，然后：
-chown root:rollcall-agent /etc/rollcall/agent.json
-chmod 0640 /etc/rollcall/agent.json
-
-# 4) 启动并验证一次上报（约 2 秒）
-systemctl daemon-reload
-systemctl enable --now rollcall-agent
-systemctl status rollcall-agent --no-pager
-runuser -u rollcall-agent -- /usr/local/bin/rollcall-agent -config /etc/rollcall/agent.json -once`;
+install -d -m 0700 /etc/rollcall
+# 将下面的 JSON 写入 /etc/rollcall/agent.json（权限 0600）
+systemctl enable --now rollcall-agent`;
 
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
-  dlg.innerHTML = `<div class="modal">
-    <div class="modal-title">节点接入指引</div>
-    <p class="modal-sub">把这台机器的 Agent 指向控制端即可开始上报。</p>
-    <pre class="code">${esc(cfg)}</pre>
-    ${insecure ? '<p class="modal-sub" style="color:var(--warn)">当前控制端地址是明文 HTTP，非本机 Agent 会拒绝上报。请配置 HTTPS，或确认只在本机回环使用。</p>' : ''}
-    <p class="modal-sub">在目标机器上执行：</p>
-    <pre class="code">${esc(install)}</pre>
+  dlg.innerHTML = `<div class="modal" style="max-width:640px">
+    <div class="modal-title">节点接入 · ${esc(node.name || node.id)}</div>
+    <p class="modal-sub">在目标服务器的 root shell 里执行这一行，Agent 会自动下载、注册为 systemd 服务并开始上报：</p>
+    <div class="onecmd">
+      <pre class="code" id="oneCmdText">${esc(oneCmd)}</pre>
+      <button class="btn primary" id="copyCmd" type="button">复制命令</button>
+    </div>
+    <p class="modal-sub" style="margin-top:10px">脚本会自动识别架构（amd64/arm64），HTTP 明文场景自动追加 -allow-insecure。约 30 秒后面板即可看到该节点。</p>
+    ${insecure ? '<p class="modal-sub" style="color:var(--warn)">注意：控制端当前是明文 HTTP，节点令牌会在链路上明文传输。长期使用建议上 TLS 或保持隧道。</p>' : ''}
+    <details style="margin-top:12px">
+      <summary class="modal-sub" style="cursor:pointer">手动安装（备选）</summary>
+      <pre class="code" style="margin-top:8px">${esc(manual)}</pre>
+      <pre class="code">${esc(cfg)}</pre>
+    </details>
     <p class="modal-sub" style="color:var(--warn)">令牌等同于该节点的上报凭据：轮换后旧令牌立即失效，需同步更新 agent.json 并重启 Agent。</p>
     <div class="form-actions">
       <button class="btn danger" id="rotateTok" type="button">轮换令牌</button>
-      <button class="btn primary" id="dlgOk">知道了</button>
+      <button class="btn primary" id="dlgOk">完成</button>
     </div>
   </div>`;
   document.body.appendChild(dlg);
   const close = () => dlg.remove();
   dlg.querySelector('#dlgOk').onclick = close;
   dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  dlg.querySelector('#copyCmd').onclick = async (ev) => {
+    try {
+      await navigator.clipboard.writeText(oneCmd);
+      ev.target.textContent = '已复制 ✓';
+      setTimeout(() => { ev.target.textContent = '复制命令'; }, 1800);
+    } catch (e) {
+      // 非 https / 无剪贴板权限时退化为选中文本
+      const range = document.createRange();
+      range.selectNodeContents(dlg.querySelector('#oneCmdText'));
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      toast('已选中命令文本，请 Ctrl+C 复制');
+    }
+  };
   dlg.querySelector('#rotateTok').onclick = async (ev) => {
     if (!confirm('确认轮换该节点的令牌？旧令牌会立即失效，现有 Agent 将停止上报，直到更新配置。')) return;
     ev.target.disabled = true;
@@ -1973,3 +2030,51 @@ function boot() {
 }
 
 boot();
+
+// showAgentWizard 一站式接入向导：填台账 → 创建节点 → 直接给出安装命令。
+// 以前要「设置页建节点 → 复制 JSON → 手拼 systemd」，现在三步并一步。
+function showAgentWizard() {
+  if (!adminToken()) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+  const dlg = document.createElement('div');
+  dlg.className = 'modal-mask';
+  dlg.innerHTML = `<div class="modal" style="max-width:560px">
+    <div class="modal-title">接入新节点</div>
+    <p class="modal-sub">填写台账信息并创建，随后会生成一条在目标服务器上执行的安装命令。</p>
+    <form id="wizardForm" class="form-grid">
+      ${field('名称', 'name', '', { required: true, placeholder: '例如 racknerd-纽约' })}
+      ${field('服务商', 'provider', '', { placeholder: 'racknerd / 腾讯云 …' })}
+      ${field('位置', 'region', '', { placeholder: '美国 / 香港 …' })}
+      ${field('分组', 'group', 'prod', { placeholder: 'prod / test / probe' })}
+      ${field('到期日', 'expireAt', '', { placeholder: '2027-06-01' })}
+      ${field('年付价', 'price', '', { type: 'number', placeholder: '11.00' })}
+      ${selectField('币种', 'currency', 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
+      <div class="form-actions">
+        <button class="btn" type="button" id="wizCancel">取消</button>
+        <button class="btn primary" type="submit">创建并生成命令</button>
+      </div>
+    </form>
+  </div>`;
+  document.body.appendChild(dlg);
+  const close = () => dlg.remove();
+  dlg.querySelector('#wizCancel').onclick = close;
+  dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  dlg.querySelector('#wizardForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(e.target);
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/nodes', { method: 'POST', body: JSON.stringify({
+        name: d.name, provider: d.provider, region: d.region, group: d.group,
+        expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
+      }) });
+      close();
+      showAgentConfig(r);
+      // 刷新当前视图，让新节点立刻出现在列表
+      if (typeof render === 'function') render();
+    } catch (err) {
+      btn.disabled = false;
+      toast('创建失败：' + err.message, 'err');
+    }
+  };
+}

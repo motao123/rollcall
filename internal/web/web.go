@@ -48,6 +48,10 @@ type Server struct {
 	// 为空时只信任回环（见 defaultTrustedProxies）。
 	trustedProxies []*net.IPNet
 
+	// agentDir 是 Agent 二进制分发目录（-agent-dir）。
+	// 为空表示不提供「一条命令接入」，下载接口会明确报错。
+	agentDir string
+
 	testMu   sync.Mutex
 	lastTest time.Time
 
@@ -65,6 +69,7 @@ type Config struct {
 	PanelLink  string          // 面板对外地址，拼进通知正文
 	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
 	Outbox     *outbox.Manager // 通知投递队列；nil 时不外发通知
+	AgentDir   string          // Agent 二进制分发目录；空则不提供下载
 	// TrustedProxies 是可信反向代理网段；nil 时仅信任回环。
 	// 跨机代理必须显式配置，否则无法识别真实客户端 IP。
 	TrustedProxies []*net.IPNet
@@ -83,6 +88,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
 		panelLink: cfg.PanelLink, cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
+		agentDir:       cfg.AgentDir,
 		trustedProxies: trusted}
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
@@ -186,6 +192,9 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
 		{"/status.js", authPublic, static},
 		{"/api/status", authPublic, http.HandlerFunc(s.handleStatus)},
+		// 一条命令接入：脚本与二进制都公开（脚本不含密钥，token 由调用方传参）
+		{"/agent/install.sh", authPublic, http.HandlerFunc(s.handleAgentInstall)},
+		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},
 		{"/api/theme", authPublic, http.HandlerFunc(s.handleTheme)},
 
 		// Agent 上报：handler 内校验 X-Node-Token

@@ -46,6 +46,7 @@ func main() {
 	allowPrivateProbes := flag.Bool("allow-private-probes", false, "允许探测回环/私网/链路本地目标")
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
 	allowPrivateNotify := flag.Bool("allow-private-notify", false, "允许通知通道访问回环/私网目标（自建 Gotify/Bark/Webhook 时使用）")
+	agentDir := flag.String("agent-dir", "", "Agent 二进制分发目录（放置 rollcall-agent-linux-<arch>，启用「一条命令接入」）")
 	notifyPlugins := flag.String("notify-plugins", "", "通知插件目录（显式启用本地插件，目录内 *.json 清单）")
 	trustedProxies := flag.String("trusted-proxies", "",
 		"可信反向代理网段（逗号分隔 CIDR，如 127.0.0.1/32,10.0.0.0/8）；留空仅信任回环")
@@ -258,7 +259,7 @@ func main() {
 	}
 	ws := web.New(st, runner, engine, web.Config{
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass, PanelLink: *panelLink,
-		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets,
+		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets, AgentDir: *agentDir,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)
