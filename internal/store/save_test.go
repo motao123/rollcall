@@ -58,7 +58,12 @@ func TestSaveRacesWithWrites(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < 300; i++ {
+	// -race 插桩会把 300 次全量快照放大到十分钟以上；50 次已足够与写入并发。
+	saves := 300
+	if raceEnabled {
+		saves = 50
+	}
+	for i := 0; i < saves; i++ {
 		if err := s.Save(); err != nil {
 			close(stop)
 			wg.Wait()

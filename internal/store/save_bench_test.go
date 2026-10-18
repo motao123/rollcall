@@ -68,6 +68,10 @@ func newBenchStore(t testing.TB, nodes int) *Store {
 // Save = [锁内深拷贝] + [锁外 json.Marshal] + [锁外写盘]，
 // 所以 lockHold ≤ total。总耗时可控即证明锁窗口可控。
 func TestSaveDurationScalesSane(t *testing.T) {
+	// -race 的插桩开销会让耗时上界失去意义，交给基准测试衡量真实性能。
+	if raceEnabled {
+		t.Skip("race 构建不校验绝对耗时")
+	}
 	// 上界按最坏情况给足余量：Agent 上报间隔 30s、HTTP 超时 15s，
 	// 只要单次 Save 远低于秒级，锁窗口就不可能造成上报失败。
 	const bound = 2 * time.Second
