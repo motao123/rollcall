@@ -364,6 +364,14 @@ func (s *Store) Save() (err error) {
 	start := time.Now()
 	defer func() { s.recordSave(time.Since(start), err) }()
 
+	// ★ saveMu 必须在抓快照之前获取。
+	// 若先抓快照、序列化完才拿 saveMu，两个并发 Save 可能
+	// 「先抓旧状态、后抓新状态」却按相反顺序落盘，旧快照覆盖新快照：
+	// 典型后果是刚轮换的节点令牌被抹掉，重启后 Agent 全部 401。
+	// 锁顺序固定为 saveMu → s.mu；Save 的调用方都不持有 s.mu。
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	snap := snapshot{
 		SchemaVersion: SnapshotSchemaVersion,
@@ -437,9 +445,8 @@ func (s *Store) Save() (err error) {
 	if err != nil {
 		return fmt.Errorf("压缩快照: %w", err)
 	}
-	// 串行化磁盘写入：固定 temp 路径下，两个并发 Save 会互相截断/覆盖。
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
+	// 写入已被函数开头的 saveMu 串行化：固定 temp 路径下，
+	// 两个并发 Save 会互相截断/覆盖。
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
