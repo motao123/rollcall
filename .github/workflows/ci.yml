@@ -4,12 +4,18 @@ on:
   push:
   pull_request:
 
+# 同一分支的连续推送取消旧运行，避免占用 runner。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -32,13 +38,21 @@ jobs:
       - name: go test
         run: go test ./...
 
+      # 非 tag 构建不要用 ref_name：PR 事件下它是 "123/merge"，
+      # 会把这个字符串嵌进二进制版本号。
       - name: cross build
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
         run: make linux
+
+      # 只编译 Linux 会漏掉 collect_other.go / reexec_other.go 等分支，
+      # 用 Windows 目标再编译一遍保证跨平台源码不被破坏。
+      - name: compile windows target
+        run: GOOS=windows GOARCH=amd64 go build ./...
 
   race:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

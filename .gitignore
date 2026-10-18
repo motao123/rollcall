@@ -27,6 +27,17 @@
 *~
 *.log
 
+# 本地 Agent 配置（agent 默认 -config ./agent.json，内含节点上报令牌）
+/agent.json
+
+# 工具链 / IDE / 系统产物
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.test
+coverage.out
+
 # 密钥与证书材料
 # rollsign 默认把 Agent 自更新签名私钥写到仓库根（rollsign.key）。
 # 私钥一旦入库，等于把更新信任链的根交出去 —— 攻击者可签任意 Agent 二进制。
