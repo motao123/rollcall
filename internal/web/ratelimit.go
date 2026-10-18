@@ -216,7 +216,9 @@ func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authL
 		case rec.status == http.StatusUnauthorized:
 			s.limiter.fail(scope)
 			log.Printf("鉴权失败 ip=%s scope=%s method=%s path=%s", ip, scope, r.Method, r.URL.Path)
-		case rec.status > 0 && rec.status < 400 && levelOf(r).protected(s.authUser != ""):
+		case rec.status >= 200 && rec.status < 300 && levelOf(r).protected(s.authUser != ""):
+			// 只认 2xx：3xx 不代表鉴权通过（例如登录跳转），
+			// 用它清零会让攻击者在拿到重定向后继续重试。
 			s.limiter.succeed(scope)
 		}
 	})

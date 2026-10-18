@@ -13,13 +13,17 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -188,6 +192,20 @@ func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }
 
+// joinURL 把资产文件名安全地拼到基础地址后面。
+//
+// 直接做字符串拼接时，含空格、`#`、`?` 的文件名会生成非法或语义错误的地址：
+// `#` 之后被浏览器当成片段、`?` 被当成查询串，Agent 因此下载不到资产。
+func joinURL(base, name string) (string, error) {
+	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(base), "/") + "/")
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + name
+	u.RawPath = ""
+	return u.String(), nil
+}
+
 // buildManifest 计算每个资产的 SHA-256 与大小，组装待签名清单。
 //
 // 同一平台键重复时必须报错：map 赋值会静默覆盖，前一个资产被丢弃，
@@ -212,9 +230,23 @@ func buildManifest(assets []string, version string, publishedAt int64, baseURL s
 		if !st.Mode().IsRegular() {
 			return nil, fmt.Errorf("资产 %s 不是普通文件: %s", key, path)
 		}
-		b, err := os.ReadFile(path)
+		// 先按 Stat 大小做范围校验再读：直接 ReadFile 会把任意大小的文件
+		// 整个读进内存，一个手误指到磁盘镜像就会把内存吃光。
+		if st.Size() < selfupdate.MinAssetSize || st.Size() > selfupdate.MaxAssetSize {
+			return nil, fmt.Errorf("资产 %s 大小 %d 超出允许范围", key, st.Size())
+		}
+		// 用 LimitReader 兜住 Stat 与读取之间文件被追加的情况（TOCTOU）。
+		f, err := os.Open(path)
 		if err != nil {
 			return nil, fmt.Errorf("读取资产 %s 失败: %w", key, err)
+		}
+		b, readErr := io.ReadAll(io.LimitReader(f, selfupdate.MaxAssetSize+1))
+		closeErr := f.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("读取资产 %s 失败: %w", key, readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("读取资产 %s 失败: %w", key, closeErr)
 		}
 		// 用实际读到的字节数而非 Stat 的大小：两者之间文件可能被替换，
 		// 清单里的 Size 必须与 SHA-256 覆盖的内容一致。
@@ -228,12 +260,15 @@ func buildManifest(assets []string, version string, publishedAt int64, baseURL s
 		}
 		baseNames[base] = key
 		sum := sha256.Sum256(b)
-		url := strings.TrimRight(baseURL, "/") + "/" + base
-		if err := selfupdate.CheckURL(url, allowInsecure); err != nil {
+		assetURL, err := joinURL(baseURL, base)
+		if err != nil {
+			return nil, fmt.Errorf("资产 %s 地址无效: %w", key, err)
+		}
+		if err := selfupdate.CheckURL(assetURL, allowInsecure); err != nil {
 			return nil, fmt.Errorf("资产 %s 地址无效: %v", key, err)
 		}
 		m.Assets[key] = selfupdate.Asset{
-			URL: url, SHA256: hex.EncodeToString(sum[:]), Size: size,
+			URL: assetURL, SHA256: hex.EncodeToString(sum[:]), Size: size,
 		}
 	}
 	return m, nil
@@ -251,11 +286,30 @@ func loadKey(path string) ed25519.PrivateKey {
 	if err != nil {
 		fatal("读取私钥失败: %v", err)
 	}
+	priv, err := parsePrivateKey(b)
+	if err != nil {
+		fatal("%v", err)
+	}
+	return priv
+}
+
+// parsePrivateKey 解析并校验 base64 编码的 Ed25519 私钥。
+//
+// 私钥的后 32 字节是公钥部分，ed25519.Sign 会直接把它写进签名。
+// 只校验总长度 64 是不够的：公钥部分被截断或改写时签名照常生成，
+// 却无法被任何持有正确公钥的 Agent 验证通过 —— 表现为「更新永远校验失败」，
+// 而且签出来的清单看起来完全正常。这里用种子重新推导公钥并比对。
+func parsePrivateKey(b []byte) (ed25519.PrivateKey, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
 	if err != nil || len(raw) != ed25519.PrivateKeySize {
-		fatal("私钥格式无效（应为 base64 编码的 64 字节 Ed25519 私钥）")
+		return nil, errors.New("私钥格式无效（应为 base64 编码的 64 字节 Ed25519 私钥）")
 	}
-	return ed25519.PrivateKey(raw)
+	priv := ed25519.PrivateKey(raw)
+	derived := ed25519.NewKeyFromSeed(priv.Seed())
+	if !bytes.Equal(derived, raw) {
+		return nil, errors.New("私钥文件不一致：后半段公钥与种子推导结果不符（文件可能被截断或改写过）")
+	}
+	return priv, nil
 }
 
 func fatal(format string, args ...any) {

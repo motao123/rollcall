@@ -315,23 +315,46 @@ func main() {
 // reportEndpoint 校验并归一化服务端地址。
 // 非本机服务端默认必须使用 HTTPS，否则节点令牌会以明文穿越网络。
 func reportEndpoint(server string, allowInsecure bool) (string, error) {
-	server = strings.TrimRight(strings.TrimSpace(server), "/")
+	raw := strings.TrimSpace(server)
+	server = strings.TrimRight(raw, "/")
 	u, err := url.Parse(server)
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("server 地址无效: %q", server)
+	// 只看 u.Host 不够：`https://:443` 的 Host 非空但主机名为空，
+	// 归一化后会得到一个指向本机的高位端口的地址。
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("server 地址无效: %q", redactServer(raw))
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("server 仅支持 http/https: %q", server)
+		return "", fmt.Errorf("server 仅支持 http/https: %q", redactServer(raw))
 	}
 	// 只接受「协议 + 主机 + 可选端口」：带路径、查询串、片段或用户信息时，
 	// 简单拼接 /api/report 会得到意料之外的地址（甚至把凭据写进 URL）。
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return "", fmt.Errorf("server 不能包含路径、查询串、片段或用户信息: %q", server)
+		return "", fmt.Errorf("server 不能包含路径、查询串、片段或用户信息: %q", redactServer(raw))
 	}
 	if u.Scheme == "http" && !allowInsecure && !isLoopbackHost(u.Hostname()) {
-		return "", fmt.Errorf("server 使用明文 HTTP 会泄露节点令牌，请改用 https 或显式加 -allow-insecure")
+		return "", fmt.Errorf("server 使用明文 HTTP 会泄露节点令牌，请改用 https 或显式加 -allow-insecure: %q", redactServer(raw))
 	}
 	return server + "/api/report", nil
+}
+
+// redactServer 去掉地址里的用户信息，供错误信息与日志使用。
+//
+// 这个函数的返回值会被 log.Print 打到 stderr、并被运维贴进工单；
+// 而 URL 中允许出现 `https://user:password@host` 形式，
+// 原样回显等于把凭据写进日志。
+func redactServer(raw string) string {
+	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil && u.User != nil {
+		u.User = url.User("***")
+		return u.String()
+	}
+	// 解析失败时按 `@` 截断，避免把 `user:pass@` 部分带出去。
+	if i := strings.LastIndex(raw, "@"); i >= 0 {
+		return "***@" + raw[i+1:]
+	}
+	if len(raw) > 200 {
+		return raw[:200] + "…"
+	}
+	return raw
 }
 
 func isLoopbackHost(host string) bool {

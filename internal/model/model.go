@@ -175,8 +175,23 @@ const (
 )
 
 // NodeView 是节点列表项，合并台账、最新指标与状态。
+//
+// 这里刻意**不内嵌 Node**，而是逐个复制台账字段：内嵌会把 Token 一起带进
+// 这个结构，只靠 `json:"-"` 挡住 JSON 序列化。一旦有模板渲染、日志打印、
+// %+v 调试输出或未来的 msgpack/protobuf 编码路径，上报令牌就会随视图外泄。
+// 结构性隔离比标签约束可靠。
 type NodeView struct {
-	Node
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Provider string  `json:"provider"`
+	Region   string  `json:"region"`
+	Group    string  `json:"group"`
+	Note     string  `json:"note"`
+	ExpireAt string  `json:"expireAt"`
+	Price    float64 `json:"price"`
+	Currency string  `json:"currency"`
+	Weight   int     `json:"weight"`
+
 	Host     HostInfo `json:"host"`
 	Latest   Metrics  `json:"latest"`
 	Online   bool     `json:"online"`
@@ -184,6 +199,18 @@ type NodeView struct {
 	LastSeen int64    `json:"lastSeen"`
 	Alerts   int      `json:"alerts"`
 	Spark    []Point  `json:"spark"` // 首页迷你曲线
+}
+
+// NodeMeta 从台账条目复制视图所需的字段，调用方再补齐监控状态。
+func NodeMeta(n *Node) NodeView {
+	if n == nil {
+		return NodeView{}
+	}
+	return NodeView{
+		ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
+		Group: n.Group, Note: n.Note, ExpireAt: n.ExpireAt,
+		Price: n.Price, Currency: n.Currency, Weight: n.Weight,
+	}
 }
 
 // Point 是一个时序采样点（用于前端绘图）。

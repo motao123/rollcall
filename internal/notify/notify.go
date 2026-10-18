@@ -226,8 +226,13 @@ func (c *Config) Redacted() *Config {
 	return cp
 }
 
+// mask 生成下发到前端的脱敏占位符。
+//
+// 阈值不能太低：11–20 字符的凭据（例如 QQ 邮箱 16 位 SMTP 授权码、
+// 各类 webhook token）若保留首尾各 4 位，等于把一半凭据发给浏览器；
+// 前端页面一旦被截图或经浏览器插件读取就构成泄露。
 func mask(s string) string {
-	if len(s) <= 10 {
+	if len(s) < 24 {
 		return "********"
 	}
 	return s[:4] + "********" + s[len(s)-4:]
@@ -237,37 +242,57 @@ func isMasked(s string) bool { return strings.Contains(s, "********") }
 
 // MergeSecrets 把前端回传的掩码占位符还原为已保存的真实值。
 // 按「通道 ID + 类型」匹配，类型不一致则不复用，避免串到别的通道上。
+//
+// 反方向同样重要：**找不到可复用旧值时，占位符必须被清空**。
+// 否则 "abcd********wxyz" 会被当成真实密钥落库，之后每次投递都用它去请求，
+// 报错是「认证失败」而不是「密钥未填」，排查方向完全被带偏。
 func (c *Config) MergeSecrets(old *Config) {
-	if old == nil {
-		return
-	}
 	prev := map[string]ChannelConfig{}
-	for _, ch := range old.Channels {
-		if ch.ID == "" {
-			continue
+	if old != nil {
+		for _, ch := range old.Channels {
+			if ch.ID == "" {
+				continue
+			}
+			prev[ch.ID] = ch
 		}
-		prev[ch.ID] = ch
 	}
 	for i := range c.Channels {
 		ch := &c.Channels[i]
-		if ch.ID == "" {
-			// 无 ID 的通道无法与旧配置一一对应；按空串合并会让多个
-			// 空 ID 通道互相覆盖掩码，导致密钥被清空或串用。
-			continue
-		}
+		// 无 ID 的通道无法与旧配置一一对应；按空串合并会让多个空 ID 通道
+		// 互相覆盖掩码，导致密钥被清空或串用。
 		o, ok := prev[ch.ID]
-		if !ok || o.Type != ch.Type {
+		if ch.ID == "" || !ok || o.Type != ch.Type {
+			dropMaskedSecrets(ch)
 			continue
 		}
 		sk := secretKeys(ch.Type)
 		for k, v := range ch.Options {
-			if sk[k] && isMasked(v) {
-				if real, ok := o.Options[k]; ok {
-					ch.Options[k] = real
-				}
+			if !sk[k] || !isMasked(v) {
+				continue
+			}
+			if real, ok := o.Options[k]; ok && real != "" && !isMasked(real) {
+				ch.Options[k] = real
+			} else {
+				dropOption(ch, k)
 			}
 		}
 	}
+}
+
+// dropMaskedSecrets 清掉通道里所有仍是占位符的敏感项。
+func dropMaskedSecrets(ch *ChannelConfig) {
+	for k, v := range ch.Options {
+		if isMasked(v) {
+			dropOption(ch, k)
+		}
+	}
+}
+
+func dropOption(ch *ChannelConfig, k string) {
+	if ch.Options == nil {
+		return
+	}
+	delete(ch.Options, k)
 }
 
 // EnabledChannels 返回已启用且配置完整的通道名称。
@@ -949,7 +974,12 @@ func smtpSend(cli *smtp.Client, auth smtp.Auth, from string, to []*mail.Address,
 	if err := w.Close(); err != nil {
 		return err
 	}
-	return cli.Quit()
+	// 走到这里说明 DATA 事务已收到服务端的 250，邮件已经被接收。
+	// 之后的 QUIT 只是礼貌性关闭：部分服务端在收下邮件后直接断开，
+	// 网络抖动也常见。把 QUIT 失败当成投递失败会造成重复投递 ——
+	// 收件人收到两条同样的告警，而告警系统还报告失败。
+	_ = cli.Quit()
+	return nil
 }
 
 // encodeHeader 处理非 ASCII 主题（RFC 2047），并清除 CR/LF 防止头注入。
