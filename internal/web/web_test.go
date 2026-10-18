@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/motao/rollcall/internal/alert"
 	"github.com/motao/rollcall/internal/model"
@@ -900,6 +901,50 @@ func TestReportStillUsesNodeToken(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("无节点令牌应 401，实际 %d", w.Code)
+	}
+}
+
+// TestReportHostIsSanitized 是回归测试（借鉴 Heron 的 sanitize）。
+//
+// Agent 自报的文本会原样进入内存快照、公开状态页、CSV 导出、Prometheus
+// 输出与服务端日志，而 Agent 是可能被攻破的一端。曾经的缺陷是这些字符串
+// 完全不经过清洗：一条带换行的主机名能把一条日志伪装成两条，带双向控制符
+// 的系统名能在终端里显示成与真实字节序不同的样子。
+func TestReportHostIsSanitized(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点", Token: "node-token"})
+	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
+	h := srv.Handler()
+
+	// \n 伪造日志换行；U+202E（RLO）反转后续文本的显示方向；cpuModel 超长
+	report := []byte(`{"nodeId":"n1","host":{"hostname":"web-01\nALERT: ok",` +
+		`"os":"ubuntu\u202egood","cpuModel":"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789` +
+		`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789` +
+		`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},"metrics":{"cpuPct":1}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/report", bytes.NewReader(report))
+	req.Header.Set("X-Node-Token", "node-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("合法上报应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+
+	got := st.Host("n1")
+	if strings.ContainsAny(got.Hostname, "\r\n") {
+		t.Errorf("主机名仍含换行，可伪造日志: %q", got.Hostname)
+	}
+	if got.Hostname != "web-01ALERT: ok" {
+		t.Errorf("主机名 = %q，期望 %q", got.Hostname, "web-01ALERT: ok")
+	}
+	if strings.ContainsRune(got.OS, '\u202e') {
+		t.Errorf("系统名仍含双向控制符 U+202E: %q", got.OS)
+	}
+	// 超长字段必须被截断，且不能截出半个字符
+	if len(got.CPUModel) > 128 {
+		t.Errorf("cpuModel 未被限长: %d 字节", len(got.CPUModel))
+	}
+	if !utf8.ValidString(got.CPUModel) {
+		t.Errorf("cpuModel 截断后不是合法 UTF-8: %q", got.CPUModel)
 	}
 }
 
