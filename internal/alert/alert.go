@@ -1,6 +1,8 @@
 // Package alert 实现告警评估引擎。
 //
 // 策略：每 15 秒评估一轮，规则需持续满足 Duration 秒才触发，避免抖动误报。
+// 离线规则另有抖动抑制：刚恢复又立刻掉线的节点要满更长的时长才告警，
+// 否则一次网络抖动会变成"掉线—恢复—掉线"的通知刷屏。
 package alert
 
 import (
@@ -14,6 +16,18 @@ import (
 	"github.com/motao/rollcall/internal/store"
 )
 
+const (
+	// flapWindow 是抖动窗口：一次恢复之后这么久内再次开始的离线，
+	// 要满 flapGrace 才进入告警。
+	flapWindow int64 = 900 // 15 分钟
+	// flapGrace 是抖动窗口内的最短持续时长。
+	flapGrace int64 = 300 // 5 分钟
+)
+
+// 窗口必须严格大于宽限，否则"窗口内再掉"与"抖动宽限"两个量失去各自的含义。
+// 常量表达式在编译期钉住这条关系：差为负时转 uint64 溢出，编译失败。
+const _ = uint64(flapWindow - flapGrace - 1)
+
 type Engine struct {
 	st     *store.Store
 	evalMu sync.Mutex // 保证 Evaluate 单飞
@@ -21,9 +35,33 @@ type Engine struct {
 	since  map[string]int64        // ruleID|nodeID -> 首次越界时间
 	active map[string]*model.Alert // 已在告警中的条目
 	lastAt map[string]int64        // 上次通知时间，用于重复提醒
+	recAt  map[string]int64        // ruleID|nodeID -> 最近一次恢复时间，用于抖动抑制
 	notify func(notify.Message)    // 投递回调（nil 表示不通知）
 	repeat int                     // 重复通知间隔（秒），0=不重复
 	link   string                  // 面板地址，拼进通知
+	clk    func() int64            // 取当前 Unix 秒，测试可替换
+}
+
+// SetClock 替换时间源。
+//
+// 抖动抑制、持续时长、重复提醒全都是"距上次事件过了多久"的判定，
+// 靠真实时钟就只能靠 sleep 测，既慢又不稳定。注入后这些分支可以在
+// 确定的时间点上直接验证。
+func (e *Engine) SetClock(fn func() int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.clk = fn
+}
+
+// now 取当前 Unix 秒。调用方不得持 e.mu。
+func (e *Engine) now() int64 {
+	e.mu.Lock()
+	fn := e.clk
+	e.mu.Unlock()
+	if fn == nil {
+		return time.Now().Unix()
+	}
+	return fn()
 }
 
 func New(st *store.Store) *Engine {
@@ -32,6 +70,7 @@ func New(st *store.Store) *Engine {
 		since:  map[string]int64{},
 		active: map[string]*model.Alert{},
 		lastAt: map[string]int64{},
+		recAt:  map[string]int64{},
 	}
 	// 从持久化的未恢复告警恢复引擎状态：
 	// 否则重启后首轮评估会把这些告警当成"新告警"再通知一遍。
@@ -71,6 +110,8 @@ func (e *Engine) SetLink(link string) {
 // 取回调与 link 时短暂持锁，随即释放再调用 fn —— 投递可能耗时十余秒，
 // 绝不能持锁进行，否则评估循环会被阻塞。调用方同样不得持锁。
 func (e *Engine) send(a *model.Alert, resolved bool) {
+	// 时间戳在加锁前取：e.now() 自己要加锁，持锁调用会自死锁。
+	ts := e.now()
 	e.mu.Lock()
 	fn, link := e.notify, e.link
 	if resolved {
@@ -95,7 +136,7 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 		AlertID:  a.ID,
 		Value:    a.Value,
 		Resolved: resolved,
-		TS:       time.Now().Unix(),
+		TS:       ts,
 		Link:     link,
 		Body:     a.Message,
 	})
@@ -162,6 +203,13 @@ func (e *Engine) recoverClosedLocked(alerts []*model.Alert, reason, purgeRuleID 
 				delete(e.lastAt, k)
 			}
 		}
+		// 恢复历史一并清掉：管理员手工关闭与规则停用都不是节点真正恢复，
+		// 留着一条陈旧恢复时间会让下次掉线误判成"刚恢复又掉"的抖动。
+		for k := range e.recAt {
+			if belongs(k) {
+				delete(e.recAt, k)
+			}
+		}
 		e.mu.Unlock()
 	}
 
@@ -186,6 +234,45 @@ func (e *Engine) Start(every time.Duration) {
 	}()
 }
 
+// requiredDuration 返回这条规则本次需要持续满足的秒数。
+//
+// ignoreFlap 为真时关闭抖动抑制。它只用于派生 FlapDeferred：判定逻辑始终
+// 只写在这一处，派生判定不去复述 TTL、宽限、窗口任何一道闸门，
+// 以后加门或改门，派生判定自动跟上，不会留下两份漂移的口径。
+func (e *Engine) requiredDuration(rule *model.AlertRule, key string, now int64, ignoreFlap bool) int64 {
+	need := int64(rule.Duration)
+	if need < 0 {
+		need = 0
+	}
+	// 抖动抑制只压离线的噪声：资源类规则本来就要持续满足才触发，
+	// 再叠加一层宽限只会拖慢真实告警。
+	if ignoreFlap || rule.Metric != "offline" {
+		return need
+	}
+	e.mu.Lock()
+	rec, ok := e.recAt[key]
+	e.mu.Unlock()
+	if !ok || now-rec >= flapWindow {
+		return need
+	}
+	if need < flapGrace {
+		return flapGrace
+	}
+	return need
+}
+
+// FlapDeferred 报告这一轮是否只因抖动抑制而停在未触发：
+// 拿掉恢复历史之后本会触发，带上之后还不触发。
+//
+// 字面意思就是它的定义，所以实现就是跑两遍同一个判定、比较结果——
+// 而不是把"窗口内再掉""抖动宽限"这些条件再写一遍。
+func (e *Engine) FlapDeferred(rule *model.AlertRule, nodeID string, first, now int64) bool {
+	key := rule.ID + "|" + nodeID
+	without := now-first >= e.requiredDuration(rule, key, now, true)
+	with := now-first >= e.requiredDuration(rule, key, now, false)
+	return without && !with
+}
+
 // Evaluate 执行一轮评估。
 func (e *Engine) Evaluate() {
 	e.evalMu.Lock()
@@ -193,7 +280,7 @@ func (e *Engine) Evaluate() {
 
 	nodes := e.st.Nodes()
 	rules := e.st.Rules()
-	now := time.Now().Unix()
+	now := e.now()
 
 	// 本轮实际评估到的 key，用于清理引擎状态：
 	// 节点被删除或规则被停用后，它们不再进入下面的循环，
@@ -217,6 +304,7 @@ func (e *Engine) Evaluate() {
 				delete(e.since, key)
 				delete(e.active, key)
 				delete(e.lastAt, key)
+				delete(e.recAt, key)
 				e.mu.Unlock()
 				if e.st.ResolveAlert(rule.ID, n.ID) {
 					if prev == nil {
@@ -238,6 +326,12 @@ func (e *Engine) Evaluate() {
 				delete(e.since, key)
 				prev, wasActive := e.active[key]
 				delete(e.active, key)
+				if wasActive {
+					// 记下恢复时刻，供抖动抑制使用：下一次再掉线时据此判断
+					// 是不是"刚恢复又掉"的抖动。未真正告警过的（wasActive 为假）
+					// 不算一次恢复，否则会平白抬高下一次的门槛。
+					e.recAt[key] = now
+				}
 				e.mu.Unlock()
 
 				resolved := e.st.ResolveAlert(rule.ID, n.ID)
@@ -265,7 +359,8 @@ func (e *Engine) Evaluate() {
 			}
 			e.mu.Unlock()
 
-			if now-first < int64(rule.Duration) {
+			need := e.requiredDuration(rule, key, now, false)
+			if now-first < need {
 				continue
 			}
 
@@ -330,6 +425,11 @@ func (e *Engine) Evaluate() {
 	for k := range e.lastAt {
 		if _, ok := seen[k]; !ok {
 			delete(e.lastAt, k)
+		}
+	}
+	for k := range e.recAt {
+		if _, ok := seen[k]; !ok {
+			delete(e.recAt, k)
 		}
 	}
 	e.mu.Unlock()

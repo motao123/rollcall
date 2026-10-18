@@ -336,3 +336,88 @@ func TestResolvedClearsLastAtWithoutNotifier(t *testing.T) {
 		t.Fatal("通知器为空时，已恢复告警的 lastAt 仍未被清理")
 	}
 }
+
+// TestOfflineFlapIsSuppressed 是回归测试（借鉴 Heron 的抖动抑制）。
+//
+// 曾经的缺陷：节点"掉线—恢复—再掉线"每次都按规则自身的 Duration 重新计时，
+// 于是一次网络抖动会变成连续的通知刷屏：恢复通知、掉线通知、恢复通知……
+// 修复：恢复之后 flapWindow 内再次开始的离线，要满 flapGrace 才告警。
+func TestOfflineFlapIsSuppressed(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	st.UpsertRule(&model.AlertRule{
+		ID: "r_off", Name: "节点失联", Metric: "offline", Op: "gt",
+		Threshold: 1, Duration: 0, Severity: "critical", Enabled: true,
+	})
+	e := New(st)
+
+	// 注入时钟：抖动抑制全是"距上次事件过了多久"的判定，
+	// 靠真实时钟只能 sleep，既慢又不稳定。
+	base := time.Now().Unix()
+	cur := base
+	e.SetClock(func() int64 { return cur })
+
+	// 1) 失联 → 触发
+	e.Evaluate()
+	if got := st.ActiveAlertCount(); got != 1 {
+		t.Fatalf("首次失联应触发告警: ActiveAlertCount=%d, 期望 1", got)
+	}
+
+	// 2) 恢复 → 记下恢复时刻
+	st.AddMetrics("n1", model.HostInfo{}, model.Metrics{TS: base})
+	e.Evaluate()
+	if got := st.ActiveAlertCount(); got != 0 {
+		t.Fatalf("恢复后不应仍有活跃告警: ActiveAlertCount=%d, 期望 0", got)
+	}
+
+	// 3) 抖动窗口内再次失联 → 被抑制，不再刷屏
+	cur = base + 200 // 超过 OnlineWindow，确为失联；距恢复仅 200 秒
+	e.Evaluate()
+	if got := st.ActiveAlertCount(); got != 0 {
+		t.Fatalf("抖动窗口内的再次失联应被抑制: ActiveAlertCount=%d, 期望 0", got)
+	}
+	rule := &model.AlertRule{ID: "r_off", Name: "节点失联", Metric: "offline", Duration: 0}
+	if !e.FlapDeferred(rule, "n1", cur, cur) {
+		t.Fatal("抖动窗口内 FlapDeferred 应为 true")
+	}
+
+	// 4) 持续满抖动宽限后必须触发：抑制不能变成永久静默
+	cur = base + 200 + flapGrace + 10
+	e.Evaluate()
+	if got := st.ActiveAlertCount(); got != 1 {
+		t.Fatalf("持续超过抖动宽限后应触发: ActiveAlertCount=%d, 期望 1", got)
+	}
+}
+
+// TestFlapDeferredComparesTwoRuns 是回归测试。
+//
+// FlapDeferred 靠"跑两遍同一个判定、比较结果"得出，不复制闸门逻辑。
+// 本测试钉住这个性质：同一组输入下，拿掉恢复历史与保留恢复历史的结论
+// 必须在"刚好越过规则 Duration 但没到抖动宽限"这一段上分叉。
+func TestFlapDeferredComparesTwoRuns(t *testing.T) {
+	st := store.New(t.TempDir())
+	e := New(st)
+	rule := &model.AlertRule{ID: "r_off", Metric: "offline", Duration: 180}
+	key := "r_off|n1"
+	rec := int64(10000)
+	e.mu.Lock()
+	e.recAt[key] = rec
+	e.mu.Unlock()
+
+	first := rec + 10
+	// 已持续 200 秒：够规则自己的 180 秒，不够抖动宽限 300 秒
+	if !e.FlapDeferred(rule, "n1", first, first+200) {
+		t.Fatal("持续 200 秒（>180 且 <300）应判定为抖动抑制中")
+	}
+	// 已持续 400 秒：越过抖动宽限，不再是抑制
+	if e.FlapDeferred(rule, "n1", first, first+400) {
+		t.Fatal("持续 400 秒已越过抖动宽限，不应再判为抖动抑制")
+	}
+	// 窗口外再掉的：不受影响
+	e.mu.Lock()
+	e.recAt[key] = rec - flapWindow - 1
+	e.mu.Unlock()
+	if e.FlapDeferred(rule, "n1", first, first+200) {
+		t.Fatal("窗口外的离线不应被判为抖动抑制")
+	}
+}
