@@ -23,6 +23,10 @@ func TestTextStripsControlAndBidi(t *testing.T) {
 		{"LRI U+2066", "a\u2066b", "ab"},
 		{"PDI U+2069", "a\u2069b", "ab"},
 		{"RLM U+200F", "a\u200Fb", "ab"},
+		// U+2028/U+2029 在 JSON 字符串里合法，却是 JavaScript 的行终止符，
+		// 进入页面脚本上下文会截断字符串，必须一并剔除。
+		{"LS U+2028", "a\u2028b", "ab"},
+		{"PS U+2029", "a\u2029b", "ab"},
 	}
 	for _, c := range cases {
 		if got := Text(c.in, 0); got != c.want {
