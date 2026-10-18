@@ -129,32 +129,9 @@ func sign(args []string) {
 	}
 
 	priv := loadKey(*keyPath)
-	m := &selfupdate.Manifest{
-		Version:     strings.TrimPrefix(*ver, "v"),
-		PublishedAt: *published,
-		Assets:      make(map[string]selfupdate.Asset, len(assets)),
-	}
-	for _, spec := range assets {
-		key, path, _ := strings.Cut(spec, "=")
-		st, err := os.Stat(path)
-		if err != nil || !st.Mode().IsRegular() {
-			fatal("资产 %s 不可读: %v", key, err)
-		}
-		if st.Size() < selfupdate.MinAssetSize || st.Size() > selfupdate.MaxAssetSize {
-			fatal("资产 %s 大小 %d 超出允许范围", key, st.Size())
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			fatal("读取资产 %s 失败: %v", key, err)
-		}
-		sum := sha256.Sum256(b)
-		url := strings.TrimRight(*baseURL, "/") + "/" + filepath.Base(path)
-		if err := selfupdate.CheckURL(url, *allowInsecure); err != nil {
-			fatal("资产 %s 地址无效: %v", key, err)
-		}
-		m.Assets[key] = selfupdate.Asset{
-			URL: url, SHA256: hex.EncodeToString(sum[:]), Size: st.Size(),
-		}
+	m, err := buildManifest(assets, *ver, *published, *baseURL, *allowInsecure)
+	if err != nil {
+		fatal("%v", err)
 	}
 
 	env, err := selfupdate.SignManifest(m, priv)
@@ -169,6 +146,45 @@ func sign(args []string) {
 		fatal("写入清单失败: %v", err)
 	}
 	fmt.Printf("已写入 %s（版本 %s，%d 个资产）\n", *out, m.Version, len(m.Assets))
+}
+
+// buildManifest 计算每个资产的 SHA-256 与大小，组装待签名清单。
+//
+// 同一平台键重复时必须报错：map 赋值会静默覆盖，前一个资产被丢弃，
+// 签出的清单看起来完全正常却缺少一个架构 —— 而清单一旦签名发布，
+// 那个平台就再也收不到更新。
+func buildManifest(assets []string, version string, publishedAt int64, baseURL string, allowInsecure bool) (*selfupdate.Manifest, error) {
+	m := &selfupdate.Manifest{
+		Version:     strings.TrimPrefix(version, "v"),
+		PublishedAt: publishedAt,
+		Assets:      make(map[string]selfupdate.Asset, len(assets)),
+	}
+	for _, spec := range assets {
+		key, path, _ := strings.Cut(spec, "=")
+		if _, dup := m.Assets[key]; dup {
+			return nil, fmt.Errorf("-asset 平台键重复: %s", key)
+		}
+		st, err := os.Stat(path)
+		if err != nil || !st.Mode().IsRegular() {
+			return nil, fmt.Errorf("资产 %s 不可读: %v", key, err)
+		}
+		if st.Size() < selfupdate.MinAssetSize || st.Size() > selfupdate.MaxAssetSize {
+			return nil, fmt.Errorf("资产 %s 大小 %d 超出允许范围", key, st.Size())
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("读取资产 %s 失败: %v", key, err)
+		}
+		sum := sha256.Sum256(b)
+		url := strings.TrimRight(baseURL, "/") + "/" + filepath.Base(path)
+		if err := selfupdate.CheckURL(url, allowInsecure); err != nil {
+			return nil, fmt.Errorf("资产 %s 地址无效: %v", key, err)
+		}
+		m.Assets[key] = selfupdate.Asset{
+			URL: url, SHA256: hex.EncodeToString(sum[:]), Size: st.Size(),
+		}
+	}
+	return m, nil
 }
 
 func loadKey(path string) ed25519.PrivateKey {
