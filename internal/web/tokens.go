@@ -51,7 +51,11 @@ func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, "name 不能为空且不超过 64 字符")
 			return
 		}
-		scopes := normalizeScopes(in.Scopes)
+		scopes, ok := normalizeScopes(in.Scopes)
+		if !ok {
+			fail(w, http.StatusBadRequest, "包含无效的权限范围（仅支持 read / admin）")
+			return
+		}
 		if len(scopes) == 0 {
 			fail(w, http.StatusBadRequest, "至少选择一个权限范围")
 			return
@@ -103,7 +107,12 @@ func (s *Server) handleAdminTokenByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
 
-func normalizeScopes(in []string) []string {
+// normalizeScopes 归一化作用域。第二个返回值为 false 表示请求里
+// 含有不支持的作用域 —— 调用方必须整单拒绝。
+//
+// 旧实现静默丢弃未知项：{"scopes":["read","write"]} 会签发一个只有 read
+// 的令牌，调用方以为拿到了写权限，直到某天收到莫名的 401。
+func normalizeScopes(in []string) ([]string, bool) {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))
 	for _, s := range in {
@@ -114,9 +123,11 @@ func normalizeScopes(in []string) []string {
 				seen[s] = true
 				out = append(out, s)
 			}
+		default:
+			return nil, false
 		}
 	}
-	return out
+	return out, true
 }
 
 func newAPIToken() (string, error) {

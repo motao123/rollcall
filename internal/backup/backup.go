@@ -18,11 +18,12 @@ import (
 
 const (
 	magic    = "RCBK1"
-	iter     = 210_000
+	iter     = 600_000 // 与 OWASP 对 PBKDF2-HMAC-SHA256 的建议一致
+	minIter  = 100_000 // 解密侧下限：太低的迭代数意味着弱加密，直接拒绝
+	maxIter  = 1_200_000
 	saltLen  = 16
 	nonceLen = 12
-	// maxIter 防止恶意备份文件用超高迭代次数拖垮 CPU。
-	maxIter = 600_000
+	tagLen   = 16 // GCM 默认认证标签长度
 )
 
 // Encrypt 使用密码加密明文。
@@ -54,11 +55,11 @@ func Encrypt(plain []byte, password string) ([]byte, error) {
 // Decrypt 解密备份；密码错误或文件被篡改时返回错误。
 func Decrypt(data []byte, password string) ([]byte, error) {
 	hLen := len(magic) + 4 + saltLen
-	if len(data) < hLen+nonceLen+16 || string(data[:len(magic)]) != magic {
+	if len(data) < hLen+nonceLen+tagLen || string(data[:len(magic)]) != magic {
 		return nil, errors.New("不是有效的 Rollcall 备份文件")
 	}
 	n := binary.BigEndian.Uint32(data[len(magic) : len(magic)+4])
-	if n < 100_000 || n > maxIter {
+	if n < minIter || n > maxIter {
 		return nil, errors.New("备份文件的加密参数无效")
 	}
 	header := data[:hLen]

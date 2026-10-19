@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/motao/rollcall/internal/model"
@@ -59,5 +60,65 @@ func TestImportIgnoresRevokedSessionsInBackup(t *testing.T) {
 	}
 	if got := dst2.GetSetting("theme"); got != `{"mode":"dark"}` {
 		t.Errorf("普通设置应正常导入，实际 %q", got)
+	}
+}
+
+// TestImportRejectsDuplicateAndDanglingRefs 是 P2 回归：
+//
+// 导入校验原本只查节点 ID 重复，服务/规则重复会被 map 静默覆盖，
+// 规则引用的节点/服务也不校验 —— 损坏备份会丢数据或留下永不触发的悬空规则。
+func TestImportRejectsDuplicateAndDanglingRefs(t *testing.T) {
+	src := New(t.TempDir())
+	src.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	src.UpsertService(&model.Service{ID: "s1", NodeID: "n1", Name: "Web", Type: "http", Target: "http://127.0.0.1", Enabled: true})
+	src.UpsertRule(&model.AlertRule{ID: "r1", Name: "CPU", Metric: "cpu", Op: "gt", Threshold: 90, Enabled: true})
+	raw, err := src.ExportConfig()
+	if err != nil {
+		t.Fatalf("导出失败: %v", err)
+	}
+
+	// 构造三类坏备份，逐个断言被拒绝
+	mutate := func(fn func(map[string]any)) []byte {
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("解析备份失败: %v", err)
+		}
+		fn(doc)
+		out, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatalf("编码备份失败: %v", err)
+		}
+		return out
+	}
+
+	cases := []struct {
+		name string
+		fn   func(map[string]any)
+		want string
+	}{
+		{"服务 ID 重复", func(d map[string]any) {
+			svcs := d["services"].([]any)
+			d["services"] = append(svcs, svcs[0])
+		}, "服务 ID 重复"},
+		{"规则 ID 重复", func(d map[string]any) {
+			rules := d["rules"].([]any)
+			d["rules"] = append(rules, rules[0])
+		}, "规则 ID 重复"},
+		{"规则引用不存在的节点", func(d map[string]any) {
+			r := d["rules"].([]any)[0].(map[string]any)
+			r["nodeIds"] = []any{"n_missing"}
+		}, "不存在的节点"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dst := New(t.TempDir())
+			err := dst.ImportConfig(mutate(c.fn))
+			if err == nil {
+				t.Fatalf("应拒绝该备份（%s）", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("错误信息应包含 %q，实际: %v", c.want, err)
+			}
+		})
 	}
 }

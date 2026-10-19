@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -94,14 +95,30 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// 设置里包含通知配置；导入后立即重新装载，无需重启。
-	if nc, err := notify.Parse(s.st.GetSetting("notify")); err == nil {
+	// 设置里包含通知配置；导入后必须**先校验**再重新装载。
+	// 校验失败不能静默：备份已经落库，运行态却还是旧配置，
+	// 管理员会看到"导入成功"但通知行为没变（直到重启才在日志里发现）。
+	warning := ""
+	s.notifySaveMu.Lock()
+	if nc, err := notify.Parse(s.st.GetSetting("notify")); err != nil {
+		log.Printf("导入后通知配置解析失败: %v", err)
+		warning = "配置已导入，但通知配置无法解析，未生效: " + err.Error()
+	} else if verr := nc.Validate(); verr != nil {
+		log.Printf("导入后通知配置校验失败: %v", verr)
+		warning = "配置已导入，但通知配置不合法，未生效: " + verr.Error()
+	} else {
 		s.applyNotifyConfig(nc)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	s.notifySaveMu.Unlock()
+
+	resp := map[string]any{
 		"ok":       true,
 		"nodes":    len(s.st.Nodes()),
 		"services": len(s.st.Services()),
 		"rules":    len(s.st.Rules()),
-	})
+	}
+	if warning != "" {
+		resp["warning"] = warning
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

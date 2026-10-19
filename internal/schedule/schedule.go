@@ -76,6 +76,9 @@ func (r *Runner) loop() {
 func (r *Runner) notifyCfg() *notify.Config {
 	cfg, err := notify.Parse(r.st.GetSetting("notify"))
 	if err != nil {
+		// 不能静默：配置一坏，到期提醒与所有报告都会停摆，
+		// 而日志里什么都没有，排查时完全看不出原因。
+		log.Printf("解析通知配置失败，跳过到期提醒与运行报告: %v", err)
 		return nil
 	}
 	return cfg

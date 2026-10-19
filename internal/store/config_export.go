@@ -126,6 +126,9 @@ func (s *Store) ImportConfig(raw []byte) error {
 		if _, ok := nodes[sv.NodeID]; !ok {
 			return fmt.Errorf("服务 %s 引用了不存在的节点 %s", sv.Name, sv.NodeID)
 		}
+		if _, dup := services[sv.ID]; dup {
+			return fmt.Errorf("备份中服务 ID 重复: %s", sv.ID)
+		}
 		cp := *sv
 		services[cp.ID] = &cp
 	}
@@ -133,6 +136,21 @@ func (s *Store) ImportConfig(raw []byte) error {
 	for _, r := range in.Rules {
 		if r == nil || strings.TrimSpace(r.ID) == "" || strings.TrimSpace(r.Name) == "" {
 			return errors.New("备份中存在缺少 id/name 的规则")
+		}
+		if _, dup := rules[r.ID]; dup {
+			return fmt.Errorf("备份中规则 ID 重复: %s", r.ID)
+		}
+		// 规则的作用域必须指向本备份里存在的节点/服务，否则导入后会留下
+		// 永不触发的悬空规则（界面显示正常，但实际什么也不监控）。
+		for _, id := range r.NodeIDs {
+			if _, ok := nodes[id]; !ok {
+				return fmt.Errorf("规则 %s 引用了不存在的节点 %s", r.Name, id)
+			}
+		}
+		for _, id := range r.ServiceIDs {
+			if _, ok := services[id]; !ok {
+				return fmt.Errorf("规则 %s 引用了不存在的服务 %s", r.Name, id)
+			}
 		}
 		cp := *r
 		rules[cp.ID] = &cp

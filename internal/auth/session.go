@@ -22,6 +22,11 @@ const (
 	// DefaultSessionTTL 是登录态有效期，同时由 Cookie Max-Age 约束。
 	DefaultSessionTTL = 7 * 24 * time.Hour
 	sessionKeySize    = 32
+	// maxSessionTokenLen 是接受的最大会话令牌长度。
+	// 合法令牌形如"payload.signature"，最多两百多字节；不设上限时，
+	// 客户端可用接近 1MB 的 Cookie（http.Server 默认 MaxHeaderBytes）
+	// 逼每个请求做一次 Split + 两次 base64 解码。
+	maxSessionTokenLen = 512
 )
 
 var sessionB64 = base64.RawURLEncoding
@@ -80,6 +85,9 @@ func (s *Sessions) Issue(username string, version int64) (string, time.Time, err
 
 // Verify 校验签名、有效期与载荷格式。
 func (s *Sessions) Verify(token string) (Session, bool) {
+	if len(token) > maxSessionTokenLen {
+		return Session{}, false
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 {
 		return Session{}, false
@@ -191,35 +199,52 @@ func readPrivate(path string) ([]byte, error) {
 	return raw, nil
 }
 
-// createPrivate 仅在文件不存在时创建（O_EXCL）；已存在返回 os.ErrExist。
+// createPrivate 原子发布新密钥：先在同目录写完整临时文件并 fsync，
+// 再用 os.Link 发布（目标已存在则返回 os.ErrExist）。
+//
+// 旧实现用 O_EXCL 直接创建目标文件后再写入：并发启动的另一个实例拿到
+// ErrExist 后会立刻 readPrivate，此时文件可能还是 0 字节或半写，
+// 于是启动失败（"会话密钥长度无效: N"）。
 func createPrivate(path string, raw []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("创建密钥目录失败: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.CreateTemp(dir, ".session-key-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("创建临时密钥文件失败: %w", err)
 	}
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(path)
-	}
+	tmp := f.Name()
+	// link 成功后临时名仍在，这里兜底清理；rename 成功后路径已不存在，忽略错误。
+	defer func() { _ = os.Remove(tmp) }()
+
 	if err := f.Chmod(0o600); err != nil {
-		cleanup()
+		_ = f.Close()
 		return fmt.Errorf("设置会话密钥权限失败: %w", err)
 	}
 	if _, err := f.Write(raw); err != nil {
-		cleanup()
+		_ = f.Close()
 		return fmt.Errorf("写入会话密钥失败: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		cleanup()
+		_ = f.Close()
 		return fmt.Errorf("落盘会话密钥失败: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
 		return fmt.Errorf("关闭会话密钥失败: %w", err)
+	}
+
+	if err := os.Link(tmp, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// 少数文件系统不支持硬链接：退回"确认不存在后 rename"。
+		if _, statErr := os.Lstat(path); statErr == nil {
+			return os.ErrExist
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return fmt.Errorf("发布会话密钥失败: %w", err)
+		}
 	}
 	syncDir(dir)
 	return nil

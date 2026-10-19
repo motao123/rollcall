@@ -49,7 +49,7 @@ func (l *authFailureLimiter) allow(ip string) (bool, time.Duration) {
 	defer l.mu.Unlock()
 	l.sweepLocked(now)
 	if len(l.state) >= maxLimiterEntries {
-		l.evictLocked()
+		l.evictLocked(now)
 	}
 	st, ok := l.state[ip]
 	if !ok {
@@ -76,20 +76,52 @@ func (l *authFailureLimiter) allow(ip string) (bool, time.Duration) {
 // 每条来源都留下一个条目，没有上限时内存会随请求数增长。
 const maxLimiterEntries = 10000
 
-// evictLocked 在状态表打满时优先删除过期条目；仍然超限就删除任意一条。
-// 攻击者可以借此挤掉自己的封禁状态，但代价远高于换一个 IPv6 地址。
-func (l *authFailureLimiter) evictLocked() {
-	now := time.Now()
+// 单次淘汰的工作量上限：allow 在全局锁内调用它，必须保持 O(1) 量级。
+// 旧实现每次都在锁内遍历整张 1 万条的表（两遍），高基数来源洪水会把
+// 限速器本身变成 CPU 放大器，并串行化所有鉴权请求。
+const (
+	evictScan  = 256 // 每次最多检查的条目数
+	evictBatch = 64  // 每次最多删除的条目数
+)
+
+// evictLocked 在状态表打满时回收条目，**有界**且**不误删安全状态**。
+//
+// 只删除：窗口已过、未在封禁中、没有在途名额的普通条目。
+// 封禁中的条目（正在被限速的攻击者）与在途请求必须保留：
+// 旧实现会把它们一起删掉，等于在最需要限速的时候把封禁清空。
+func (l *authFailureLimiter) evictLocked(now time.Time) {
+	freed, scanned := 0, 0
+
+	// 第一遍：优先回收窗口已过且无封禁/无在途的条目
 	for k, v := range l.state {
-		if now.Sub(v.windowStart) > l.window && now.After(v.blockedUntil) {
+		if freed >= evictBatch || scanned >= evictScan {
+			return
+		}
+		scanned++
+		if v.inflight > 0 || now.Before(v.blockedUntil) {
+			continue
+		}
+		if now.Sub(v.windowStart) > l.window {
 			delete(l.state, k)
+			freed++
 		}
 	}
-	for k := range l.state {
-		if len(l.state) < maxLimiterEntries {
+	if len(l.state) < maxLimiterEntries {
+		return
+	}
+
+	// 第二遍：仍然超限时按"最不活跃"腾位，同样跳过封禁/在途条目
+	scanned = 0
+	for k, v := range l.state {
+		if freed >= evictBatch || scanned >= evictScan {
 			break
 		}
+		scanned++
+		if v.inflight > 0 || now.Before(v.blockedUntil) {
+			continue
+		}
 		delete(l.state, k)
+		freed++
 	}
 }
 
