@@ -1552,6 +1552,13 @@ function showAccountDialog() {
         <input type="password" name="currentPassword" required autocomplete="current-password">
         <span class="field-hint">验证身份后才能保存</span>
       </label>
+      ${String(u.totpEnabled) === 'true' ? `
+      <label class="field">
+        <span class="field-label">动态验证码 *</span>
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+          autocomplete="one-time-code" placeholder="身份验证器中的 6 位数字" required>
+        <span class="field-hint">已启用两步验证，修改账号需要动态码（每个码只能用一次）</span>
+      </label>` : ''}
       <div class="form-actions">
         <button class="btn" type="button" data-close>取消</button>
         <button class="btn primary" type="submit">保存账号</button>
@@ -1567,7 +1574,10 @@ function showAccountDialog() {
     try {
       const res = await adminApi('/api/admin/account', {
         method: 'POST',
-        body: JSON.stringify({ username: d.username, email: d.email, currentPassword: d.currentPassword }),
+        body: JSON.stringify({
+          username: d.username, email: d.email,
+          currentPassword: d.currentPassword, code: d.code || '',
+        }),
       });
       applyAccountResponse(res);
       dlg.close();
@@ -1598,6 +1608,13 @@ function showPasswordDialog() {
         <span class="field-label">确认新密码 *</span>
         <input type="password" name="confirmPassword" required minlength="12" autocomplete="new-password">
       </label>
+      ${String((state.user || {}).totpEnabled) === 'true' ? `
+      <label class="field">
+        <span class="field-label">动态验证码 *</span>
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+          autocomplete="one-time-code" placeholder="身份验证器中的 6 位数字" required>
+        <span class="field-hint">已启用两步验证，修改密码需要动态码（每个码只能用一次）</span>
+      </label>` : ''}
       <div class="form-actions">
         <button class="btn" type="button" data-close>取消</button>
         <button class="btn primary" type="submit">修改密码</button>
@@ -1617,7 +1634,9 @@ function showPasswordDialog() {
     try {
       const res = await adminApi('/api/admin/account/password', {
         method: 'POST',
-        body: JSON.stringify({ currentPassword: d.currentPassword, newPassword: d.newPassword }),
+        body: JSON.stringify({
+          currentPassword: d.currentPassword, newPassword: d.newPassword, code: d.code || '',
+        }),
       });
       applyAccountResponse(res);
       dlg.close();

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -133,5 +134,120 @@ func TestTOTPURL(t *testing.T) {
 		if got := q.Get(k); got != want {
 			t.Errorf("参数 %s=%q, 期望 %q", k, got, want)
 		}
+	}
+}
+
+// TestVerifyTOTPStepReturnsWindow 确认返回的是命中的时间步，
+// 且前后一个窗口的码会映射到各自真实的步进（防重放依赖它做单调比较）。
+func TestVerifyTOTPStepReturnsWindow(t *testing.T) {
+	secret, err := NewTOTPSecret()
+	if err != nil {
+		t.Fatalf("生成密钥失败: %v", err)
+	}
+	now := time.Unix(1790000000, 0)
+	curStep := now.Unix() / 30
+
+	for _, offset := range []int64{-1, 0, 1} {
+		at := now.Add(time.Duration(offset) * 30 * time.Second)
+		code, err := TOTPCode(secret, at)
+		if err != nil {
+			t.Fatalf("计算动态码失败: %v", err)
+		}
+		got, ok := VerifyTOTPStep(secret, code, now)
+		if !ok {
+			t.Fatalf("时间步 %d 的码应被接受", curStep+offset)
+		}
+		if got != curStep+offset {
+			t.Errorf("时间步 = %d，期望 %d", got, curStep+offset)
+		}
+	}
+}
+
+// TestMarkTOTPStepRejectsReplay 是防重放的核心回归：
+// 同一个时间步第二次消费必须失败，更早的步进也必须失败。
+func TestMarkTOTPStepRejectsReplay(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/admin-user.json"
+	u, _, _, err := LoadOrCreateUser(path, "admin", "", "Passw0rd-Long!", false)
+	if err != nil {
+		t.Fatalf("创建账号失败: %v", err)
+	}
+	step := time.Now().Unix() / 30
+
+	first, err := MarkTOTPStep(path, u, step)
+	if err != nil {
+		t.Fatalf("首次消费应成功: %v", err)
+	}
+	if first.LastTOTPStep != step {
+		t.Fatalf("已用步进未落盘: %d", first.LastTOTPStep)
+	}
+	if _, err := MarkTOTPStep(path, first, step); !errors.Is(err, ErrTOTPReplayed) {
+		t.Fatalf("同一步进重放应被拒绝，实际 %v", err)
+	}
+	if _, err := MarkTOTPStep(path, first, step-1); !errors.Is(err, ErrTOTPReplayed) {
+		t.Fatalf("更早的步进也应被拒绝（防止用旧窗口绕过），实际 %v", err)
+	}
+	// 落盘后重新加载，已用步进仍在（重启不能重置防重放状态）
+	reloaded, _, _, err := LoadOrCreateUser(path, "", "", "", false)
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if reloaded.LastTOTPStep != step {
+		t.Errorf("重启后已用步进丢失: %d", reloaded.LastTOTPStep)
+	}
+}
+
+// TestTOTPSecretMinLength 回归：密钥下限必须是 128 位。
+// 旧实现（10 字节 = 80 位）会静默接受手工写入的弱密钥。
+func TestTOTPSecretMinLength(t *testing.T) {
+	short := totpEnc.EncodeToString(make([]byte, 10))
+	if _, err := decodeTOTPSecret(short); err == nil {
+		t.Fatal("80 位密钥应被拒绝（RFC 4226 要求 ≥128 位）")
+	}
+	ok := totpEnc.EncodeToString(make([]byte, 16))
+	if _, err := decodeTOTPSecret(ok); err != nil {
+		t.Fatalf("128 位密钥应被接受: %v", err)
+	}
+}
+
+// TestUpdateTOTPRotatesSecretBumpsVersion 回归：
+// 已启用状态下轮换密钥（enabled 不变）也必须递增会话版本，
+// 否则用旧密钥派生的动态码仍能登录，等于轮换没生效。
+func TestUpdateTOTPRotatesSecretBumpsVersion(t *testing.T) {
+	path := t.TempDir() + "/admin-user.json"
+	u, _, _, err := LoadOrCreateUser(path, "admin", "", "Passw0rd-Long!", false)
+	if err != nil {
+		t.Fatalf("创建账号失败: %v", err)
+	}
+	secretA, err := NewTOTPSecret()
+	if err != nil {
+		t.Fatalf("生成密钥失败: %v", err)
+	}
+	enabled, err := UpdateTOTP(path, u, secretA, true)
+	if err != nil {
+		t.Fatalf("启用失败: %v", err)
+	}
+	base := enabled.SessionVersion()
+
+	// 同密钥重复保存：不应改变版本（幂等）
+	same, err := UpdateTOTP(path, enabled, secretA, true)
+	if err != nil {
+		t.Fatalf("重复保存失败: %v", err)
+	}
+	if same.SessionVersion() != base {
+		t.Errorf("密钥未变时会话版本不应变化: %d -> %d", base, same.SessionVersion())
+	}
+
+	// 轮换密钥：版本必须递增，让旧密钥签发的会话与动态码失去意义
+	secretB, err := NewTOTPSecret()
+	if err != nil {
+		t.Fatalf("生成密钥失败: %v", err)
+	}
+	rotated, err := UpdateTOTP(path, same, secretB, true)
+	if err != nil {
+		t.Fatalf("轮换失败: %v", err)
+	}
+	if rotated.SessionVersion() <= base {
+		t.Errorf("轮换密钥后会话版本必须递增: %d -> %d", base, rotated.SessionVersion())
 	}
 }

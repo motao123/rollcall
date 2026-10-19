@@ -40,6 +40,11 @@ type User struct {
 	// 未确认的密钥也会保存，但 TOTPEnabled 保持 false 不影响登录。
 	TOTPSecret  string `json:"totpSecret,omitempty"`
 	TOTPEnabled bool   `json:"totpEnabled,omitempty"`
+	// LastTOTPStep 记录已消费的最后一个 TOTP 时间步（Unix/30）。
+	// 没有它，同一个动态码在被接受的时间窗内（±1 步，约 90 秒）可以重放：
+	// 肩窥、钓鱼代理、或明文 HTTP 下的中间人都能捕获一次码后再用一次。
+	// RFC 6238 §5.2 要求服务端拒绝重放的时间步。
+	LastTOTPStep int64 `json:"lastTotpStep,omitempty"`
 }
 
 // ValidateUsername 校验登录用户名。

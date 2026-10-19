@@ -92,10 +92,33 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if !auth.VerifyTOTP(u.TOTPSecret, in.TOTP, time.Now()) {
-			fail(w, http.StatusUnauthorized, "动态验证码错误")
+		// ★ 原子消费时间步：同一动态码只能成功登录一次。
+		// 只用 VerifyTOTP 校验不落盘已用步进，码在 ±1 窗口（约 90 秒）内可重放；
+		// 与账号修改共用 accountMu，保证并发登录也只有一个能消费成功。
+		s.accountMu.Lock()
+		cur := s.currentUser()
+		if cur == nil {
+			s.accountMu.Unlock()
+			fail(w, http.StatusServiceUnavailable, "面板登录未启用")
 			return
 		}
+		updated, err := s.consumeTOTPLocked(cur, in.TOTP)
+		s.accountMu.Unlock()
+		if err != nil {
+			switch {
+			case errors.Is(err, errTOTPRequired):
+				w.Header().Set("Cache-Control", "no-store")
+				writeJSON(w, http.StatusUnauthorized, map[string]any{
+					"error": err.Error(), "totpRequired": true,
+				})
+			case errors.Is(err, auth.ErrTOTPReplayed):
+				fail(w, http.StatusUnauthorized, err.Error())
+			default:
+				fail(w, http.StatusUnauthorized, "动态验证码错误")
+			}
+			return
+		}
+		u = updated
 	}
 
 	token, exp, err := s.sessions.Issue(u.Username, u.SessionVersion())

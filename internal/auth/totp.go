@@ -39,8 +39,10 @@ func decodeTOTPSecret(secret string) ([]byte, error) {
 		return nil, errors.New("密钥为空")
 	}
 	b, err := totpEnc.DecodeString(s)
-	if err != nil || len(b) < 10 {
-		return nil, errors.New("密钥格式无效")
+	// RFC 4226/6238 要求共享密钥至少 128 位。旧实现只要求 10 字节（80 位），
+	// 手工导入或改写过 admin-user.json 的弱密钥会被静默接受并用于派生 HMAC。
+	if err != nil || len(b) < 16 {
+		return nil, errors.New("密钥格式无效（至少 128 位）")
 	}
 	return b, nil
 }
@@ -84,27 +86,57 @@ func TOTPCode(secret string, now time.Time) (string, error) {
 	return totpAt(secret, now)
 }
 
-// VerifyTOTP 校验动态码，允许前后各一个时间窗的时钟偏差。
-func VerifyTOTP(secret, code string, now time.Time) bool {
+// ErrTOTPReplayed 表示该动态码的时间步已经被消费过（重放）。
+var ErrTOTPReplayed = errors.New("动态验证码已使用，请等待下一个")
+
+// VerifyTOTPStep 校验动态码，返回命中的时间步（Unix/30）。
+// 允许前后各一个时间窗的时钟偏差；调用方必须把返回的 step 持久化，
+// 并拒绝 step <= 上次已消费值 的请求（RFC 6238 §5.2）。
+func VerifyTOTPStep(secret, code string, now time.Time) (int64, bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != totpDigits {
-		return false
+		return 0, false
 	}
 	for _, c := range code {
 		if c < '0' || c > '9' {
-			return false
+			return 0, false
 		}
 	}
 	for _, offset := range []int{-1, 0, 1} {
-		want, err := totpAt(secret, now.Add(time.Duration(offset)*totpStep*time.Second))
+		at := now.Add(time.Duration(offset) * totpStep * time.Second)
+		want, err := totpAt(secret, at)
 		if err != nil {
-			return false
+			return 0, false
 		}
 		if subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
-			return true
+			return at.Unix() / totpStep, true
 		}
 	}
-	return false
+	return 0, false
+}
+
+// VerifyTOTP 只做校验、不返回时间步。
+// 保留它是为了不破坏既有调用；需要防重放的路径必须用 VerifyTOTPStep。
+func VerifyTOTP(secret, code string, now time.Time) bool {
+	_, ok := VerifyTOTPStep(secret, code, now)
+	return ok
+}
+
+// MarkTOTPStep 把时间步记为已消费并落盘（原子替换，0600）。
+// 返回 ErrTOTPReplayed 表示该步已用过，调用方应拒绝本次登录。
+func MarkTOTPStep(path string, current *User, step int64) (*User, error) {
+	if current == nil {
+		return nil, errors.New("管理员账号未初始化")
+	}
+	if step <= current.LastTOTPStep {
+		return nil, ErrTOTPReplayed
+	}
+	next := *current
+	next.LastTOTPStep = step
+	if err := saveUser(path, &next); err != nil {
+		return nil, err
+	}
+	return &next, nil
 }
 
 // UpdateTOTP 保存 TOTP 密钥与启用状态并落盘。
@@ -127,7 +159,11 @@ func UpdateTOTP(path string, current *User, secret string, enabled bool) (*User,
 	}
 	// 仅保存尚未启用的待确认密钥时不换会话版本：用户可能先扫码再确认，
 	// 中间还有一次页面请求，提前失效会让流程自己把自己登出。
-	if next.TOTPEnabled != current.TOTPEnabled {
+	// 启用/停用要换版本；**已启用状态下轮换密钥也必须换**：
+	// 否则旧密钥派生的动态码仍能登录，等于轮换没生效。
+	// 比较归一化后的值，避免大小写/空格差异造成"看起来换了其实没换"的误判。
+	if next.TOTPEnabled != current.TOTPEnabled ||
+		(next.TOTPEnabled && !strings.EqualFold(strings.TrimSpace(next.TOTPSecret), strings.TrimSpace(current.TOTPSecret))) {
 		next.UpdatedAt = nextVersion(current.UpdatedAt)
 	}
 	if err := saveUser(path, &next); err != nil {

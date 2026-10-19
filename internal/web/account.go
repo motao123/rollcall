@@ -17,11 +17,60 @@ type accountProfileRequest struct {
 	Username        string `json:"username"`
 	Email           string `json:"email"`
 	CurrentPassword string `json:"currentPassword"`
+	// Code 是启用两步验证后必须提供的动态码；未启用时忽略。
+	Code string `json:"code"`
 }
 
 type accountPasswordRequest struct {
 	CurrentPassword string `json:"currentPassword"`
 	NewPassword     string `json:"newPassword"`
+	// Code 是启用两步验证后必须提供的动态码；未启用时忽略。
+	Code string `json:"code"`
+}
+
+// TOTP 校验的两类失败：没填 vs 填错/重放。
+// 前者不应计入限速（用户只是还没填），后者必须计入。
+var (
+	errTOTPRequired = errors.New("请输入动态验证码")
+	errTOTPInvalid  = errors.New("动态验证码错误")
+)
+
+// consumeTOTPLocked 校验并消费一次性动态码，返回更新后的用户。
+//
+// ★ 必须在持有 s.accountMu 时调用：登录与账号修改共用这把锁，
+// 否则两个并发请求可以用同一个动态码各拿到一次授权（重放）。
+// 账号未启用 TOTP 时直接返回原用户（无操作）。
+func (s *Server) consumeTOTPLocked(current *auth.User, code string) (*auth.User, error) {
+	if current == nil || !current.TOTPEnabled {
+		return current, nil
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, errTOTPRequired
+	}
+	step, ok := auth.VerifyTOTPStep(current.TOTPSecret, code, time.Now())
+	if !ok {
+		return nil, errTOTPInvalid
+	}
+	updated, err := auth.MarkTOTPStep(s.userPath, current, step)
+	if err != nil {
+		return nil, err
+	}
+	s.setUser(updated)
+	return updated, nil
+}
+
+// failTOTP 把 consume 的错误映射为响应；已计入限速的状态码用 403。
+func failTOTP(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errTOTPRequired):
+		fail(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, auth.ErrTOTPReplayed):
+		// 403 会被 accountChange 计入失败：重放尝试属于攻击行为。
+		fail(w, http.StatusForbidden, err.Error())
+	default:
+		fail(w, http.StatusForbidden, "动态验证码错误")
+	}
 }
 
 // currentUser 返回账号快照。User 一经发布不再原地修改，
@@ -68,7 +117,14 @@ func (s *Server) handleAdminAccount(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusForbidden, "当前密码不正确")
 			return
 		}
-		updated, err := auth.UpdateProfile(s.userPath, current, username, email)
+		// 启用两步验证后，改用户名/邮箱也必须过第二因子：
+		// 只验密码的话，被窃会话 + 密码就能完成账号接管。
+		cur, err := s.consumeTOTPLocked(current, in.Code)
+		if err != nil {
+			failTOTP(w, err)
+			return
+		}
+		updated, err := auth.UpdateProfile(s.userPath, cur, username, email)
 		if err != nil {
 			log.Printf("保存管理员账号失败: %v", err)
 			fail(w, http.StatusInternalServerError, "保存账号失败: "+err.Error())
@@ -101,7 +157,13 @@ func (s *Server) handleAdminAccountPassword(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		viaSession := s.sessionOK(r)
-		updated, err := auth.UpdatePassword(s.userPath, current, in.CurrentPassword, in.NewPassword)
+		// 改密码是最关键的账号接管路径，启用 2FA 后必须验证动态码。
+		cur, err := s.consumeTOTPLocked(current, in.Code)
+		if err != nil {
+			failTOTP(w, err)
+			return
+		}
+		updated, err := auth.UpdatePassword(s.userPath, cur, in.CurrentPassword, in.NewPassword)
 		switch {
 		case errors.Is(err, auth.ErrPasswordMismatch):
 			fail(w, http.StatusForbidden, err.Error())
@@ -246,12 +308,13 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 			log.Printf("管理员已启用 TOTP user=%s ip=%s", updated.Username, clientIP(r, s.trustedProxies))
 			s.accountResponse(w, r, updated, true)
 		case "disable":
-			if current.TOTPEnabled && !auth.VerifyTOTP(current.TOTPSecret, in.Code, time.Now()) {
-				// 同上：403 才会被 accountChange 计入限速。
-				fail(w, http.StatusForbidden, "动态验证码错误，无法停用")
+			// 停用同样消费一次性动态码：否则同一个码可以被反复用来试停用。
+			cur, err := s.consumeTOTPLocked(current, in.Code)
+			if err != nil {
+				failTOTP(w, err)
 				return
 			}
-			updated, err := auth.UpdateTOTP(s.userPath, current, "", false)
+			updated, err := auth.UpdateTOTP(s.userPath, cur, "", false)
 			if err != nil {
 				fail(w, http.StatusInternalServerError, "停用 TOTP 失败: "+err.Error())
 				return
