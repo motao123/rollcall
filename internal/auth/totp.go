@@ -77,6 +77,13 @@ func totpAt(secret string, t time.Time) (string, error) {
 	return fmt.Sprintf("%06d", code%1_000_000), nil
 }
 
+// TOTPCode 计算指定时刻的动态码。
+// 供测试与运维排查（例如核对手机与服务端时间是否一致）使用：
+// 算法本身只依赖密钥与时间，导出它不会削弱安全性。
+func TOTPCode(secret string, now time.Time) (string, error) {
+	return totpAt(secret, now)
+}
+
 // VerifyTOTP 校验动态码，允许前后各一个时间窗的时钟偏差。
 func VerifyTOTP(secret, code string, now time.Time) bool {
 	code = strings.TrimSpace(code)

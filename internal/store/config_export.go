@@ -170,6 +170,12 @@ func (s *Store) ImportConfig(raw []byte) error {
 	s.notifySilent = silences
 	s.renewals = renewals
 	for k, v := range settings {
+		// ★ 与 ExportConfig 的排除规则保持对称：会话吊销表属于运行态安全状态，
+		// 备份里出现该键（旧版本导出、手工构造、或其它实例）都不能覆盖本机值，
+		// 否则导入 + 重启会让已登出的旧 Cookie 重新可用。
+		if k == "revoked_sessions" {
+			continue
+		}
 		s.settings[k] = v
 	}
 	// 清理不再存在的节点运行态数据，避免导出→导入后旧节点幽灵般残留。

@@ -108,7 +108,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, s.trustedProxies)
 	// 登录端点的 2xx 不参与通用清零（否则探测 /api/auth/session 就能
 	// 重置爆破计数），成功登录在这里显式清零。
-	s.limiter.succeed(rateLimitKey(ip) + "|" + authLogin.String())
+	//
+	// ★ 用 resetIP 而不是只清 authLogin：会话过期产生的 401 计在
+	// IP|readonly / IP|admin 等作用域上，只清 authLogin 会让"重新登录"
+	// 无法解除那些封禁，用户登录成功却满屏 429（10 分钟内不可自愈）。
+	s.limiter.resetIP(ip)
 	log.Printf("面板登录成功 user=%s ip=%s", u.Username, ip)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,

@@ -158,6 +158,24 @@ func (l *authFailureLimiter) succeed(ip string) {
 	l.mu.Unlock()
 }
 
+// resetIP 清除该来源在**所有作用域**下的失败计数与封禁。
+//
+// ★ 登录成功后必须调用，不能只 succeed(authLogin)：
+// 中间件把任何 401 都记为失败，而"会话过期"也会返回 401。
+// SPA 首屏会并行拉 2–5 个受保护接口，会话过期时这些 401 全部落在
+// IP|readonly / IP|admin 等作用域上；累计到阈值后该 IP 被封 10 分钟。
+// 只清 authLogin 的话，用户重新登录成功仍然处处 429，且没有任何自愈路径。
+func (l *authFailureLimiter) resetIP(ip string) {
+	prefix := rateLimitKey(ip) + "|"
+	l.mu.Lock()
+	for k := range l.state {
+		if strings.HasPrefix(k, prefix) {
+			delete(l.state, k)
+		}
+	}
+	l.mu.Unlock()
+}
+
 // defaultTrustedProxies 是未显式配置时的唯一可信来源：仅本机回环。
 // 反向代理与面板同机时开箱可用；跨机代理必须用 -trusted-proxies 显式声明。
 // 不能把「私网」当作可信 —— 同 VPC 内任意主机都能伪造 XFF 绕过限速。

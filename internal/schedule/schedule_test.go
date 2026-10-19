@@ -109,3 +109,63 @@ func TestReportTickWritesDedupeMarkers(t *testing.T) {
 		t.Error("月报标记未写入")
 	}
 }
+
+// TestWeeklyReportKeyUsesISOYear 是回归：周报去重键必须用 ISO 年。
+//
+// 2024-12-30 是周一，属于 ISO 2025-W01，但日历年是 2024。
+// 用 now.Year() 会拼出 report.weekly.2024-W01，与 2024-01-01 那周的键相同，
+// 当周周报被判为"已发送"而静默跳过。
+func TestWeeklyReportKeyUsesISOYear(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.SetSetting("notify", `{"enabled":true,"channels":[],"reportWeekly":true,"reportHour":9}`)
+	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+
+	now := time.Date(2024, 12, 30, 9, 30, 0, 0, time.Local) // 周一，ISO 2025-W01
+	if now.Weekday() != time.Monday {
+		t.Fatalf("测试日期应为周一，实际 %s", now.Weekday())
+	}
+	isoYear, week := now.ISOWeek()
+	if isoYear == now.Year() {
+		t.Fatalf("测试日期应跨 ISO 年（ISO %d vs 日历年 %d）", isoYear, now.Year())
+	}
+	r.reportTick(now)
+
+	want := fmt.Sprintf("report.weekly.%d-W%02d", isoYear, week)
+	if st.GetSetting(want) == "" {
+		t.Errorf("缺少以 ISO 年构造的去重键 %q", want)
+	}
+	wrong := fmt.Sprintf("report.weekly.%d-W%02d", now.Year(), week)
+	if st.GetSetting(wrong) != "" {
+		t.Errorf("不应写入按日历年构造的键 %q（会与年初那周碰撞）", wrong)
+	}
+}
+
+// TestReportCatchUpAfterScheduledHour 是回归：
+// 进程可能在报告时刻没在运行（重启/升级/时钟跳变），
+// 用 Hour()== 判断会让整期报告静默丢失，与"当天内仍可补发"的约定不符。
+func TestReportCatchUpAfterScheduledHour(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.SetSetting("notify", `{"enabled":true,"channels":[],"reportDaily":true,"reportMonthly":true,"reportHour":9}`)
+	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+
+	// 11:30 才启动：日报应补发（当天只发一次）
+	late := time.Date(2026, 11, 2, 11, 30, 0, 0, time.Local)
+	r.reportTick(late)
+	if st.GetSetting("report.daily.2026-11-02") == "" {
+		t.Error("错过报告时刻后当天内应补发日报")
+	}
+
+	// 同一天再次触发不应重复（去重键生效）
+	before := len(st.Events(0))
+	r.reportTick(late.Add(time.Minute))
+	if got := len(st.Events(0)); got != before {
+		t.Errorf("同一天不应重复发送，事件数 %d → %d", before, got)
+	}
+
+	// 月报同理：1 日 11:30 触发仍应发送
+	monthly := time.Date(2026, 12, 1, 11, 30, 0, 0, time.Local)
+	r.reportTick(monthly)
+	if st.GetSetting("report.monthly.2026-12") == "" {
+		t.Error("错过报告时刻后当月 1 日内应补发月报")
+	}
+}

@@ -129,7 +129,10 @@ func (r *Runner) reportTick(now time.Time) {
 	if cfg == nil || !cfg.Enabled {
 		return
 	}
-	if cfg.ReportDaily && now.Hour() == cfg.ReportHour {
+	// 用 >= 而不是 ==：进程可能在报告时刻没在运行（重启/升级/时钟跳变），
+	// 用等号会让整期报告静默丢失，与"当天内仍可补发"的约定不符。
+	// 去重键保证一个周期只会真正入队一次。
+	if cfg.ReportDaily && now.Hour() >= cfg.ReportHour {
 		key := "report.daily." + now.Format("2006-01-02")
 		if r.st.GetSetting(key) == "" {
 			r.sendReport(cfg, "daily", now)
@@ -137,16 +140,19 @@ func (r *Runner) reportTick(now time.Time) {
 		}
 	}
 	// 周报在周一发送；ReportHour 之前不提前，错过整点后当天内仍可补发。
-	if cfg.ReportWeek && now.Weekday() == time.Monday && now.Hour() == cfg.ReportHour {
-		_, week := now.ISOWeek()
-		key := fmt.Sprintf("report.weekly.%d-W%02d", now.Year(), week)
+	if cfg.ReportWeek && now.Weekday() == time.Monday && now.Hour() >= cfg.ReportHour {
+		// ★ 必须用 ISOWeek 返回的 ISO 年，不能用日历年：
+		// 2024-12-30 属于 ISO 2025-W01，用 now.Year() 会算成 2024-W01，
+		// 与 2024-01-01 的键碰撞，导致当周周报被判为"已发送"而整周不发。
+		isoYear, week := now.ISOWeek()
+		key := fmt.Sprintf("report.weekly.%d-W%02d", isoYear, week)
 		if r.st.GetSetting(key) == "" {
 			r.sendReport(cfg, "weekly", now)
 			r.st.SetSetting(key, "1")
 		}
 	}
 	// 月报在每月 1 日发送；与日报同一时刻时两条独立入队。
-	if cfg.ReportMonth && now.Day() == 1 && now.Hour() == cfg.ReportHour {
+	if cfg.ReportMonth && now.Day() == 1 && now.Hour() >= cfg.ReportHour {
 		key := "report.monthly." + now.Format("2006-01")
 		if r.st.GetSetting(key) == "" {
 			r.sendReport(cfg, "monthly", now)

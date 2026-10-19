@@ -231,7 +231,10 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 			if !auth.VerifyTOTP(current.TOTPSecret, in.Code, time.Now()) {
-				fail(w, http.StatusBadRequest, "动态验证码错误，请确认手机时间准确")
+				// ★ 用 403 而不是 400：accountChange 只对 403 记失败。
+				// 用 400 时动态码错误落在 default: release 分支，计数永不增长，
+				// 拿到会话+当前密码即可无限穷举 6 位码把 2FA 关掉。
+				fail(w, http.StatusForbidden, "动态验证码错误，请确认手机时间准确")
 				return
 			}
 			updated, err := auth.UpdateTOTP(s.userPath, current, current.TOTPSecret, true)
@@ -244,7 +247,8 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 			s.accountResponse(w, r, updated, true)
 		case "disable":
 			if current.TOTPEnabled && !auth.VerifyTOTP(current.TOTPSecret, in.Code, time.Now()) {
-				fail(w, http.StatusBadRequest, "动态验证码错误，无法停用")
+				// 同上：403 才会被 accountChange 计入限速。
+				fail(w, http.StatusForbidden, "动态验证码错误，无法停用")
 				return
 			}
 			updated, err := auth.UpdateTOTP(s.userPath, current, "", false)
