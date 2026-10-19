@@ -184,6 +184,17 @@ body {
   flex-direction: column;
   gap: 8px;
 }
+.sidebar-foot .icon-btn {
+  width: 100%;
+  height: auto;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
 
 .main {
   min-width: 0;
@@ -840,6 +851,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .brand { justify-content: center; padding: 4px 0 16px; }
   .detail-grid { grid-template-columns: 1fr; }
   .sidebar-foot .btn-text { display: none; }
+  .sidebar-foot .icon-btn { justify-content: center; padding: 8px; }
 }
 
 @media (max-width: 720px) {
@@ -1384,7 +1396,7 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
 .queue-table { min-width: 900px; }
 .maint-table { min-width: 680px; }
 /* 空表不横向滚动，否则空状态文案会被最小宽度推到屏幕外。 */
-.table-wrap table:has(tbody .empty) { min-width: 0; }
+.table-wrap table:has(tbody .empty) { min-width: 0; table-layout: auto; }
 
 .tbar {
   display: inline-block;
