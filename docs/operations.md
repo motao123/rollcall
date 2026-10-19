@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.9.5
+make linux VERSION=v1.9.6
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -138,9 +138,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.9.5
-./rollsign sign -key /root/rollcall-update.key -version v1.9.5 \
-  -base-url https://updates.example.com/agent/v1.9.5 \
+make linux VERSION=v1.9.6
+./rollsign sign -key /root/rollcall-update.key -version v1.9.6 \
+  -base-url https://updates.example.com/agent/v1.9.6 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json
@@ -340,6 +340,15 @@ sudo systemctl start rollcall-server
 用环境变量完成首次初始化后，建议登录并改成自己的密码，然后清除
 `/etc/rollcall/server.env` 中的密码行——环境变量只在创建/重置时读取，
 正常启动不会覆盖已保存的哈希。
+
+日常修改无需停服：登录面板后进入「设置 → 管理员账号」：
+
+- 「编辑账号」可修改用户名与邮箱，保存时需输入当前密码；
+- 「修改密码」需当前密码 + 新密码（至少 12 位）并二次确认；
+- 两项操作都会提升会话版本：当前浏览器自动续签，其他设备与旧 Cookie 立即失效；
+- 账号变更串行执行并以 0600 原子写回 `admin-user.json`，文件内仍只有哈希。
+
+忘记密码或无法登录时，仍按上面的 `-reset-admin-password` 流程在服务端重置。
 
 ### 会话
 
@@ -563,7 +572,7 @@ curl -fsS http://127.0.0.1:19080/metrics \
 - [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`
 - [ ] `/healthz` 返回 `ok`，`/status` 可匿名访问且不含主机名/IP/价格
 - [ ] 目标节点在线，30–60 秒内有新采样
-- [ ] 可用用户名与邮箱分别登录面板；错误密码被拒绝；刷新与重启服务后登录态保持；退出后回到登录页
+- [ ] 可用用户名与邮箱分别登录面板；错误密码被拒绝；设置页修改账号/密码需当前密码，改后当前浏览器续签、其他设备旧会话失效；刷新与重启服务后登录态保持；退出后回到登录页
 - [ ] 管理令牌 API 与 `/metrics` 抓取仍可用，`data/admin.token` 权限为 0600
 - [ ] 已配置备份任务，且实际恢复演练过一次
 - [ ] 管理员密码已存入密码管理器，非默认/弱口令；`admin-user.json` 中只有哈希

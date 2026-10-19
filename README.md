@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.9.5**（`./rollcall-server -version` 可查）。
+当前版本 **v1.9.6**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -377,7 +377,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.5`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.6`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -439,7 +439,8 @@ sudo journalctl -u rollcall-server -n 50 | grep '初始管理员密码'
 ```
 
 打开 `http://127.0.0.1:19080`（或反代域名），输入用户名/邮箱与密码登录。
-登录后可在「设置 → 管理员账号」查看当前账号并退出登录。
+登录后可在「设置 → 管理员账号」直接编辑用户名/邮箱、修改密码或退出登录。
+保存前必须输入当前密码；修改成功后当前浏览器自动续签，其他设备上的旧会话立即失效。
 
 > 环境变量只用于**首次创建**账号。建议登录后立即按下方重置流程换成自己的强密码，
 > 然后删除 `/etc/rollcall/server.env` 中的密码行（单元使用 `EnvironmentFile=-`，
@@ -672,6 +673,8 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | POST | `/api/auth/login` | `{"identifier":"用户名或邮箱","password":"..."}`；成功写入 HttpOnly 会话 Cookie |
 | GET | `/api/auth/session` | 返回 `{authenticated,user?,expiresAt?}`；未登录也是 200 |
 | POST | `/api/auth/logout` | 清除会话 Cookie（幂等） |
+| POST | `/api/admin/account` | `{username,email,currentPassword}`；修改资料并续签当前会话 |
+| POST | `/api/admin/account/password` | `{currentPassword,newPassword}`；修改密码并续签当前会话 |
 
 仪表盘只读接口（包含主机名、内核、服务商、价格、到期日等资产信息，不再匿名开放）：
 
@@ -748,7 +751,7 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 构建机
-make linux VERSION=v1.9.5
+make linux VERSION=v1.9.6
 scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
 ```
 
@@ -980,14 +983,15 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十一、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.5）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.6）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.5、active + enabled |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.6、active + enabled |
 | 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过 |
-| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.4 → v1.9.5，配置未改动，`.prev` 保留 v1.9.4；分发目录同步更新 amd64/arm64 二进制 |
-| Agent 版本上报 | `X-Agent-Version` 上报后管理 API 显示 v1.9.5 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion` |
+| 面板账号 | 设置页可直接修改用户名/邮箱与密码，均需当前密码确认；改后当前浏览器续签、其他设备旧会话立即失效；旧用户名/旧密码登录 401，新凭据可登录；`admin-user.json` 仍仅存 PBKDF2 哈希 |
+| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.5 → v1.9.6，配置未改动，`.prev` 保留 v1.9.5；分发目录同步更新 amd64/arm64 二进制 |
+| Agent 版本上报 | `X-Agent-Version` 上报后管理 API 显示 v1.9.6 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion` |
 | 会话吊销 | 退出登录后旧 Cookie 访问会话接口返回未登录、管理 API 401；重启控制端后旧 Cookie 仍处于吊销状态（吊销列表已持久化）；仅接受规范 base64 令牌，改写末位字符无法绕过吊销 |
 | 升级提示 UI | 概览、节点列表、设置页与详情页均显示「可升级」（临时实例模拟旧 Agent）；636px 宽无横向溢出，浏览器控制台无错误 |
 | 公开状态页 | `/status` 匿名可访问；13 个节点实测在线；1440px 三列 / 390px 单列均无横向溢出；浅色、深色、跟随系统切换正常 |

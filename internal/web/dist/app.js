@@ -1207,6 +1207,125 @@ function formData(form) {
   return o;
 }
 
+/* ---------------- 管理员账号 ---------------- */
+
+function refreshAccountCard() {
+  const u = state.user || {};
+  const name = u.username || 'admin';
+  const avatar = $('.account-avatar');
+  if (avatar) avatar.textContent = (name.trim()[0] || 'A').toUpperCase();
+  const nameEl = $('.account-name');
+  if (nameEl) nameEl.textContent = name;
+  const info = $('.account-info .field-hint');
+  if (info) info.textContent = `${u.email || '未设置邮箱'} · 会话有效期 7 天`;
+  updateUserMenu();
+}
+
+function applyAccountResponse(res) {
+  if (res && res.user) state.user = res.user;
+  refreshAccountCard();
+}
+
+function showAccountDialog() {
+  const u = state.user || {};
+  const dlg = openDialog('编辑管理员账号', `
+    <p class="modal-sub">保存后当前浏览器会自动续签会话，其他已登录设备需要重新登录。</p>
+    <form class="form-grid" id="accountForm">
+      <label class="field">
+        <span class="field-label">用户名 *</span>
+        <input type="text" name="username" value="${esc(u.username || '')}" required minlength="2" maxlength="32"
+          pattern="[A-Za-z0-9][A-Za-z0-9._-]{1,31}" autocomplete="username">
+        <span class="field-hint">2–32 位字母、数字、点、下划线或连字符</span>
+      </label>
+      <label class="field">
+        <span class="field-label">邮箱</span>
+        <input type="email" name="email" value="${esc(u.email || '')}" maxlength="254" autocomplete="email">
+        <span class="field-hint">可选；填写后可用邮箱登录</span>
+      </label>
+      <label class="field">
+        <span class="field-label">当前密码 *</span>
+        <input type="password" name="currentPassword" required autocomplete="current-password">
+        <span class="field-hint">验证身份后才能保存</span>
+      </label>
+      <div class="form-actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">保存账号</button>
+      </div>
+    </form>`);
+  const form = dlg.querySelector('#accountForm');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(form);
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    btn.textContent = '保存中…';
+    try {
+      const res = await adminApi('/api/admin/account', {
+        method: 'POST',
+        body: JSON.stringify({ username: d.username, email: d.email, currentPassword: d.currentPassword }),
+      });
+      applyAccountResponse(res);
+      dlg.close();
+      toast('账号已更新');
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = '保存账号';
+      toast('保存失败：' + err.message, 'err');
+    }
+  };
+  form.querySelector('input[name=username]').focus();
+}
+
+function showPasswordDialog() {
+  const dlg = openDialog('修改管理员密码', `
+    <p class="modal-sub">密码至少 12 个字符。修改成功后其他设备上的会话立即失效，当前浏览器自动续签。</p>
+    <form class="form-grid" id="passwordForm">
+      <label class="field">
+        <span class="field-label">当前密码 *</span>
+        <input type="password" name="currentPassword" required autocomplete="current-password">
+      </label>
+      <label class="field">
+        <span class="field-label">新密码 *</span>
+        <input type="password" name="newPassword" required minlength="12" autocomplete="new-password">
+        <span class="field-hint">至少 12 个字符</span>
+      </label>
+      <label class="field">
+        <span class="field-label">确认新密码 *</span>
+        <input type="password" name="confirmPassword" required minlength="12" autocomplete="new-password">
+      </label>
+      <div class="form-actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">修改密码</button>
+      </div>
+    </form>`);
+  const form = dlg.querySelector('#passwordForm');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(form);
+    if (d.newPassword !== d.confirmPassword) {
+      toast('两次输入的新密码不一致', 'err');
+      return;
+    }
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    btn.textContent = '提交中…';
+    try {
+      const res = await adminApi('/api/admin/account/password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: d.currentPassword, newPassword: d.newPassword }),
+      });
+      applyAccountResponse(res);
+      dlg.close();
+      toast('密码已修改，其他设备需重新登录');
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = '修改密码';
+      toast('修改失败：' + err.message, 'err');
+    }
+  };
+  form.querySelector('input[name=currentPassword]').focus();
+}
+
 async function viewSettings() {
   if (!state.authenticated) {
     // 与首屏登录共用同一个全屏登录层：验证通过后 render() 会回到当前路由
@@ -1281,13 +1400,15 @@ async function viewSettings() {
           <div class="field-hint">${esc(accountEmail)} · 会话有效期 7 天</div>
         </div>
         <div class="account-actions">
+          <button class="btn" id="editAccountBtn" type="button">编辑账号</button>
+          <button class="btn" id="changePasswordBtn" type="button">修改密码</button>
           <a class="btn" href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
           <button class="btn danger" id="logoutBtn" type="button">退出登录</button>
         </div>
       </div>
       <p class="field-hint" style="margin:8px 0 0">
-        账号、邮箱与密码由服务端数据目录的 <code>admin-user.json</code> 管理；
-        忘记密码时可用 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
+        账号资料与密码可在此直接修改，保存时需验证当前密码；修改后当前浏览器自动续签，其他设备需重新登录。
+        忘记密码时可在服务端执行 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
       </p>
     </section>
 
@@ -1485,6 +1606,8 @@ async function viewSettings() {
 
   // 事件绑定
   $('#logoutBtn').onclick = doLogout;
+  $('#editAccountBtn').onclick = showAccountDialog;
+  $('#changePasswordBtn').onclick = showPasswordDialog;
 
   /* ---- 外观主题 ---- */
   const themeForm = $('#themeForm');

@@ -25,6 +25,9 @@ const (
 
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
 
+// ErrPasswordMismatch 表示确认身份时提供的当前密码不正确。
+var ErrPasswordMismatch = errors.New("当前密码不正确")
+
 // User 是面板唯一的管理员账号。
 type User struct {
 	Schema       int    `json:"schema"`
@@ -227,6 +230,65 @@ func LoadOrCreateUser(path, username, email, initialPassword string, reset bool)
 		return nil, false, "", err
 	}
 	return u, true, generatedPassword, nil
+}
+
+// UpdateProfile 更新用户名与邮箱并原子落盘，返回新的账号副本。
+//
+// 与改密一样递增 UpdatedAt：用户名参与会话校验，旧会话必须随之失效；
+// 调用方负责为当前浏览器续签会话。资料没有变化时不写盘、不换版本。
+func UpdateProfile(path string, current *User, username, email string) (*User, error) {
+	if current == nil {
+		return nil, errors.New("管理员账号未初始化")
+	}
+	next := *current
+	next.Username = strings.TrimSpace(username)
+	next.Email = strings.ToLower(strings.TrimSpace(email))
+	if err := ValidateUsername(next.Username); err != nil {
+		return nil, err
+	}
+	if err := ValidateEmail(next.Email); err != nil {
+		return nil, err
+	}
+	if next.Username == current.Username && next.Email == current.Email {
+		return current, nil
+	}
+	next.UpdatedAt = nextVersion(current.UpdatedAt)
+	if err := saveUser(path, &next); err != nil {
+		return nil, err
+	}
+	return &next, nil
+}
+
+// UpdatePassword 校验当前密码后更新哈希并原子落盘。
+// 密码错误返回 ErrPasswordMismatch，调用方据此记入失败限速。
+func UpdatePassword(path string, current *User, oldPassword, newPassword string) (*User, error) {
+	if current == nil {
+		return nil, errors.New("管理员账号未初始化")
+	}
+	if !VerifyPassword(current.PasswordHash, oldPassword) {
+		return nil, ErrPasswordMismatch
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return nil, err
+	}
+	next := *current
+	next.PasswordHash = hash
+	next.UpdatedAt = nextVersion(current.UpdatedAt)
+	if err := saveUser(path, &next); err != nil {
+		return nil, err
+	}
+	return &next, nil
+}
+
+// nextVersion 保证秒级会话版本严格递增：同一秒内连续修改
+// 也能让此前签发的令牌立即失效。
+func nextVersion(prev int64) int64 {
+	now := time.Now().Unix()
+	if now <= prev {
+		return prev + 1
+	}
+	return now
 }
 
 func generatePassword() (string, error) {

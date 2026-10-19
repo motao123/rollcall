@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/motao/rollcall/internal/auth"
 )
 
 const sessionCookieName = "rollcall_session"
@@ -29,10 +31,10 @@ func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if sess, ok := s.sessionUser(r); ok {
+	if sess, u, ok := s.sessionUserWithUser(r); ok {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"authenticated": true,
-			"user":          s.user.PublicInfo(),
+			"user":          u.PublicInfo(),
 			"expiresAt":     sess.Expires.Unix(),
 		})
 		return
@@ -47,7 +49,8 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if s.user == nil || s.sessions == nil {
+	u := s.currentUser()
+	if u == nil || s.sessions == nil {
 		fail(w, http.StatusServiceUnavailable, "面板登录未启用")
 		return
 	}
@@ -74,12 +77,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
-	if !s.user.Authenticate(in.Identifier, in.Password) {
+	if !u.Authenticate(in.Identifier, in.Password) {
 		fail(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
-	token, exp, err := s.sessions.Issue(s.user.Username, s.user.SessionVersion())
+	token, exp, err := s.sessions.Issue(u.Username, u.SessionVersion())
 	if err != nil {
 		log.Printf("签发面板会话失败: %v", err)
 		fail(w, http.StatusInternalServerError, "登录失败，请稍后再试")
@@ -90,10 +93,10 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// 登录端点的 2xx 不参与通用清零（否则探测 /api/auth/session 就能
 	// 重置爆破计数），成功登录在这里显式清零。
 	s.limiter.succeed(rateLimitKey(ip) + "|" + authLogin.String())
-	log.Printf("面板登录成功 user=%s ip=%s", s.user.Username, ip)
+	log.Printf("面板登录成功 user=%s ip=%s", u.Username, ip)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
-		"user":          s.user.PublicInfo(),
+		"user":          u.PublicInfo(),
 		"expiresAt":     exp.Unix(),
 	})
 }
@@ -182,24 +185,32 @@ func (s *Server) sessionRevoked(token string) bool {
 }
 
 func (s *Server) sessionUser(r *http.Request) (sess authSession, ok bool) {
-	if s.user == nil || s.sessions == nil {
-		return authSession{}, false
+	sess, _, ok = s.sessionUserWithUser(r)
+	return sess, ok
+}
+
+// sessionUserWithUser 同时返回校验通过的账号快照，
+// 避免调用方再取一次指针时读到刚被替换的新账号。
+func (s *Server) sessionUserWithUser(r *http.Request) (sess authSession, u *auth.User, ok bool) {
+	u = s.currentUser()
+	if u == nil || s.sessions == nil {
+		return authSession{}, nil, false
 	}
 	c, err := r.Cookie(sessionCookieName)
 	if err != nil || c.Value == "" {
-		return authSession{}, false
+		return authSession{}, nil, false
 	}
 	got, ok := s.sessions.Verify(c.Value)
 	if !ok {
-		return authSession{}, false
+		return authSession{}, nil, false
 	}
-	if !strings.EqualFold(got.Username, s.user.Username) || got.Version != s.user.SessionVersion() {
-		return authSession{}, false
+	if !strings.EqualFold(got.Username, u.Username) || got.Version != u.SessionVersion() {
+		return authSession{}, nil, false
 	}
 	if s.sessionRevoked(c.Value) {
-		return authSession{}, false
+		return authSession{}, nil, false
 	}
-	return authSession{Username: got.Username, Expires: got.Expires}, true
+	return authSession{Username: got.Username, Expires: got.Expires}, u, true
 }
 
 func (s *Server) sessionOK(r *http.Request) bool {

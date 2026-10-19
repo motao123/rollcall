@@ -45,12 +45,20 @@ type Server struct {
 	authUser   string
 	authPass   string
 	user       *auth.User
+	userPath   string
 	sessions   *auth.Sessions
 	panelLink  string
 	cnyRate    float64
 	limiter    *authFailureLimiter
 	outbox     *outbox.Manager
 	notifyErr  error
+
+	// userMu 保护 user 指针：账号修改时整体替换副本，读方拿到指针后
+	// 可安全使用（User 一经发布不再原地修改）。
+	userMu sync.RWMutex
+	// accountMu 串行化「校验当前密码 + 落盘 + 替换指针」，
+	// 避免两个并发修改各自基于旧账号互相覆盖。
+	accountMu sync.Mutex
 
 	// trustedProxies 是允许提交 X-Forwarded-For 的反向代理网段。
 	// 为空时只信任回环（见 defaultTrustedProxies）。
@@ -81,6 +89,7 @@ type Config struct {
 	AuthUser   string // Basic Auth 用户名（为空则不启用）
 	AuthPass   string
 	User       *auth.User      // 面板管理员账号；nil 时仅管理令牌可用
+	UserPath   string          // admin-user.json 路径；为空则不允许在线修改账号
 	Sessions   *auth.Sessions  // 面板会话签名器
 	PanelLink  string          // 面板对外地址，拼进通知正文
 	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
@@ -102,7 +111,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 	}
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
-		user: cfg.User, sessions: cfg.Sessions,
+		user: cfg.User, userPath: cfg.UserPath, sessions: cfg.Sessions,
 		panelLink: cfg.PanelLink, cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
@@ -243,6 +252,10 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
 		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
+		// 管理员账号资料与密码：除会话/令牌外还要求当前密码，
+		// 防止被窃取的会话直接接管账号。
+		{"/api/admin/account", authAdmin, http.HandlerFunc(s.handleAdminAccount)},
+		{"/api/admin/account/password", authAdmin, http.HandlerFunc(s.handleAdminAccountPassword)},
 		{"/api/admin/theme", authAdmin, http.HandlerFunc(s.handleAdminTheme)},
 		{"/api/admin/test-notify", authAdmin, http.HandlerFunc(s.handleTestNotify)},
 		{"/api/admin/rules", authAdmin, http.HandlerFunc(s.handleAdminRules)},

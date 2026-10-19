@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -277,4 +278,80 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func TestUpdateProfileAndPassword(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin-user.json")
+	const oldPass = "initial-password-123"
+	u, _, _, err := LoadOrCreateUser(path, "admin", "Admin@Example.com", oldPass, false)
+	if err != nil {
+		t.Fatalf("创建管理员: %v", err)
+	}
+
+	if _, err := UpdateProfile(path, u, "x", ""); err == nil {
+		t.Fatal("过短用户名应被拒绝")
+	}
+	if _, err := UpdateProfile(path, u, "operator", "not-an-email"); err == nil {
+		t.Fatal("非法邮箱应被拒绝")
+	}
+
+	// 资料无变化时不写盘，也不更换会话版本。
+	if same, err := UpdateProfile(path, u, "admin", "ADMIN@example.com"); err != nil || same.SessionVersion() != u.SessionVersion() {
+		t.Fatalf("无变化资料不应换版本: same=%+v err=%v", same, err)
+	}
+
+	next, err := UpdateProfile(path, u, "operator", "Ops@Example.com")
+	if err != nil {
+		t.Fatalf("更新资料: %v", err)
+	}
+	if next.Username != "operator" || next.Email != "ops@example.com" {
+		t.Fatalf("资料未规范化: %+v", next)
+	}
+	if next.SessionVersion() <= u.SessionVersion() {
+		t.Fatal("更新资料后会话版本必须递增")
+	}
+	if u.Username != "admin" {
+		t.Fatal("更新应返回新副本，不能原地修改旧账号")
+	}
+	loaded, err := LoadUser(path)
+	if err != nil {
+		t.Fatalf("重新加载: %v", err)
+	}
+	if !loaded.Authenticate("operator", oldPass) || !loaded.Authenticate("ops@example.com", oldPass) {
+		t.Fatal("更新后应能用新用户名/邮箱与旧密码登录")
+	}
+
+	if _, err := UpdatePassword(path, loaded, "wrong-password-123", "new-password-456"); !errors.Is(err, ErrPasswordMismatch) {
+		t.Fatalf("错误当前密码应返回 ErrPasswordMismatch，实际 %v", err)
+	}
+	if _, err := UpdatePassword(path, loaded, oldPass, "short"); err == nil {
+		t.Fatal("过短新密码应被拒绝")
+	}
+
+	after, err := UpdatePassword(path, loaded, oldPass, "new-password-456")
+	if err != nil {
+		t.Fatalf("更新密码: %v", err)
+	}
+	if after.SessionVersion() <= loaded.SessionVersion() {
+		t.Fatal("改密后会话版本必须递增")
+	}
+	reloaded, err := LoadUser(path)
+	if err != nil {
+		t.Fatalf("重新加载: %v", err)
+	}
+	if reloaded.Authenticate("operator", oldPass) {
+		t.Fatal("改密后旧密码不应再有效")
+	}
+	if !reloaded.Authenticate("operator", "new-password-456") {
+		t.Fatal("改密后新密码应有效")
+	}
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("账号文件权限过宽: %v", fi.Mode().Perm())
+		}
+	}
 }

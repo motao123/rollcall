@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,9 +19,16 @@ const testAdminPassword = "correct-horse-battery-staple"
 
 func newAuthWeb(t *testing.T, ttl time.Duration) (http.Handler, *auth.User) {
 	t.Helper()
+	h, _, u := newAuthWebAt(t, ttl)
+	return h, u
+}
+
+func newAuthWebAt(t *testing.T, ttl time.Duration) (http.Handler, string, *auth.User) {
+	t.Helper()
 	dir := t.TempDir()
+	userPath := filepath.Join(dir, "admin-user.json")
 	u, created, generated, err := auth.LoadOrCreateUser(
-		filepath.Join(dir, "admin-user.json"),
+		userPath,
 		"imotao", "Login@Example.com", testAdminPassword, false)
 	if err != nil {
 		t.Fatalf("创建测试管理员失败: %v", err)
@@ -35,9 +43,10 @@ func newAuthWeb(t *testing.T, ttl time.Duration) (http.Handler, *auth.User) {
 	srv := New(store.New(dir), nil, nil, Config{
 		AdminToken: "web-test-admin-token-123456",
 		User:       u,
+		UserPath:   userPath,
 		Sessions:   sessions,
 	})
-	return srv.Handler(), u
+	return srv.Handler(), userPath, u
 }
 
 func doAuthReq(h http.Handler, method, path, ip, body string, headers map[string]string, cookie *http.Cookie) *httptest.ResponseRecorder {
@@ -265,5 +274,127 @@ func TestAuthLoginSuccessResetsFailures(t *testing.T) {
 		if w := loginReq(h, ip, "imotao", "wrong-password-123"); w.Code != http.StatusUnauthorized {
 			t.Fatalf("成功登录后失败计数应清零，第 %d 次实际 %d", i+1, w.Code)
 		}
+	}
+}
+
+// TestAdminAccountUpdateFlow 覆盖在线改账号/改密码：当前密码确认、
+// CSRF 头、资料持久化、旧会话失效与当前会话续签。
+func TestAdminAccountUpdateFlow(t *testing.T) {
+	h, userPath, _ := newAuthWebAt(t, time.Hour)
+
+	login := loginReq(h, "10.20.0.1", "imotao", testAdminPassword)
+	if login.Code != http.StatusOK {
+		t.Fatalf("登录失败: %d %s", login.Code, login.Body.String())
+	}
+	cookie := findSessionCookie(t, login)
+
+	post := func(path, body, ip string, headers map[string]string, c *http.Cookie) *httptest.ResponseRecorder {
+		hdr := map[string]string{"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"}
+		for k, v := range headers {
+			hdr[k] = v
+		}
+		return doAuthReq(h, http.MethodPost, path, ip, body, hdr, c)
+	}
+
+	if w := doAuthReq(h, http.MethodPost, "/api/admin/account", "10.20.0.2",
+		`{"username":"operator","email":"","currentPassword":"`+testAdminPassword+`"}`,
+		map[string]string{"Content-Type": "application/json"}, nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录修改账号应 401，实际 %d", w.Code)
+	}
+	if w := doAuthReq(h, http.MethodPost, "/api/admin/account", "10.20.0.3",
+		`{"username":"operator","email":"","currentPassword":"`+testAdminPassword+`"}`,
+		map[string]string{"Content-Type": "application/json"}, cookie); w.Code != http.StatusForbidden {
+		t.Fatalf("缺少同源头的会话写操作应 403，实际 %d", w.Code)
+	}
+	if w := post("/api/admin/account",
+		`{"username":"operator","email":"","currentPassword":"wrong-password-123"}`, "10.20.0.4", nil, cookie); w.Code != http.StatusForbidden {
+		t.Fatalf("当前密码错误应 403，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if w := post("/api/admin/account",
+		`{"username":"x","email":"","currentPassword":"`+testAdminPassword+`"}`, "10.20.0.5", nil, cookie); w.Code != http.StatusBadRequest {
+		t.Fatalf("非法用户名应 400，实际 %d", w.Code)
+	}
+	if w := post("/api/admin/account",
+		`{"username":"operator","email":"","currentPassword":"`+testAdminPassword+`","extra":1}`, "10.20.0.6", nil, cookie); w.Code != http.StatusBadRequest {
+		t.Fatalf("未知字段应 400，实际 %d", w.Code)
+	}
+
+	w := post("/api/admin/account",
+		`{"username":"operator","email":"Ops@Example.com","currentPassword":"`+testAdminPassword+`"}`, "10.20.0.7", nil, cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("更新账号应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "passwordHash") {
+		t.Fatal("账号响应不应包含密码哈希")
+	}
+	var updated struct {
+		User map[string]string `json:"user"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if updated.User["username"] != "operator" || updated.User["email"] != "ops@example.com" {
+		t.Fatalf("更新后的账号信息不符: %v", updated.User)
+	}
+	newCookie := findSessionCookie(t, w)
+
+	// 旧会话版本已失效，当前浏览器换发的新 Cookie 可用。
+	if w := doAuthReq(h, http.MethodGet, "/api/auth/session", "10.20.0.8", "", nil, cookie); w.Code != http.StatusOK {
+		t.Fatalf("探测旧会话应 200，实际 %d", w.Code)
+	} else if authed, _ := decodeSession(t, w); authed {
+		t.Fatal("更新账号后旧会话应失效")
+	}
+	if w := doAuthReq(h, http.MethodGet, "/api/admin/nodes", "10.20.0.9", "", nil, cookie); w.Code != http.StatusUnauthorized {
+		t.Fatalf("旧会话访问管理接口应 401，实际 %d", w.Code)
+	}
+	if w := doAuthReq(h, http.MethodGet, "/api/auth/session", "10.20.0.10", "", nil, newCookie); w.Code != http.StatusOK {
+		t.Fatalf("续签会话应可用，实际 %d", w.Code)
+	} else if authed, user := decodeSession(t, w); !authed || user["username"] != "operator" {
+		t.Fatalf("续签会话信息不符: authed=%v user=%v", authed, user)
+	}
+	if w := loginReq(h, "10.20.0.11", "imotao", testAdminPassword); w.Code != http.StatusUnauthorized {
+		t.Fatalf("旧用户名不应再能登录，实际 %d", w.Code)
+	}
+	if w := loginReq(h, "10.20.0.12", "operator", testAdminPassword); w.Code != http.StatusOK {
+		t.Fatalf("新用户名应能用原密码登录，实际 %d", w.Code)
+	}
+
+	if w := post("/api/admin/account/password",
+		`{"currentPassword":"`+testAdminPassword+`","newPassword":"short"}`, "10.20.0.13", nil, newCookie); w.Code != http.StatusBadRequest {
+		t.Fatalf("过短新密码应 400，实际 %d", w.Code)
+	}
+	const newPassword = "new-admin-password-456"
+	w = post("/api/admin/account/password",
+		`{"currentPassword":"`+testAdminPassword+`","newPassword":"`+newPassword+`"}`, "10.20.0.14", nil, newCookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("修改密码应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	finalCookie := findSessionCookie(t, w)
+
+	if w := doAuthReq(h, http.MethodGet, "/api/admin/nodes", "10.20.0.15", "", nil, newCookie); w.Code != http.StatusUnauthorized {
+		t.Fatalf("改密前的会话应失效，实际 %d", w.Code)
+	}
+	if w := doAuthReq(h, http.MethodGet, "/api/auth/session", "10.20.0.16", "", nil, finalCookie); w.Code != http.StatusOK {
+		t.Fatalf("改密后的会话应可用，实际 %d", w.Code)
+	} else if authed, _ := decodeSession(t, w); !authed {
+		t.Fatal("改密后当前浏览器应保持登录")
+	}
+	if w := loginReq(h, "10.20.0.17", "operator", testAdminPassword); w.Code != http.StatusUnauthorized {
+		t.Fatalf("旧密码不应再能登录，实际 %d", w.Code)
+	}
+	if w := loginReq(h, "10.20.0.18", "operator", newPassword); w.Code != http.StatusOK {
+		t.Fatalf("新密码应能登录，实际 %d", w.Code)
+	}
+
+	// 落盘结果必须重启后仍然有效。
+	persisted, err := auth.LoadUser(userPath)
+	if err != nil {
+		t.Fatalf("重新加载账号文件: %v", err)
+	}
+	if persisted.Username != "operator" || persisted.Email != "ops@example.com" {
+		t.Fatalf("资料未持久化: %+v", persisted)
+	}
+	if persisted.Authenticate("operator", testAdminPassword) || !persisted.Authenticate("operator", newPassword) {
+		t.Fatal("密码未按预期持久化")
 	}
 }

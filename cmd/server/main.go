@@ -113,8 +113,9 @@ func main() {
 	if loginPassword == "" {
 		loginPassword = os.Getenv("ROLLCALL_ADMIN_PASSWORD")
 	}
+	userPath := filepath.Join(*dataDir, "admin-user.json")
 	panelUser, userCreated, generatedPwd, err := auth.LoadOrCreateUser(
-		filepath.Join(*dataDir, "admin-user.json"),
+		userPath,
 		loginUser, loginEmail, loginPassword, *resetAdminPassword)
 	if err != nil {
 		log.Fatalf("管理员账号配置失败: %v", err)
@@ -330,7 +331,7 @@ func main() {
 	}
 	ws := web.New(st, runner, engine, web.Config{
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass,
-		User: panelUser, Sessions: sessions, PanelLink: *panelLink,
+		User: panelUser, UserPath: userPath, Sessions: sessions, PanelLink: *panelLink,
 		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets, AgentDir: *agentDir,
 	})
 	if err := ws.NotifyErr(); err != nil {
