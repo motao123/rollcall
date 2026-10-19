@@ -98,6 +98,10 @@
   </main>
 </div>
 
+<!-- 登录层：全屏独立页，避免"侧栏还在、正文一块小卡"的半登录观感。
+     由 app.js 在 401 时填充并显示，验证通过后隐藏。 -->
+<div id="loginLayer" hidden></div>
+
 <script src="/app.js"></script>
 </body>
 </html>

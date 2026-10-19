@@ -1235,3 +1235,171 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
   .node-table .tspark { display: none; }
   .node-table th:nth-child(11), .node-table td:nth-child(11) { display: none; }
 }
+
+/* ============================================================
+   登录层 —— 全屏独立页（学习对象：kokoro 独立登录页 + 恢复命令提示、
+   CF-Server-Monitor 全屏遮罩 + 显隐切换 + 行内错误）
+   之前把令牌表单塞在后台骨架里：侧栏、搜索框都还在，看起来像"坏了的仪表盘"。
+   ============================================================ */
+
+/* 门禁激活时整个后台骨架退场，只留登录页 */
+body.auth-gate .app { display: none; }
+
+/* ★ 必须显式写 [hidden]：下面 #loginLayer 的 display:flex 会覆盖 UA 样式表的
+   [hidden]{display:none} —— 结果是"隐藏"的登录层仍然整屏绘制，把仪表盘盖成白屏。
+   与 .batch-bar[hidden] 是同一类陷阱，这是本项目第二次踩到。 */
+#loginLayer[hidden] { display: none; }
+
+#loginLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+  /* 角落一抹极淡的品牌色，避免大面积纯灰显得像错误页 */
+  background:
+    radial-gradient(1100px 460px at 72% -8%, var(--accent-soft), transparent 62%),
+    var(--bg);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  padding: 26px 26px 18px;
+}
+
+.login-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+.login-mark {
+  width: 38px; height: 38px; border-radius: 10px;
+  background: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.login-mark svg { width: 22px; height: 22px; }
+.login-brand-name { font-size: 16px; font-weight: 650; letter-spacing: .01em; line-height: 1.2; }
+.login-brand-sub { font-size: 10px; color: var(--fg-3); letter-spacing: .16em; text-transform: uppercase; }
+
+.login-title { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.login-sub { font-size: 12.5px; color: var(--fg-2); margin: 0 0 18px; }
+
+.login-warn {
+  margin: 0 0 14px; padding: 8px 11px; font-size: 12.5px;
+  color: var(--warn); background: var(--warn-soft); border-radius: 8px;
+}
+
+.login-error {
+  display: none;
+  margin: 0 0 12px; padding: 8px 11px; font-size: 12.5px;
+  color: var(--crit); background: var(--crit-soft); border-radius: 8px;
+}
+.login-error.show { display: block; }
+
+.login-field { display: block; margin-bottom: 14px; }
+.login-label { display: block; font-size: 12px; font-weight: 550; color: var(--fg-2); margin-bottom: 6px; }
+.login-input-wrap { position: relative; display: block; }
+.login-input {
+  width: 100%;
+  padding: 10px 42px 10px 12px;
+  font-size: 13.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: .02em;
+  color: var(--fg);
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.login-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.login-input::placeholder { font-family: inherit; letter-spacing: 0; color: var(--fg-3); }
+
+.login-eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 30px; height: 30px;
+  border: 0; background: transparent; color: var(--fg-3);
+  border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.login-eye:hover { color: var(--fg); background: var(--accent-soft); }
+
+.login-btn {
+  width: 100%; padding: 10px 14px;
+  font-size: 13.5px; font-weight: 600;
+  color: #fff; background: var(--accent);
+  border: 0; border-radius: 8px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: background .15s, transform .05s;
+}
+.login-btn:hover { background: var(--accent-2); }
+.login-btn:active { transform: translateY(1px); }
+.login-btn[disabled] { opacity: .65; cursor: default; }
+.login-btn .spin {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .35);
+  border-top-color: #fff;
+  animation: loginSpin .7s linear infinite;
+}
+@keyframes loginSpin { to { transform: rotate(360deg); } }
+
+.login-hint {
+  margin: 18px 0 0; padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--fg-2);
+}
+.login-hint code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: var(--panel-2);
+  padding: 1px 5px; border-radius: 4px;
+}
+.login-cmd {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 7px; padding: 7px 8px 7px 10px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+}
+.login-cmd .cmd {
+  flex: 1; min-width: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px; color: var(--fg-2);
+  white-space: nowrap; overflow-x: auto;
+}
+.login-copy {
+  flex: none; width: 26px; height: 26px;
+  border: 0; background: transparent; color: var(--fg-3);
+  border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.login-copy:hover { color: var(--accent); background: var(--accent-soft); }
+
+.login-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 18px; font-size: 11.5px; color: var(--fg-3);
+}
+.login-foot a { color: var(--fg-2); text-decoration: none; }
+.login-foot a:hover { color: var(--accent); }
+.login-foot button {
+  border: 0; background: none; color: var(--fg-3);
+  cursor: pointer; font-size: 11.5px; padding: 2px 6px; border-radius: 6px;
+}
+.login-foot button:hover { color: var(--fg); background: var(--accent-soft); }
+
+/* 令牌错误时的抖动反馈：重新触发动画用 reflow 技巧 */
+@keyframes loginShake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
+}
+.login-card.shake { animation: loginShake .5s both; }
+
+@media (max-width: 640px) {
+  #loginLayer { padding: 14px; }
+  .login-card { padding: 22px 18px 14px; }
+}

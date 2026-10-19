@@ -1187,25 +1187,10 @@ async function viewSettings() {
   const tok = adminToken();
 
   if (!tok) {
-    $('#view').innerHTML = `
-      <div class="panel panel-pad" style="max-width:560px">
-        <div class="section-title" style="margin-bottom:6px">需要管理令牌</div>
-        <p style="font-size:12.5px;color:var(--fg-2);margin:0 0 14px">
-          管理功能需要控制端生成的令牌。它位于服务端数据目录（启动参数
-          <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">-data</code>
-          指定，默认 <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>）。
-        </p>
-        <form id="tokForm" class="form-grid">
-          ${field('管理令牌', 'token', '', { type: 'password', placeholder: '粘贴 admin.token 内容', required: true })}
-          <div class="form-actions"><button class="btn primary" type="submit">保存令牌</button></div>
-        </form>
-      </div>`;
-    $('#tokForm').onsubmit = (e) => {
-      e.preventDefault();
-      lsSet(LS_TOKEN, LS_TOKEN_LEGACY, formData(e.target).token);
-      toast('令牌已保存');
-      viewSettings();
-    };
+    // 与首屏登录共用同一个全屏登录层：验证通过后 render() 会回到当前路由
+    // （hash 仍是 #/settings），自然落回设置页，不再维护第二份令牌表单。
+    state.authRequired = true;
+    renderTokenGate();
     return;
   }
 
@@ -2214,45 +2199,133 @@ function setActiveNav(route) {
   });
 }
 
+// 登录层关闭：恢复后台骨架并清空登录页内容。
+// ★ 必须同时清 innerHTML：留着旧表单会残留事件绑定与已输入的令牌。
+function closeLoginLayer() {
+  document.body.classList.remove('auth-gate');
+  const layer = document.getElementById('loginLayer');
+  if (layer) { layer.hidden = true; layer.innerHTML = ''; }
+}
+
+// renderTokenGate 渲染全屏登录页。
+// 学习 kokoro（独立登录页 + 「在 VPS 上执行这条命令找回」的恢复提示）与
+// CF-Server-Monitor（全屏遮罩、密码显隐、行内错误、提交加载态）：
+//  - 提交时先用 GET /api/admin/settings 验证令牌，无效就不进入仪表盘
+//    （旧行为是先存再进，首页 401 后又弹回来，像"登录失败但不知道为什么"）；
+//  - 401 与网络错误分开提示；
+//  - 找回提示直接给可复制的一条命令。
 function renderTokenGate() {
   state.authRequired = true;
   const had = !!adminToken();
-  $('#view').innerHTML = `
-    <div class="panel panel-pad" style="max-width:560px;margin:32px auto">
-      <div class="section-title" style="margin-bottom:6px">需要管理令牌</div>
-      <p style="font-size:12.5px;color:var(--fg-2);margin:0 0 14px">
-        仪表盘包含主机名、内核、服务商、价格等资产信息，需要控制端生成的令牌。
-        它位于服务端数据目录（默认
-        <code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">/opt/rollcall/data/admin.token</code>）。
-      </p>
-      ${had ? '<p class="field-hint" style="color:var(--warn);margin:0 0 12px">当前保存的令牌无效，请重新输入或清除。</p>' : ''}
-      <form id="gateForm" class="form-grid">
-        ${field('管理令牌', 'token', '', { type: 'password', placeholder: '粘贴 admin.token 内容', required: true })}
-        <div class="form-actions">
-          <button class="btn primary" type="submit">进入仪表盘</button>
-          ${had ? '<button class="btn" type="button" id="gateClear">清除令牌</button>' : ''}
+  const layer = document.getElementById('loginLayer');
+  document.body.classList.add('auth-gate');
+  layer.hidden = false;
+  layer.innerHTML = `
+    <div class="login-card" id="loginCard">
+      <div class="login-brand">
+        <div class="login-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15l4-6 3.5 4.5L14 9l7 8"/></svg>
         </div>
+        <div>
+          <div class="login-brand-name">Rollcall</div>
+          <div class="login-brand-sub">Fleet Monitor</div>
+        </div>
+      </div>
+      <h1 class="login-title">登录控制台</h1>
+      <p class="login-sub">仪表盘包含主机名、内核、服务商与价格等资产信息，需要管理令牌解锁。</p>
+      ${had ? '<div class="login-warn">当前保存的令牌无效或已被轮换，请重新输入。</div>' : ''}
+      <div class="login-error" id="loginError" role="alert"></div>
+      <form id="gateForm" autocomplete="off">
+        <label class="login-field">
+          <span class="login-label">管理令牌</span>
+          <span class="login-input-wrap">
+            <input class="login-input" id="gateToken" name="token" type="password"
+                   placeholder="粘贴 admin.token 内容" required spellcheck="false"
+                   autocomplete="off" aria-describedby="loginError">
+            <button type="button" class="login-eye" id="gateEye" title="显示 / 隐藏令牌" aria-label="显示或隐藏令牌">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/></svg>
+            </button>
+          </span>
+        </label>
+        <button class="login-btn" id="gateSubmit" type="submit">登 录</button>
       </form>
-      <p class="field-hint" style="margin-top:12px">
-        首次部署也可用 <code>#admin=&lt;令牌&gt;</code> 打开；令牌只保存在浏览器本地。
-      </p>
+      <div class="login-hint">
+        令牌在服务端数据目录（默认 <code>/opt/rollcall/data/admin.token</code>），到 VPS 上执行：
+        <div class="login-cmd">
+          <span class="cmd">cat /opt/rollcall/data/admin.token</span>
+          <button type="button" class="login-copy" id="gateCopy" title="复制命令" aria-label="复制找回命令">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+          </button>
+        </div>
+        也可用 <code>#admin=&lt;令牌&gt;</code> 直接打开；令牌只保存在浏览器本地。
+      </div>
+      <div class="login-foot">
+        <a href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
+        <button type="button" id="loginTheme">深浅色</button>
+      </div>
     </div>`;
-  $('#gateForm').onsubmit = (e) => {
-    e.preventDefault();
-    lsSet(LS_TOKEN, LS_TOKEN_LEGACY, formData(e.target).token);
-    state.authRequired = false;
-    state.data = {};
-    toast('令牌已保存');
-    render();
+
+  const inp = layer.querySelector('#gateToken');
+  const err = layer.querySelector('#loginError');
+  const card = layer.querySelector('#loginCard');
+  const btn = layer.querySelector('#gateSubmit');
+  inp.focus();
+
+  layer.querySelector('#gateEye').onclick = () => {
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+    inp.focus();
   };
-  if (had) {
-    $('#gateClear').onclick = () => {
-      lsDel(LS_TOKEN, LS_TOKEN_LEGACY);
+  layer.querySelector('#gateCopy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText('cat /opt/rollcall/data/admin.token');
+      toast('命令已复制');
+    } catch (e) {
+      toast('复制失败，请手动选择文本', 'err');
+    }
+  };
+  layer.querySelector('#loginTheme').onclick = () => $('#themeBtn').click();
+
+  const showErr = (msg) => {
+    err.textContent = msg;
+    err.classList.add('show');
+    // 重新触发抖动动画：先移除类、强制 reflow、再加回
+    card.classList.remove('shake');
+    void card.offsetWidth;
+    card.classList.add('shake');
+  };
+
+  $('#gateForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const tok = String(formData(e.target).token || '').trim();
+    if (!tok) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin" aria-hidden="true"></span>正在验证…';
+    err.classList.remove('show');
+    try {
+      // 先验证再进入：错误的令牌不该被保存，也不该闪进一个全是 401 的仪表盘。
+      const r = await fetch('/api/admin/settings', { headers: { Accept: 'application/json', 'X-Admin-Token': tok } });
+      if (r.status === 401) {
+        showErr('令牌无效或已被轮换，请核对后重试。');
+        return;
+      }
+      if (!r.ok) {
+        showErr('服务端返回 HTTP ' + r.status + '，请稍后再试。');
+        return;
+      }
+      lsSet(LS_TOKEN, LS_TOKEN_LEGACY, tok);
       state.authRequired = false;
       state.data = {};
+      closeLoginLayer();
+      toast('已登录');
       render();
-    };
-  }
+    } catch (ex) {
+      showErr('无法连接服务端：' + ex.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '登 录';
+    }
+  };
+
   $('#liveText').textContent = '需要令牌';
 }
 
@@ -2261,6 +2334,9 @@ async function render() {
     renderTokenGate();
     return;
   }
+  // 任何一次成功渲染都意味着鉴权已通过：确保登录层退场
+  // （令牌可能在设置页被更换/清除，或通过 #admin= 引导进入）。
+  closeLoginLayer();
   const hash = location.hash.replace(/^#\/?/, '') || 'overview';
   const [route, param] = hash.split('/');
   state.route = route;
