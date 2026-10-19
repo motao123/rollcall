@@ -15,7 +15,10 @@ type Node struct {
 	Price    float64 `json:"price"`    // 年付续费价格（月成本按 /12 估算）
 	Currency string  `json:"currency"` // USD / CNY
 	Weight   int     `json:"weight"`   // 排序权重，越小越靠前
-	Token    string  `json:"-"`        // 上报凭证，永不下发给前端
+	// AgentVersion 是 Agent 最近一次上报的版本，由上报请求头写入，
+	// 台账 API 不能修改；用于面板提示落后的 Agent。
+	AgentVersion string `json:"agentVersion,omitempty"`
+	Token        string `json:"-"` // 上报凭证，永不下发给前端
 }
 
 // HostInfo 是节点硬件与系统静态信息，由 Agent 首次上报后缓存。
@@ -374,6 +377,9 @@ type NodeView struct {
 	LastSeen int64    `json:"lastSeen"`
 	Alerts   int      `json:"alerts"`
 	Spark    []Point  `json:"spark"` // 首页迷你曲线
+
+	AgentVersion  string `json:"agentVersion,omitempty"`
+	AgentOutdated bool   `json:"agentOutdated,omitempty"`
 }
 
 // NodeMeta 从台账条目复制视图所需的字段，调用方再补齐监控状态。

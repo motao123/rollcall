@@ -245,6 +245,9 @@ func main() {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Node-Token", cfg.Token)
+		// 用请求头而不是 JSON 字段：旧服务端启用了 DisallowUnknownFields，
+		// 加字段会让先升级 Agent 的节点整份上报被拒。
+		req.Header.Set("X-Agent-Version", version.Version)
 
 		resp, err := client.Do(req)
 		if err != nil {

@@ -247,13 +247,15 @@ function nodeCard(n) {
   const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
   const expireBadge = days != null && days <= 30
     ? `<span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + ' 天'}</span>` : '';
+  const agentBadge = n.agentOutdated
+    ? `<span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : '';
 
   return `<article class="node-card ${cardCls} ${n.alerts > 0 ? 'alerting' : ''}" data-node="${esc(n.id)}">
     <div class="nc-head">
       <span class="dot ${st.tone}"></span>
       <span class="nc-name">${esc(n.name)}</span>
       <span class="nc-tag">${esc(n.provider || '—')}</span>
-      ${expireBadge}
+      ${expireBadge}${agentBadge}
       <span class="nc-status">${st.text}</span>
     </div>
     <div class="nc-bars">
@@ -382,7 +384,7 @@ async function viewOverview() {
               const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
               return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
             <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
-            <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}</td>
+            <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
             <td>${esc(n.region || '—')}</td>
             <td style="font-size:11.5px">${esc(n.host?.os || '—')}</td>
             <td class="num">${tbar(cpu)}</td>
@@ -451,7 +453,7 @@ async function viewNodes() {
           return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
             <td><input type="checkbox" class="row-sel" data-id="${esc(n.id)}" aria-label="选择 ${esc(n.name)}"></td>
             <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
-            <td class="strong">${esc(n.name)}</td>
+            <td class="strong">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
             <td>${esc(n.provider || '—')}</td>
             <td>${esc(n.region || '—')}</td>
             <td style="font-size:11.5px">${esc(n.host?.os || '—')}</td>
@@ -637,6 +639,7 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">运行时长</span><span class="info-v mono">${hasData ? dur(last.uptime) : '—'}</span></div>
             <div class="info-row"><span class="info-k">TCP 连接</span><span class="info-v mono">${hasData ? last.tcpConn || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${hasData ? last.procs || 0 : '—'}</span></div>
+            <div class="info-row"><span class="info-k">Agent 版本</span><span class="info-v mono">${esc(n.agentVersion || '—')}${detail.agentOutdated ? ' <span class="badge warn">可升级</span>' : ''}</span></div>
             <div class="info-row"><span class="info-k">最后上报</span><span class="info-v">${ago(detail.lastSeen)}</span></div>
           </div>
         </div>
@@ -1231,6 +1234,7 @@ async function viewSettings() {
     chans = st.channels || [];
     defs = st.defs || [];
     state.panelLink = st.panelLink || '';
+    state.serverVersion = st.version || '';
   } catch (e) {
     if (e.status === 401) return;
     loadErr = e.message;
@@ -1261,6 +1265,8 @@ async function viewSettings() {
   const accountName = account.username || 'admin';
   const accountEmail = account.email || '未设置邮箱';
   const accountInitial = accountName.slice(0, 1).toUpperCase();
+  const serverVersion = state.serverVersion || '';
+  const panelBase = (state.panelLink || location.origin).replace(/\/+$/, '');
 
   $('#view').innerHTML = `
     <section class="section">
@@ -1322,21 +1328,29 @@ async function viewSettings() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">节点管理</h2>
-        <span class="section-meta">${nodes.length} 台</span>
+        <span class="section-meta">${nodes.length} 台${serverVersion ? ' · 控制端 ' + esc(serverVersion) : ''}</span>
       </div>
       <div class="table-wrap" style="margin-bottom:12px"><table>
-        <thead><tr><th>名称</th><th>服务商</th><th>位置</th><th>分组</th><th>到期</th><th class="num">操作</th></tr></thead>
+        <thead><tr><th>名称</th><th>服务商</th><th>位置</th><th>分组</th><th>到期</th><th>Agent</th><th class="num">操作</th></tr></thead>
         <tbody>${nodes.map((n) => `<tr>
           <td class="strong">${esc(n.name)}</td>
           <td>${esc(n.provider || '—')}</td>
           <td>${esc(n.region || '—')}</td>
           <td>${esc(n.group || '—')}</td>
           <td class="mono">${esc(n.expireAt || '—')}</td>
+          <td>${n.agentVersion
+            ? `<span class="mono">${esc(n.agentVersion)}</span>${n.agentOutdated ? ` <span class="badge warn" title="低于控制端 ${esc(serverVersion)}">可升级</span>` : ''}`
+            : '<span style="color:var(--fg-3)">—</span>'}</td>
           <td class="num"><button class="btn tiny" data-agent-node="${esc(n.id)}">接入</button>
             <button class="btn tiny" data-edit-node="${esc(n.id)}">编辑</button>
             <button class="btn tiny danger" data-del-node="${esc(n.id)}">删除</button></td>
-        </tr>`).join('') || `<tr><td colspan="6"><div class="empty">暂无节点</div></td></tr>`}</tbody>
+        </tr>`).join('') || `<tr><td colspan="7"><div class="empty">暂无节点</div></td></tr>`}</tbody>
       </table></div>
+      <p class="field-hint" style="margin:0 0 12px">
+        Agent 版本低于控制端时会标记「可升级」。在目标节点执行
+        <code>curl -fsSL ${esc(panelBase)}/agent/install.sh | sudo sh -s -- --upgrade</code>
+        即可只替换二进制、保留现有配置（需服务端启用 <code>-agent-dir</code>）。
+      </p>
       <details class="panel panel-pad">
         <summary class="sum">＋ 新增节点</summary>
         <form id="nodeForm" class="form-grid">

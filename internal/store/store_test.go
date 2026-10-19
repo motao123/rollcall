@@ -11,6 +11,35 @@ import (
 	"github.com/motao/rollcall/internal/model"
 )
 
+// TestAgentVersionPersists 验证 Agent 上报的版本随节点落盘：
+// 重启后若丢失，面板会把所有节点误判为“版本未知”。
+func TestAgentVersionPersists(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n1", Token: "tok"})
+	st.SetAgentVersion("n1", "v1.9.3")
+
+	n, ok := st.Node("n1")
+	if !ok || n.AgentVersion != "v1.9.3" {
+		t.Fatalf("内存中的版本未更新: %+v", n)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+
+	st2 := New(dir)
+	got, ok := st2.Node("n1")
+	if !ok || got.AgentVersion != "v1.9.3" {
+		t.Fatalf("重启后版本丢失: %+v", got)
+	}
+
+	// 不存在的节点不应 panic 或创建条目
+	st2.SetAgentVersion("missing", "v1.9.3")
+	if _, ok := st2.Node("missing"); ok {
+		t.Fatal("不应为不存在的节点创建版本记录")
+	}
+}
+
 // TestTokenPersistsAcrossRestart 是回归测试：
 // model.Node.Token 标了 json:"-"，若不做单独持久化，
 // 服务端重启后所有 Agent 会因令牌为空而 401。

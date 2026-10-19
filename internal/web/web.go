@@ -25,7 +25,9 @@ import (
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/probe"
+	"github.com/motao/rollcall/internal/selfupdate"
 	"github.com/motao/rollcall/internal/store"
+	"github.com/motao/rollcall/internal/version"
 	// 包内已有一个同名函数 sanitize（清理 Content-Disposition 文件名），
 	// 故此处带别名引入。
 	sanitizetext "github.com/motao/rollcall/internal/sanitize"
@@ -576,6 +578,12 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Agent 版本走请求头，避免给上报 JSON 加字段：旧服务端用
+	// DisallowUnknownFields 解码，先升级 Agent 会让整份上报被拒。
+	if v := sanitizetext.Text(strings.TrimSpace(r.Header.Get("X-Agent-Version")), 64); v != "" {
+		s.st.SetAgentVersion(node.ID, v)
+	}
+
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
 	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics))
@@ -672,6 +680,8 @@ func (s *Server) nodeViews(withExtras bool) []model.NodeView {
 		v.Online = state == model.NodeStateOnline
 		v.State = state
 		v.LastSeen = ts
+		v.AgentVersion = n.AgentVersion
+		v.AgentOutdated = agentVersionOutdated(n.AgentVersion)
 		if withExtras {
 			v.Alerts = alertByNode[n.ID]
 			// 迷你曲线：最近 30 个点的 CPU
@@ -786,12 +796,14 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	m, ts, _ := s.st.Latest(id)
 	state := store.NodeState(ts, now)
 	writeJSON(w, 200, map[string]any{
-		"node":     n,
-		"host":     s.st.Host(id),
-		"latest":   m,
-		"lastSeen": ts,
-		"online":   state == model.NodeStateOnline,
-		"state":    state,
+		"node":          n,
+		"host":          s.st.Host(id),
+		"latest":        m,
+		"lastSeen":      ts,
+		"online":        state == model.NodeStateOnline,
+		"state":         state,
+		"agentOutdated": agentVersionOutdated(n.AgentVersion),
+		"serverVersion": version.Version,
 	})
 }
 
@@ -1347,7 +1359,28 @@ func (s *Server) adminOK(r *http.Request) bool {
 // adminNodeView 是带 token 的节点视图，仅管理 API 返回。
 type adminNodeView struct {
 	model.Node
-	Token string `json:"token"`
+	Token         string `json:"token"`
+	AgentOutdated bool   `json:"agentOutdated,omitempty"`
+}
+
+// versionOutdated 判断 agent 是否落后于 server。
+// 任一侧不是可解析的版本（如 dev）时不做提示，避免开发构建误报。
+func versionOutdated(agentVersion, serverVersion string) bool {
+	return selfupdate.ValidVersion(agentVersion) &&
+		selfupdate.ValidVersion(serverVersion) &&
+		selfupdate.IsNewer(serverVersion, agentVersion)
+}
+
+func agentVersionOutdated(agentVersion string) bool {
+	return versionOutdated(agentVersion, version.Version)
+}
+
+func adminNode(n *model.Node) adminNodeView {
+	return adminNodeView{
+		Node:          *n,
+		Token:         n.Token,
+		AgentOutdated: agentVersionOutdated(n.AgentVersion),
+	}
 }
 
 // validateNodeMeta 清理并校验节点台账字段，返回空字符串表示通过。
@@ -1386,7 +1419,7 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 		nodes := s.st.Nodes()
 		out := make([]adminNodeView, 0, len(nodes))
 		for _, n := range nodes {
-			out = append(out, adminNodeView{Node: *n, Token: n.Token})
+			out = append(out, adminNode(n))
 		}
 		writeJSON(w, 200, out)
 
@@ -1403,6 +1436,8 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, msg)
 			return
 		}
+		// 版本只由 Agent 上报头写入，不接受台账 API 伪造。
+		in.AgentVersion = ""
 		if in.ID == "" {
 			in.ID = store.NewID("n")
 			// 全新节点：服务端生成上报令牌，不接受客户端指定，避免弱令牌
@@ -1418,7 +1453,7 @@ func (s *Server) handleAdminNodes(w http.ResponseWriter, r *http.Request) {
 			in.Token = store.NewToken()
 		}
 		s.st.UpsertNode(&in)
-		writeJSON(w, 201, adminNodeView{Node: in, Token: in.Token})
+		writeJSON(w, 201, adminNode(&in))
 
 	default:
 		fail(w, 405, "method not allowed")
@@ -1450,7 +1485,7 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 			fail(w, 404, "node not found")
 			return
 		}
-		writeJSON(w, 200, adminNodeView{Node: *n, Token: n.Token})
+		writeJSON(w, 200, adminNode(n))
 	case http.MethodPut:
 		old, ok := s.st.Node(id)
 		if !ok {
@@ -1481,7 +1516,7 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		updated.Weight = in.Weight
 		// ID 与 Token 来自原节点，避免一次台账编辑静默换掉 Agent 凭据。
 		s.st.UpsertNode(&updated)
-		writeJSON(w, 200, adminNodeView{Node: updated, Token: updated.Token})
+		writeJSON(w, 200, adminNode(&updated))
 	case http.MethodDelete:
 		if _, ok := s.st.Node(id); !ok {
 			fail(w, 404, "node not found")
@@ -1628,6 +1663,7 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			"channels":  cfg.EnabledChannels(),
 			"defs":      notify.Defs(),
 			"panelLink": s.panelLink,
+			"version":   version.Version,
 		}
 		if warn != "" {
 			out["warning"] = warn

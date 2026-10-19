@@ -17,6 +17,7 @@ import (
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/store"
+	"github.com/motao/rollcall/internal/version"
 )
 
 // TestUptime24UsesDurationNotSampleCount 是回归测试：
@@ -685,6 +686,91 @@ func TestNodeStatesAPI(t *testing.T) {
 	get("/api/nodes/fresh", &detail, true)
 	if detail.State != model.NodeStateNoData || detail.Online {
 		t.Errorf("待接入节点详情应为 no_data/offline，实际 %+v", detail)
+	}
+}
+
+// TestAgentVersionWireAndOutdatedHint 验证版本经请求头上报、管理视图返回
+// 可升级提示，且公开状态页不会带出版本信息。
+func TestAgentVersionWireAndOutdatedHint(t *testing.T) {
+	const adminTok = "test-admin-token-1234567890"
+	oldVersion := version.Version
+	version.Version = "v1.9.3"
+	defer func() { version.Version = oldVersion }()
+
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n1", Token: "tok-n1"})
+	srv := New(st, nil, nil, Config{AdminToken: adminTok})
+	h := srv.Handler()
+
+	report := `{"nodeId":"n1","host":{"hostname":"h"},"metrics":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/report", strings.NewReader(report))
+	req.Header.Set("X-Node-Token", "tok-n1")
+	req.Header.Set("X-Agent-Version", "v1.9.2")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("上报失败: %d %s", w.Code, w.Body.String())
+	}
+	n, _ := st.Node("n1")
+	if n.AgentVersion != "v1.9.2" {
+		t.Fatalf("未记录 Agent 版本: %+v", n)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/nodes", nil)
+	req.Header.Set("X-Admin-Token", adminTok)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var admin []adminNodeView
+	if err := json.Unmarshal(w.Body.Bytes(), &admin); err != nil {
+		t.Fatalf("管理节点响应不是 JSON: %v", err)
+	}
+	if len(admin) != 1 || admin[0].AgentVersion != "v1.9.2" || !admin[0].AgentOutdated {
+		t.Fatalf("管理节点视图缺少版本/过期提示: %+v", admin)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/nodes/n1", nil)
+	req.Header.Set("X-Admin-Token", adminTok)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var detail struct {
+		AgentOutdated bool   `json:"agentOutdated"`
+		ServerVersion string `json:"serverVersion"`
+		Node          struct {
+			AgentVersion string `json:"agentVersion"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("节点详情不是 JSON: %v", err)
+	}
+	if detail.Node.AgentVersion != "v1.9.2" || !detail.AgentOutdated || detail.ServerVersion != "v1.9.3" {
+		t.Fatalf("节点详情版本信息不符: %+v", detail)
+	}
+
+	// 公开状态页不能因为内部视图新增字段而泄露 Agent 版本
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), "agentVersion") {
+		t.Fatal("公开状态页不应包含 agentVersion")
+	}
+}
+
+func TestVersionOutdated(t *testing.T) {
+	cases := []struct {
+		agent, server string
+		want          bool
+	}{
+		{"v1.9.2", "v1.9.3", true},
+		{"1.9.2", "v1.9.3", true},
+		{"v1.9.3", "v1.9.3", false},
+		{"v2.0.0", "v1.9.3", false},
+		{"dev", "v1.9.3", false},
+		{"v1.9.2", "dev", false},
+	}
+	for _, c := range cases {
+		if got := versionOutdated(c.agent, c.server); got != c.want {
+			t.Errorf("versionOutdated(%q,%q)=%v want %v", c.agent, c.server, got, c.want)
+		}
 	}
 }
 

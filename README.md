@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.9.2**（`./rollcall-server -version` 可查）。
+当前版本 **v1.9.3**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -377,7 +377,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.2`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.3`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -559,10 +559,14 @@ sudo install -m 0755 dist/rollcall-agent-linux-amd64 dist/rollcall-agent-linux-a
 ```bash
 # 目标节点：一条命令
 curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板 <node-id> <token>
+
+# 后续升级：只替换二进制，保留配置与 unit
+curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 ```
 
 脚本会自动识别架构、创建 `rollcall-agent` 低权限用户（与 `deploy/rollcall-agent.service`
 姿态一致）、写入 0640 配置、生成 systemd 单元；没有 systemd 的容器里退回后台常驻。
+升级模式的完整行为与回滚方式见「六、更新与升级」。
 未配置 `-agent-dir` 时 `/agent/*` 返回 404，仍可按上面的手动步骤安装。
 
 > 脚本本身不含任何密钥（node id / token 由命令行参数传入），因此可以公开下载与审计。
@@ -723,7 +727,114 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ---
 
-## 六、项目结构
+## 六、更新与升级
+
+控制端、Agent 与安装脚本是三条独立的更新线。先确认当前版本，再按对象操作：
+
+| 对象 | 更新方式 | 需要保留的东西 |
+|---|---|---|
+| 控制端 `rollcall-server` | 替换二进制并重启 | `data/` 目录（使用前先备份） |
+| 被控端 `rollcall-agent` | `install.sh --upgrade`（推荐）或手动替换 | `/etc/rollcall/agent.json`、systemd 单元 |
+| `/agent/install.sh` | 随控制端二进制自动更新 | —（由运行中的服务端实时生成） |
+| `-agent-dir` 分发的 Agent | 每个版本替换分发目录里的文件 | —（仅影响后续安装/升级拉取） |
+
+> 服务端**不支持**远程自更新，也不会向 Agent 下发更新指令：更新动作始终由运维在机器上执行。
+> Agent 的可选签名自更新是另一条独立路径（由本机配置的清单触发），见「二、核心功能」第 7 节。
+
+### 1. 控制端
+
+面板、API、公开状态页和 `/agent/install.sh` 都编译在同一个 `rollcall-server` 二进制里，
+因此升级控制端只需要换二进制：
+
+```bash
+# 构建机
+make linux VERSION=v1.9.3
+scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
+```
+
+```bash
+# 控制端（先备份；完整备份/回滚说明见 docs/operations.md）
+sudo /opt/rollcall/rollcall-server -version        # 记录旧版本
+sudo systemctl stop rollcall-server
+sudo cp -a /opt/rollcall/data /var/backups/rollcall/data-$(date +%F-%H%M)
+sudo cp -p /opt/rollcall/rollcall-server /opt/rollcall/rollcall-server.prev
+sudo install -m 0755 /tmp/rollcall-server.new /opt/rollcall/rollcall-server
+sudo systemctl start rollcall-server
+curl -fsS http://127.0.0.1:19080/healthz
+```
+
+回滚：
+
+```bash
+sudo systemctl stop rollcall-server
+sudo install -m 0755 /opt/rollcall/rollcall-server.prev /opt/rollcall/rollcall-server
+# 若新版本已写入更高 schema 的快照，还需恢复上面备份的 data 目录
+sudo systemctl start rollcall-server
+```
+
+unit 文件只有在该版本明确要求时才需要同步替换；替换后执行 `systemctl daemon-reload`。
+
+### 2. 被控端 Agent
+
+推荐使用安装脚本的升级模式：只替换二进制，配置与 unit 保持不变。
+
+```bash
+curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
+```
+
+脚本会：
+
+1. 从 `/etc/rollcall/agent.json` 读取控制端地址（**不需要节点令牌**，也不会改写配置）；
+2. 从 `rollcall-agent.service` 的 `ExecStart` 找到实际二进制路径（找不到时回退 `/usr/local/bin`），
+   也支持 `--upgrade /自定义/路径`；
+3. 按当前架构下载、校验可执行性、保留原属主后原子替换，旧版本备份为 `<二进制>.prev`；
+4. 重启 `rollcall-agent`，若启动失败**自动回滚**到 `.prev`。
+
+手动回滚：
+
+```bash
+sudo rollcall-agent -rollback        # 恢复 .prev 并重启
+# 或手动换回
+sudo mv /usr/local/bin/rollcall-agent.prev /usr/local/bin/rollcall-agent
+sudo systemctl restart rollcall-agent
+```
+
+没有配置 `-agent-dir`（安装脚本 404）时，按原来的方式替换二进制即可：
+
+```bash
+sudo systemctl stop rollcall-agent
+sudo install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
+sudo systemctl start rollcall-agent
+```
+
+Agent 在每次上报时通过 `X-Agent-Version` 请求头上报版本，**下一轮上报（≤30 秒）后面板即可看到**。
+节点列表与详情页会在 Agent 低于控制端时标记「可升级」；老 Agent 不上报版本时显示 `—`。
+该请求头对旧服务端无影响，先升级 Agent、后升级控制端也不会被拒收。
+
+### 3. 安装脚本与分发的二进制
+
+- `/agent/install.sh` 由运行中的服务端实时生成，**升级控制端后脚本即为最新版**，不需要单独维护；
+- 使用 `-agent-dir` 时，Agent 二进制不在服务端二进制里，每个版本都要同步替换，否则新安装的节点仍会拉到旧版本：
+
+```bash
+sudo install -m 0755 dist/rollcall-agent-linux-amd64 \
+                        dist/rollcall-agent-linux-arm64 /opt/rollcall/agent/
+```
+
+替换分发文件无需重启控制端，下一次 `/agent/download` 请求即生效。
+
+### 4. 版本对应关系
+
+| 现象 | 含义 / 处理 |
+|---|---|
+| 面板节点显示「可升级」 | Agent 版本低于控制端，按上面的脚本升级 |
+| Agent 版本显示 `—` | 尚未上报过版本：旧 Agent 升级后等下一轮上报，或检查上报是否正常 |
+| `--upgrade` 提示未找到配置 | 该节点从未通过安装脚本安装，先执行一次完整安装 |
+| `--upgrade` 提示 404 / 无法下载 | 控制端未配置 `-agent-dir`，改用手动替换二进制 |
+
+---
+
+## 七、项目结构
 
 ```
 rollcall/
@@ -762,7 +873,7 @@ rollcall/
 
 ---
 
-## 七、安全设计要点
+## 八、安全设计要点
 
 | 风险 | 本项目的处理 |
 |---|---|
@@ -795,7 +906,7 @@ rollcall/
 
 ---
 
-## 八、已知限制
+## 九、已知限制
 
 1. **未实现** ICMP 探测（需 raw socket 权限；HTTP/TCP 已覆盖绝大多数场景）
 2. 长历史依赖本地分层聚合（默认 1h 层 365 天）；更长期归档或多实例仍需外接 TSDB
@@ -806,7 +917,7 @@ rollcall/
 
 ---
 
-## 九、后续路线
+## 十、后续路线
 
 | 阶段 | 内容 |
 |---|---|
@@ -867,13 +978,16 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ---
 
-## 十、实际部署验证
+## 十一、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.2）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.3）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.2、active + enabled |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.3、active + enabled |
+| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.2 → v1.9.3，`agent.json` 与 unit 哈希均未变化，`.prev` 可回滚；隔离注入启动失败后自动回滚并返回非 0 |
+| Agent 版本上报 | `X-Agent-Version` 上报后管理 API 显示 v1.9.3 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion` |
+| 升级提示 UI | 概览、节点列表、设置页与详情页均显示「可升级」（临时实例模拟旧 Agent）；636px 宽无横向溢出，浏览器控制台无错误 |
 | 公开状态页 | `/status` 匿名可访问；13 个节点实测在线；1440px 三列 / 390px 单列均无横向溢出；浅色、深色、跟随系统切换正常 |
 | 公开 API | `/api/status`、`/api/status/node/<hid>`、`/api/theme` 匿名 200；用内部节点 ID 访问详情返回 404；匿名 `/api/nodes` 401；`/metrics` 凭管理令牌 200 |
 | 公开页脱敏 | 默认不下发地区、服务商、主机名、系统、内核、架构、CPU 型号、核心数、虚拟化、进程数、TCP、Swap；`/status` 与 `/api/status` 无内部 ID |

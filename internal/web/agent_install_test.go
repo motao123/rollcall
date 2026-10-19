@@ -45,6 +45,21 @@ func TestAgentInstallScriptIsSafeAndPublic(t *testing.T) {
 	if !strings.Contains(body, "$TMP\" -version") {
 		t.Fatal("脚本缺少下载后可执行性验证")
 	}
+	// 升级模式：不接收 node token，读取现有配置、保留 .prev、按原属主替换
+	for _, want := range []string{
+		"--upgrade", "BIN.prev", "/etc/rollcall/agent.json",
+		"stat -c '%u:%g'", "systemctl show -p ExecStart",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("升级脚本缺少 %q", want)
+		}
+	}
+	// 升级分支必须在安装分支重写配置之前退出，避免覆盖 token/interval/update
+	upgradeExit := strings.Index(body, "exit 0\nfi\n\nmv -f \"$TMP\" \"$BIN\"")
+	configWrite := strings.Index(body, "cat > /etc/rollcall/agent.json")
+	if upgradeExit < 0 || configWrite < 0 || upgradeExit > configWrite {
+		t.Fatal("升级分支必须先于配置写入退出")
+	}
 }
 
 // TestAgentDownloadServesConfiguredArchs 验证二进制分发：白名单架构、

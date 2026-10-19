@@ -683,6 +683,20 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 	s.addHistoryLocked(nodeID, m, &prev, hasPrev)
 }
 
+// SetAgentVersion 记录 Agent 最近一次上报的版本。
+// 版本变化才落盘：每次上报都 RequestSave 会让快照队列持续被唤醒。
+func (s *Store) SetAgentVersion(nodeID, ver string) {
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok || n.AgentVersion == ver {
+		s.mu.Unlock()
+		return
+	}
+	n.AgentVersion = ver
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
 func (s *Store) Host(nodeID string) model.HostInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

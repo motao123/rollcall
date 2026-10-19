@@ -1,6 +1,6 @@
 # 运维手册
 
-面向已按 README 完成部署的 Rollcall 实例（v1.8+）。覆盖日常备份、升级回滚、签名自更新、账号/令牌管理、插件与故障排查。
+面向已按 README 完成部署的 Rollcall 实例（v1.9+）。覆盖日常备份、升级回滚、签名自更新、账号/令牌管理、插件与故障排查。
 
 ---
 
@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.9.2
+make linux VERSION=v1.9.3
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -38,11 +38,13 @@ make linux VERSION=v1.9.2
 升级步骤（务必先备份）：
 
 ```bash
+sudo install -d -m 0700 /var/backups/rollcall
 sudo cp /opt/rollcall/data/state.json \
-        /var/backups/rollcall/state-$(date +%F-%H%M).json.gz
+        /var/backups/rollcall/state-$(date +%F-%H%M).json
 sudo cp /opt/rollcall/data/history.json \
-        /var/backups/rollcall/history-$(date +%F-%H%M).json.gz
+        /var/backups/rollcall/history-$(date +%F-%H%M).json
 sudo systemctl stop rollcall-server
+sudo cp -p /opt/rollcall/rollcall-server /opt/rollcall/rollcall-server.prev
 
 # 替换二进制与单元文件后
 sudo install -m 0755 rollcall-server /opt/rollcall/rollcall-server
@@ -50,15 +52,51 @@ sudo install -m 0644 deploy/rollcall-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl start rollcall-server
 curl -fsS http://127.0.0.1:19080/healthz
+/opt/rollcall/rollcall-server -version
 ```
 
-Agent 升级：
+服务端回滚：停服务，把 `/opt/rollcall/rollcall-server.prev` 装回原位后启动。
+若新版本已把快照写成更高 schema，还必须先恢复上面备份的 `state.json` / `history.json`（见下节）。
+
+### Agent 升级
+
+**推荐：用安装脚本的升级模式**（需控制端启用 `-agent-dir`）。只替换二进制，
+保留 `/etc/rollcall/agent.json` 与 systemd 单元，不需要节点令牌：
+
+```bash
+curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
+# 二进制不在默认位置或自动探测失败时：
+curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade /opt/rollcall-agent/rollcall-agent
+```
+
+脚本会按架构下载、在临时路径验证可执行性、保留原属主，把旧二进制备份为
+`<二进制>.prev`，重启 `rollcall-agent`；若重启后未处于 active 状态会自动回滚并返回非 0。
+
+手动回滚：
+
+```bash
+sudo rollcall-agent -rollback        # 恢复 .prev 并重启
+# 或手动：sudo mv <二进制>.prev <二进制> && sudo systemctl restart rollcall-agent
+```
+
+**手动替换**（未配置 `-agent-dir`，或需要同时更新 unit）：
 
 ```bash
 sudo install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
 sudo install -m 0644 deploy/rollcall-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl restart rollcall-agent
+```
+
+Agent 会在每次上报时通过 `X-Agent-Version` 请求头上报版本（兼容旧服务端），
+升级后下一轮上报（≤30 秒）面板即显示新版本；低于控制端时节点列表与详情标记「可升级」。
+老 Agent 不发送该请求头时版本显示 `—`，不影响在线判定。
+
+分发目录里的二进制不会随控制端自动更新。使用 `-agent-dir` 时，每个版本都要替换：
+
+```bash
+sudo install -m 0755 dist/rollcall-agent-linux-amd64 \
+                        dist/rollcall-agent-linux-arm64 /opt/rollcall/agent/
 ```
 
 ### 快照版本与回滚
@@ -74,8 +112,8 @@ v1.7 可直接读取 schema 1 并自动补齐）。旧程序遇到更高版本�
 
 ```bash
 sudo systemctl stop rollcall-server
-sudo cp /var/backups/rollcall/state-<升级前时间>.json.gz /opt/rollcall/data/state.json
-sudo cp /var/backups/rollcall/history-<升级前时间>.json.gz /opt/rollcall/data/history.json
+sudo cp /var/backups/rollcall/state-<升级前时间>.json /opt/rollcall/data/state.json
+sudo cp /var/backups/rollcall/history-<升级前时间>.json /opt/rollcall/data/history.json
 sudo chown rollcall:rollcall /opt/rollcall/data/state.json /opt/rollcall/data/history.json
 sudo chmod 0600 /opt/rollcall/data/state.json /opt/rollcall/data/history.json
 # 换回旧二进制后启动
@@ -100,9 +138,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.9.2
-./rollsign sign -key /root/rollcall-update.key -version v1.9.2 \
-  -base-url https://updates.example.com/agent/v1.9.2 \
+make linux VERSION=v1.9.3
+./rollsign sign -key /root/rollcall-update.key -version v1.9.3 \
+  -base-url https://updates.example.com/agent/v1.9.3 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json
@@ -497,6 +535,10 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
 | 通知发不出去 | 设置页逐通道测试；自建内网服务需 `-allow-private-notify`；查看日志中的丢弃提示 |
 | 启动报快照错误 | 查看日志中的 `.corrupt-*` / `.newer-*` 备份路径；修复或恢复备份后再启动 |
 | 自更新未生效 | 确认 `update.enabled`、清单 HTTPS/签名公钥；检查日志中的签名、架构、目录不可写错误；systemd 需 `ReadWritePaths` |
+| `--upgrade` 提示未找到配置 | 该节点未通过安装脚本安装；先执行一次完整安装，或手动替换二进制 |
+| `--upgrade` 下载 404 | 控制端未配置 `-agent-dir`（`/agent/*` 整体 404），改用手动替换并同步分发目录 |
+| 升级后版本仍显示 `—` | Agent 尚未上报（最多 30 秒），或旧 Agent 不支持版本头；确认 `/api/nodes` 中 `agentVersion` 字段 |
+| 升级后面板仍提示「可升级」 | 上报的 Agent 版本低于控制端 `-version`；确认升级的是 unit 实际使用的二进制路径 |
 | 插件通道未出现 | 是否带 `-notify-plugins`；清单/命令是否在目录内、可执行且非全局可写；服务端启动日志会指出具体清单错误 |
 | 启动报历史保留期无效 | 保留期必须满足 1m ≤ 5m ≤ 1h、为对应窗口整数倍、单层不超过 10 年与 100 万桶 |
 | 端口被占用 | `ss -ltnp \| grep 19080`；确认没有重复启动旧实例 |
@@ -517,6 +559,7 @@ curl -fsS http://127.0.0.1:19080/metrics \
 ## 10. 上线后检查清单
 
 - [ ] `rollcall-server -version` / `rollcall-agent -version` 与发布版本一致
+- [ ] 面板节点列表的 Agent 版本与 `rollcall-agent -version` 一致，无意外「可升级」标记
 - [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`
 - [ ] `/healthz` 返回 `ok`，`/status` 可匿名访问且不含主机名/IP/价格
 - [ ] 目标节点在线，30–60 秒内有新采样
