@@ -282,6 +282,11 @@ func (e *Engine) Evaluate() {
 	rules := e.st.Rules()
 	now := e.now()
 
+	// 计划维护窗口内的节点不做评估：计划内重启会让"节点失联"规则刷一屏告警，
+	// 这些告警既无用又会掩盖真正的故障。已在维护中的节点，
+	// 其既有活跃告警以"计划维护"为由关闭，避免挂到窗口结束才自愈。
+	_, maintNodes := e.st.MaintenanceAt(now)
+
 	// 本轮实际评估到的 key，用于清理引擎状态：
 	// 节点被删除或规则被停用后，它们不再进入下面的循环，
 	// 其 since/active/lastAt 条目会永久残留（内存泄漏），
@@ -296,6 +301,29 @@ func (e *Engine) Evaluate() {
 		}
 		for _, n := range nodes {
 			key := rule.ID + "|" + n.ID
+			if m, ok := maintNodes[n.ID]; ok && m != nil {
+				// 计划维护：关掉该节点在此规则下的活跃告警并清空引擎状态。
+				// 这里必须走与"规则范围调整"相同的收尾路径，否则 since/active
+				// 会残留，窗口结束后同一条告警被判成"已经持续很久"而立即触发。
+				e.mu.Lock()
+				prev := e.active[key]
+				delete(e.since, key)
+				delete(e.active, key)
+				delete(e.lastAt, key)
+				delete(e.recAt, key)
+				e.mu.Unlock()
+				if e.st.ResolveAlert(rule.ID, n.ID) {
+					if prev == nil {
+						prev = &model.Alert{
+							RuleID: rule.ID, RuleName: rule.Name,
+							NodeID: n.ID, NodeName: n.Name,
+							Severity: rule.Severity,
+						}
+					}
+					e.recoverClosedLocked([]*model.Alert{prev}, maintenanceReason(m), "")
+				}
+				continue
+			}
 			if !ruleApplies(rule, n) {
 				// 规则改为定向后，原先命中但已不在范围内的节点需要关闭告警，
 				// 否则会留下永远无人恢复的「进行中」条目。
@@ -454,6 +482,15 @@ func ruleApplies(rule *model.AlertRule, n *model.Node) bool {
 		}
 	}
 	return false
+}
+
+// maintenanceReason 生成维护窗口的恢复原因。
+// 带上窗口标题，让恢复通知能说清"因为哪次维护"，而不是一句笼统的"计划维护"。
+func maintenanceReason(m *model.Maintenance) string {
+	if m == nil || m.Title == "" {
+		return "计划维护"
+	}
+	return "计划维护：" + m.Title
 }
 
 // check 返回当前值与是否越界。

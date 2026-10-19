@@ -194,7 +194,12 @@ func (s *Server) routes(static http.Handler) []route {
 		})},
 		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
 		{"/status.js", authPublic, static},
-		{"/api/status", authPublic, http.HandlerFunc(s.handleStatus)},
+		{"/api/status", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatus))},
+		// 节点详情与事件时间线同样是公开页的一部分：
+		// 字段在 handler 内部按 StatusPage 配置的可见性裁剪，
+		// 因此可以直接标记为公开，不必再套一层鉴权。
+		{"/api/status/node/", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatusNode))},
+		{"/api/status/incidents", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatusIncidents))},
 		// 一条命令接入：脚本与二进制都公开（脚本不含密钥，token 由调用方传参）
 		{"/agent/install.sh", authPublic, http.HandlerFunc(s.handleAgentInstall)},
 		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},
@@ -215,6 +220,7 @@ func (s *Server) routes(static http.Handler) []route {
 
 		// 管理写操作与运营数据导出：仅 X-Admin-Token
 		{"/api/admin/nodes", authAdmin, http.HandlerFunc(s.handleAdminNodes)},
+		{"/api/admin/nodes/batch", authAdmin, http.HandlerFunc(s.handleAdminNodesBatch)},
 		{"/api/admin/nodes/", authAdmin, http.HandlerFunc(s.handleAdminNodeByID)},
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
@@ -226,6 +232,13 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/rule-meta", authAdmin, http.HandlerFunc(s.handleRuleMeta)},
 		{"/api/admin/silences", authAdmin, http.HandlerFunc(s.handleAdminSilences)},
 		{"/api/admin/silences/", authAdmin, http.HandlerFunc(s.handleAdminSilenceByScope)},
+		// 公开状态页的展示配置、维护窗口与人工事件：
+		// 这些直接影响匿名访客看到的内容，必须是管理写操作。
+		{"/api/admin/status-page", authAdmin, http.HandlerFunc(s.handleAdminStatusPage)},
+		{"/api/admin/maintenance", authAdmin, http.HandlerFunc(s.handleAdminMaintenance)},
+		{"/api/admin/maintenance/", authAdmin, http.HandlerFunc(s.handleAdminMaintenanceByID)},
+		{"/api/admin/incidents", authAdmin, http.HandlerFunc(s.handleAdminIncidents)},
+		{"/api/admin/incidents/", authAdmin, http.HandlerFunc(s.handleAdminIncidentByID)},
 		{"/api/admin/notify/jobs", authAdmin, http.HandlerFunc(s.handleAdminNotifyJobs)},
 		{"/api/admin/notify/jobs/", authAdmin, http.HandlerFunc(s.handleAdminNotifyJobByID)},
 		{"/api/export/", authAdmin, http.HandlerFunc(s.handleExport)},
@@ -901,21 +914,10 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 //	· 不含主机名、内核、架构等指纹信息
 //	· 仅保留：展示名、在线状态、三项使用率、运行时长、24h 可用率色块
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	cfg := s.st.StatusPage()
 	views := s.buildNodeViews()
 	svcs := s.st.Services()
-
-	type pub struct {
-		Name     string      `json:"name"`
-		Group    string      `json:"group"` // 仅分组名，用于公开页归类展示
-		Online   bool        `json:"online"`
-		State    string      `json:"state"`
-		CPU      float64     `json:"cpu"`
-		Mem      float64     `json:"mem"`
-		Disk     float64     `json:"disk"`
-		Up       uint64      `json:"uptime"`
-		Uptime24 float64     `json:"uptime24"` // 24 小时在线率（由采样点推算）
-		Bars     []statusBar `json:"bars"`     // 24h 分段可用性（每段 30 分钟）
-	}
+	vis := cfg.Visibility
 
 	// 服务公开视图：仅名称 + 最近状态 + 24h 可用率
 	type svcPub struct {
@@ -926,24 +928,66 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Latency int     `json:"latencyMs"`
 	}
 
-	out := make([]pub, 0, len(views))
-	for _, v := range views {
-		p := pub{
-			Name: v.Name, Group: v.Group, Online: v.Online, State: v.State,
-			CPU:  round1(v.Latest.CPUPct),
-			Mem:  round1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),
-			Disk: round1(pctF(v.Latest.DiskUsed, v.Latest.DiskTotal)),
-			Up:   v.Latest.Uptime,
-		}
+	now := time.Now().Unix()
+	maintAll, maintNodes := s.st.MaintenanceAt(now)
 
+	out := make([]statusNodePub, 0, len(views))
+	for _, v := range views {
 		// 24h 可用率与分段色块：按"采样点覆盖的在线时长"计算，
 		// 不能简单用 成功点数/总点数 —— 那样只要节点还在上报就永远 100%。
-		now := time.Now().Unix()
-		p.Uptime24, p.Bars = uptime24(s.st.Series(v.ID, now-86400), now, v.Online)
+		series := s.st.Series(v.ID, now-86400)
+		up, bars := uptime24(series, now, v.Online)
+
+		p := statusNodePub{
+			ID: v.ID, Name: v.Name, Group: store.VisibleGroup(v.Group),
+			Online: v.Online, State: v.State,
+			CPU:      round1(v.Latest.CPUPct),
+			Mem:      round1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),
+			Disk:     round1(pctF(v.Latest.DiskUsed, v.Latest.DiskTotal)),
+			Up:       v.Latest.Uptime,
+			Uptime24: round1(up),
+			Bars:     bars,
+		}
+		if !vis.Metrics {
+			// 未开启指标公开时列表也不应带出数值：
+			// 前端拿不到就什么都不画，比下发 0 让人误以为"负载为零"更诚实。
+			p.CPU, p.Mem, p.Disk = 0, 0, 0
+		}
+		if !vis.Uptime {
+			p.Up = 0
+		}
+		if vis.Load {
+			p.Load1 = round2(v.Latest.Load1)
+		}
+		if vis.Traffic {
+			p.NetRx, p.NetTx = netRates(series)
+		}
+		if vis.Region {
+			p.Region = v.Region
+		}
+		if vis.Provider {
+			p.Provider = v.Provider
+		}
+		// 迷你曲线：24h 序列降采样到 ~48 点，够画一条趋势线又不拖慢首屏
+		if vis.Metrics && len(series) > 1 {
+			step := len(series) / 48
+			if step < 1 {
+				step = 1
+			}
+			spark := make([]model.Point, 0, 48)
+			for i := 0; i < len(series); i += step {
+				spark = append(spark, model.Point{T: series[i].TS, V: round1(series[i].CPUPct)})
+			}
+			p.Spark = spark
+		}
+		if maintAll {
+			p.MaintenanceTitle = globalMaintenanceTitle(maintNodes, s.st.Maintenances())
+		} else if m, ok := maintNodes[v.ID]; ok && m != nil {
+			p.MaintenanceTitle = m.Title
+		}
 		out = append(out, p)
 	}
 
-	now := time.Now().Unix()
 	svcOut := make([]svcPub, 0, len(svcs))
 	for _, sv := range svcs {
 		_, lat, ok, has := s.st.ServiceLast(sv.ID)
@@ -954,6 +998,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			sp.Latency = lat
 		}
 		svcOut = append(svcOut, sp)
+	}
+
+	svcDown := 0
+	for _, sp := range svcOut {
+		if sp.Has && !sp.OK {
+			svcDown++
+		}
 	}
 
 	counts := map[string]int{
@@ -967,33 +1018,95 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			counts[p.State]++
 		}
 	}
-	svcDown := 0
-	for _, sp := range svcOut {
-		if sp.Has && !sp.OK {
-			svcDown++
-		}
+	maintAny := maintAll || len(maintNodes) > 0
+	summary := s.buildStatusSummary(out, len(svcOut), svcDown, maintAny)
+
+	names := map[string]string{}
+	ids := make([]string, 0, len(out))
+	for _, n := range s.st.Nodes() {
+		names[n.ID] = n.Name
+		ids = append(ids, n.ID)
 	}
 
-	writeJSON(w, 200, map[string]any{
-		"site":        statusTitle,
-		"nodes":       out,
-		"services":    svcOut,
-		"online":      counts[model.NodeStateOnline],
-		"stale":       counts[model.NodeStateStale],
-		"offline":     counts[model.NodeStateOffline],
-		"noData":      counts[model.NodeStateNoData],
-		"total":       len(out),
-		"svcDown":     svcDown,
-		"generatedAt": time.Now().Unix(),
-	})
+	resp := map[string]any{
+		"site":    cfg.Title,
+		"nodes":   out,
+		"online":  counts[model.NodeStateOnline],
+		"stale":   counts[model.NodeStateStale],
+		"offline": counts[model.NodeStateOffline],
+		"noData":  counts[model.NodeStateNoData],
+		"total":   len(out),
+		"svcDown": svcDown,
+	}
+	if cfg.Blocks.Services {
+		resp["services"] = svcOut
+	}
+	if cfg.Blocks.Summary {
+		resp["summary"] = summary
+	}
+	if cfg.Blocks.History {
+		resp["historyDays"] = cfg.HistoryDays
+		resp["history"] = s.fleetDailyUptime(ids, cfg.HistoryDays, now)
+	}
+	if cfg.Blocks.Incidents {
+		resp["incidents"] = s.buildTimeline(now-int64(cfg.HistoryDays)*86400, 60,
+			func(id string) string { return names[id] })
+	}
+	if cfg.Announcement.Enabled {
+		resp["announcement"] = cfg.Announcement
+	}
+	resp["maintenance"] = maintenanceBanner(maintAll, maintNodes, s.st.Maintenances())
+	resp["generatedAt"] = now
+	writeJSON(w, 200, resp)
 }
 
-// statusTitle 是公开页标题。
-//
-// 曾经这里读 GetSetting("status_title")，但全项目**没有任何写入该设置的入口**，
-// 于是它永远返回默认值 —— 属于误导性死代码，已移除。
-// 若要支持自定义标题，需同时补管理 API 的写入路径与前端表单项。
-const statusTitle = "服务状态"
+// maintenanceBanner 生成整站级别的维护提示。
+// 全局窗口优先展示；只有部分节点在维护时说明受影响数量，
+// 避免访客看到"维护中"却不知道是全部还是一台。
+func maintenanceBanner(all bool, nodes map[string]*model.Maintenance, list []*model.Maintenance) map[string]any {
+	if !all && len(nodes) == 0 {
+		return nil
+	}
+	title := "计划维护"
+	for _, m := range list {
+		if m != nil && m.Title != "" && (all || len(m.NodeIDs) == 0 || inNodeSet(m, nodes)) {
+			title = m.Title
+			break
+		}
+	}
+	out := map[string]any{"title": title, "global": all, "count": len(nodes)}
+	if all {
+		out["text"] = "正在进行计划维护，期间可能出现短暂中断。"
+	} else {
+		out["text"] = "部分节点正在进行计划维护。"
+	}
+	return out
+}
+
+func inNodeSet(m *model.Maintenance, nodes map[string]*model.Maintenance) bool {
+	for _, id := range m.NodeIDs {
+		if cur, ok := nodes[id]; ok && cur != nil && cur.ID == m.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// globalMaintenanceTitle 为全局维护窗口挑一个标题：
+// 优先取真正的全局窗口（NodeIDs 为空），否则取第一个生效的。
+func globalMaintenanceTitle(nodes map[string]*model.Maintenance, list []*model.Maintenance) string {
+	for _, m := range list {
+		if m != nil && len(m.NodeIDs) == 0 && m.Title != "" {
+			return m.Title
+		}
+	}
+	for _, m := range nodes {
+		if m != nil && m.Title != "" {
+			return m.Title
+		}
+	}
+	return "计划维护"
+}
 
 // handleStatusPage 渲染公开状态页 HTML（独立于管理界面，免登录）。
 func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {

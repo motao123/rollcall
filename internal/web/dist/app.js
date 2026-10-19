@@ -401,10 +401,22 @@ async function viewNodes() {
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
         <span class="section-meta">${list.length} 台</span>
-        <button class="btn primary" id="wizBtn2" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
+        <button class="btn" id="batchBtn" style="margin-left:auto;padding:6px 14px;font-size:12.5px">批量操作</button>
+        <button class="btn primary" id="wizBtn2" style="padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
+      </div>
+      <div id="batchBar" hidden class="batch-bar">
+        <span style="font-size:12px;color:var(--fg-2)">已选 <b id="batchCount" class="mono">0</b> 台</span>
+        <span style="flex:1"></span>
+        <button class="btn tiny" data-batch="group">改分组</button>
+        <button class="btn tiny" data-batch="provider">改服务商</button>
+        <button class="btn tiny" data-batch="region">改地区</button>
+        <button class="btn tiny" data-batch="expire">改到期日</button>
+        <button class="btn tiny" data-batch="currency">改币种</button>
+        <button class="btn tiny danger" data-batch="delete">删除</button>
       </div>
       <div class="table-wrap"><table>
         <thead><tr>
+          <th style="width:26px"><input type="checkbox" id="selAll" aria-label="全选"></th>
           <th>状态</th><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
           <th class="num">负载</th><th class="num">运行时长</th><th class="num">流量</th>
@@ -417,6 +429,7 @@ async function viewNodes() {
           const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
           const dash = '—';
           return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
+            <td><input type="checkbox" class="row-sel" data-id="${esc(n.id)}" aria-label="选择 ${esc(n.name)}"></td>
             <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
             <td class="strong">${esc(n.name)}</td>
             <td>${esc(n.provider || '—')}</td>
@@ -429,13 +442,81 @@ async function viewNodes() {
             <td class="num mono">${hasData ? dur(n.latest.uptime) : dash}</td>
             <td class="num mono">${hasData ? bytes(n.latest.netRx) : dash}</td>
           </tr>`;
-        }).join('') || `<tr><td colspan="11"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
+        }).join('') || `<tr><td colspan="12"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
       </table></div>
     </section>`;
   bindNodeClicks();
   const wiz2 = document.getElementById('wizBtn2');
   if (wiz2) wiz2.onclick = showAgentWizard;
+  bindBatchOps(list);
 
+}
+
+// bindBatchOps 节点多选与批量操作。
+// 行点击仍是"进入详情"，勾选列单独处理 —— 复选框的 click 不再冒泡触发行跳转。
+function bindBatchOps(list) {
+  const bar = document.getElementById('batchBar');
+  const count = document.getElementById('batchCount');
+  if (!bar) return;
+  const checked = () => $$('.row-sel').filter((c) => c.checked).map((c) => c.dataset.id);
+  const sync = () => {
+    const ids = checked();
+    bar.hidden = ids.length === 0;
+    if (count) count.textContent = String(ids.length);
+  };
+  $$('.row-sel').forEach((c) => {
+    c.onclick = (e) => { e.stopPropagation(); sync(); };
+  });
+  const selAll = document.getElementById('selAll');
+  if (selAll) {
+    selAll.onclick = (e) => {
+      e.stopPropagation();
+      $$('.row-sel').forEach((c) => { c.checked = selAll.checked; });
+      sync();
+    };
+  }
+  const PROMPTS = {
+    group: { label: '新分组名', ph: '例如：prod', def: '' },
+    provider: { label: '服务商', ph: '例如：racknerd', def: '' },
+    region: { label: '地区', ph: '例如：香港', def: '' },
+    expire: { label: '到期日（YYYY-MM-DD，留空清除）', ph: '2027-01-31', def: '' },
+    currency: { label: '币种（USD / CNY）', ph: 'USD', def: 'USD' },
+  };
+  $$('[data-batch]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const ids = checked();
+      if (!ids.length) { toast('请先勾选节点', 'err'); return; }
+      const action = b.dataset.batch;
+      if (action === 'delete') {
+        const names = ids.map((id) => { const n = list.find((x) => x.id === id); return n ? n.name : id; });
+        if (!confirm(`确认删除 ${ids.length} 台节点？\n\n${names.join('、')}\n\n历史数据会一并删除，且无法恢复。`)) return;
+      } else {
+        const p = PROMPTS[action];
+        const v = prompt(`${p.label}\n（将应用到 ${ids.length} 台节点）`, p.def);
+        if (v === null) return;
+        try {
+          await adminApi('/api/admin/nodes/batch', {
+            method: 'POST',
+            body: JSON.stringify({ ids, action, value: v.trim() }),
+          });
+          toast(`已更新 ${ids.length} 台节点`);
+          state.data.nodes = null;
+          viewNodes();
+        } catch (err) { toast('批量操作失败：' + err.message, 'err'); }
+        return;
+      }
+      try {
+        const res = await adminApi('/api/admin/nodes/batch', {
+          method: 'POST',
+          body: JSON.stringify({ ids, action: 'delete' }),
+        });
+        toast(`已删除 ${res.changed} 台节点`);
+        state.data.nodes = null;
+        viewNodes();
+      } catch (err) { toast('删除失败：' + err.message, 'err'); }
+    };
+  });
 }
 
 async function viewNodeDetail(id) {
@@ -1752,6 +1833,312 @@ systemctl enable --now rollcall-agent`;
   };
 }
 
+/* ---------------- 状态页管理 ---------------- *
+ *
+ * 这里改的每一项都会立刻反映到公开状态页（/status）：
+ * 标题、公告、字段可见性、区块开关、维护窗口、人工事件。
+ * 维护窗口同时作用于告警引擎 —— 窗口内的节点不再产生新告警。
+ */
+
+// openDialog 统一的模态框脚手架。
+// 返回 { close, querySelector }：close 关闭并解绑，
+// querySelector 委托到弹窗根节点，调用方不用再自己 create/remove。
+function openDialog(title, bodyHTML) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = `<div class="modal"><div class="modal-title">${esc(title)}</div>${bodyHTML}</div>`;
+  document.body.appendChild(mask);
+  const close = () => mask.remove();
+  mask.onclick = (e) => { if (e.target === mask) close(); };
+  $$('[data-close]', mask).forEach((b) => { b.onclick = close; });
+  return {
+    close,
+    querySelector: (s) => mask.querySelector(s),
+  };
+}
+
+const STATUS_VIS_ITEMS = [
+  ['metrics', 'CPU / 内存 / 磁盘使用率'],
+  ['load', '负载（1/5/15 分钟）'],
+  ['uptime', '连续运行时间'],
+  ['traffic', '实时网速与累计流量'],
+  ['procs', '进程数'],
+  ['tcpConn', 'TCP 连接数'],
+  ['swap', 'Swap 用量'],
+  ['region', '地区'],
+  ['provider', '服务商'],
+  ['hostname', '真实主机名（可用于指纹识别，慎开）'],
+  ['os', '操作系统'],
+  ['kernel', '内核版本'],
+  ['arch', 'CPU 架构'],
+  ['cpuModel', 'CPU 型号'],
+  ['cores', '核心数'],
+  ['virt', '虚拟化类型'],
+];
+const STATUS_BLOCK_ITEMS = [
+  ['summary', '顶部总览卡片'],
+  ['services', '服务探测区'],
+  ['incidents', '事件时间线'],
+  ['history', 'N 天可用率日柱'],
+  ['nodeDetail', '允许访客点进节点详情'],
+];
+
+async function viewStatusPage() {
+  const [cfgRes, nodes, mtRes, incRes] = await Promise.all([
+    adminApi('/api/admin/status-page'),
+    api('/api/nodes'),
+    adminApi('/api/admin/maintenance'),
+    adminApi('/api/admin/incidents'),
+  ]);
+  const cfg = cfgRes.config || {};
+  const vis = cfg.visibility || {};
+  const blocks = cfg.blocks || {};
+  const ann = cfg.announcement || {};
+  state.data.nodes = nodes;
+
+  const visBoxes = STATUS_VIS_ITEMS.map(([k, label]) =>
+    checkbox(label, 'vis_' + k, !!vis[k])).join('');
+  const blockBoxes = STATUS_BLOCK_ITEMS.map(([k, label]) =>
+    checkbox(label, 'blk_' + k, !!blocks[k])).join('');
+
+  const mtRows = (mtRes.items || []).map((m) => {
+    const scope = (m.nodeIds && m.nodeIds.length)
+      ? m.nodeIds.map((id) => { const n = nodes.find((x) => x.id === id); return n ? n.name : id; }).join('、')
+      : '全部节点';
+    const active = Date.now() / 1000 >= m.startAt && Date.now() / 1000 < m.endAt;
+    return `<tr>
+      <td class="strong">${esc(m.title)}</td>
+      <td>${esc(scope)}</td>
+      <td class="mono" style="font-size:11.5px">${esc(fullTs(m.startAt))}<br>${esc(fullTs(m.endAt))}</td>
+      <td>${active ? '<span class="dot info"></span> 进行中' : m.startAt > Date.now() / 1000 ? '未开始' : '已结束'}</td>
+      <td class="num"><button class="btn danger" data-del-mt="${esc(m.id)}" style="padding:3px 10px;font-size:11.5px">删除</button></td>
+    </tr>`;
+  }).join('');
+
+  const incRows = (incRes.items || []).map((it) => {
+    const scope = (it.nodeIds && it.nodeIds.length)
+      ? it.nodeIds.map((id) => { const n = nodes.find((x) => x.id === id); return n ? n.name : id; }).join('、')
+      : '全局';
+    return `<tr>
+      <td class="strong">${esc(it.title)}<div style="font-size:11px;color:var(--fg-3);font-weight:400">${esc((it.body || '').slice(0, 60))}</div></td>
+      <td><span class="dot ${it.level === 'critical' ? 'crit' : it.level === 'warn' ? 'warn' : 'ok'}"></span> ${esc(it.level)}</td>
+      <td>${esc(scope)}</td>
+      <td class="mono" style="font-size:11.5px">${esc(fullTs(it.startAt))}${it.endAt ? '<br>→ ' + esc(fullTs(it.endAt)) : '<br>进行中'}</td>
+      <td class="num"><button class="btn danger" data-del-inc="${esc(it.id)}" style="padding:3px 10px;font-size:11.5px">删除</button></td>
+    </tr>`;
+  }).join('');
+
+  $('#view').innerHTML = `
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">展示配置</h2>
+        <span class="section-meta">公开页 /status</span>
+        <a class="btn" href="/status" target="_blank" rel="noopener" style="margin-left:auto;padding:6px 14px;font-size:12.5px">打开公开页 ↗</a>
+      </div>
+      <form id="spForm" class="panel panel-pad">
+        <div class="grid-2">
+          ${field('站点标题', 'title', cfg.title || '', { required: true, hint: '浏览器标签页与页面主标题' })}
+          ${selectField('可用率日柱天数', 'historyDays', String(cfg.historyDays || 90),
+            [{ v: '30', t: '30 天' }, { v: '60', t: '60 天' }, { v: '90', t: '90 天' }])}
+        </div>
+        <div class="field" style="margin-top:10px">
+          <span class="field-label">置顶公告</span>
+          <textarea name="annText" rows="2" placeholder="例如：今晚 23:00 主控迁移，期间可能短暂不可用。">${esc(ann.text || '')}</textarea>
+        </div>
+        <div class="grid-2" style="margin-top:10px">
+          ${checkbox('启用公告', 'annEnabled', !!ann.enabled)}
+          ${selectField('公告级别', 'annLevel', ann.level || 'info',
+            [{ v: 'info', t: '信息' }, { v: 'warn', t: '警告' }, { v: 'critical', t: '严重' }])}
+        </div>
+        <div style="margin-top:14px">
+          <div class="field-label">公开字段（未勾选的字段不会出现在公开页，关闭是安全的默认值）</div>
+          <div class="check-grid">${visBoxes}</div>
+        </div>
+        <div style="margin-top:14px">
+          <div class="field-label">显示区块</div>
+          <div class="check-grid">${blockBoxes}</div>
+        </div>
+        <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+          <button class="btn primary" type="submit">保存配置</button>
+          <span id="spSaved" style="font-size:12px;color:var(--ok)"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">维护窗口</h2>
+        <span class="section-meta">窗口内不产生新告警，公开页显示"维护中"</span>
+        <button class="btn primary" id="mtAdd" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 新建维护窗口</button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>标题</th><th>范围</th><th>起止</th><th>状态</th><th class="num">操作</th></tr></thead>
+        <tbody>${mtRows || '<tr><td colspan="5"><div class="empty">没有维护窗口</div></td></tr>'}</tbody>
+      </table></div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">人工事件</h2>
+        <span class="section-meta">与告警一起出现在公开页时间线</span>
+        <button class="btn primary" id="incAdd" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 登记事件</button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>标题</th><th>级别</th><th>影响范围</th><th>时间</th><th class="num">操作</th></tr></thead>
+        <tbody>${incRows || '<tr><td colspan="5"><div class="empty">没有人工事件</div></td></tr>'}</tbody>
+      </table></div>
+    </section>`;
+
+  // ---- 保存展示配置 ----
+  $('#spForm').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    const vis = {};
+    STATUS_VIS_ITEMS.forEach(([k]) => { vis[k] = f.querySelector(`[name="vis_${k}"]`).checked; });
+    const blocks = {};
+    STATUS_BLOCK_ITEMS.forEach(([k]) => { blocks[k] = f.querySelector(`[name="blk_${k}"]`).checked; });
+    const body = {
+      title: f.title.value.trim(),
+      historyDays: parseInt(f.historyDays.value, 10) || 90,
+      announcement: {
+        enabled: f.querySelector('[name="annEnabled"]').checked,
+        level: f.annLevel.value,
+        text: f.annText.value.trim(),
+      },
+      visibility: vis,
+      blocks,
+    };
+    try {
+      await adminApi('/api/admin/status-page', { method: 'PUT', body: JSON.stringify(body) });
+      $('#spSaved').textContent = '已保存 ✓';
+      setTimeout(() => { const el = $('#spSaved'); if (el) el.textContent = ''; }, 2500);
+      toast('公开页配置已更新');
+    } catch (err) {
+      toast('保存失败：' + err.message, 'err');
+    }
+  };
+
+  // ---- 维护窗口 ----
+  $('#mtAdd').onclick = () => openMaintenanceDialog(nodes);
+  $$('[data-del-mt]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('删除该维护窗口？窗口内正在进行的维护不会再显示。')) return;
+      try {
+        await adminApi('/api/admin/maintenance/' + encodeURIComponent(b.dataset.delMt), { method: 'DELETE' });
+        toast('已删除');
+        viewStatusPage();
+      } catch (err) { toast('删除失败：' + err.message, 'err'); }
+    };
+  });
+
+  // ---- 人工事件 ----
+  $('#incAdd').onclick = () => openIncidentDialog(nodes);
+  $$('[data-del-inc]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('删除该事件？它会同时从公开页时间线消失。')) return;
+      try {
+        await adminApi('/api/admin/incidents/' + encodeURIComponent(b.dataset.delInc), { method: 'DELETE' });
+        toast('已删除');
+        viewStatusPage();
+      } catch (err) { toast('删除失败：' + err.message, 'err'); }
+    };
+  });
+}
+
+function fullTs(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => (n < 10 ? '0' : '') + n;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// nodePicker 生成"影响范围"多选框列表（全部节点 + 分组归类展示）。
+function nodePicker(nodes, name) {
+  if (!nodes.length) return '<div class="empty">暂无节点</div>';
+  return `<div class="check-grid">${nodes.map((n) =>
+    `<label class="check"><input type="checkbox" name="${name}" value="${esc(n.id)}"><span>${esc(n.name)}</span></label>`
+  ).join('')}</div>`;
+}
+function pickedIDs(form, name) {
+  return $$(`input[name="${name}"]:checked`, form).map((c) => c.value);
+}
+
+function openMaintenanceDialog(nodes) {
+  const dlg = openDialog('新建维护窗口', `
+    <form id="mtForm">
+      ${field('标题', 'title', '', { required: true, placeholder: '例如：主控迁移' })}
+      ${field('说明（可选）', 'reason', '', { placeholder: '访客会在公开页看到这段说明' })}
+      <div class="field"><span class="field-label">影响范围（不选 = 全部节点）</span>${nodePicker(nodes, 'mtNode')}</div>
+      <div class="grid-2">
+        ${field('开始（留空 = 立即）', 'startAt', '', { type: 'datetime-local' })}
+        ${field('持续（分钟，默认 60）', 'minutes', '', { type: 'number', placeholder: '60' })}
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">创建</button>
+      </div>
+    </form>`);
+  const f = dlg.querySelector('#mtForm');
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const start = f.startAt.value ? Math.floor(new Date(f.startAt.value).getTime() / 1000) : 0;
+    const minutes = parseInt(f.minutes.value, 10) || 0;
+    try {
+      await adminApi('/api/admin/maintenance', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: f.title.value.trim(),
+          reason: f.reason.value.trim(),
+          nodeIds: pickedIDs(f, 'mtNode'),
+          startAt: start,
+          minutes,
+        }),
+      });
+      close();
+      toast('维护窗口已创建');
+      viewStatusPage();
+    } catch (err) { toast('创建失败：' + err.message, 'err'); }
+  };
+}
+
+function openIncidentDialog(nodes) {
+  const dlg = openDialog('登记事件', `
+    <form id="incForm">
+      ${field('标题', 'title', '', { required: true, placeholder: '例如：上游出口抖动' })}
+      <div class="field"><span class="field-label">详情（可选）</span>
+        <textarea name="body" rows="3" placeholder="发生了什么、影响什么、怎么处理"></textarea></div>
+      <div class="grid-2">
+        ${selectField('级别', 'level', 'info',
+          [{ v: 'info', t: '信息' }, { v: 'warn', t: '警告' }, { v: 'critical', t: '严重' }])}
+        ${field('结束时间（留空 = 进行中）', 'endAt', '', { type: 'datetime-local' })}
+      </div>
+      <div class="field"><span class="field-label">受影响节点（不选 = 全局）</span>${nodePicker(nodes, 'incNode')}</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">登记</button>
+      </div>
+    </form>`);
+  const f = dlg.querySelector('#incForm');
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const end = f.endAt.value ? Math.floor(new Date(f.endAt.value).getTime() / 1000) : 0;
+    try {
+      await adminApi('/api/admin/incidents', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: f.title.value.trim(),
+          body: f.body.value.trim(),
+          level: f.level.value,
+          nodeIds: pickedIDs(f, 'incNode'),
+          endAt: end,
+        }),
+      });
+      close();
+      toast('事件已登记');
+      viewStatusPage();
+    } catch (err) { toast('登记失败：' + err.message, 'err'); }
+  };
+}
+
 // showNodeEdit 编辑节点台账，避免为了改名/改价删除节点、丢失历史。
 function showNodeEdit(n) {
   const dlg = document.createElement('div');
@@ -1808,6 +2195,7 @@ const ROUTES = {
   services: { title: '服务', sub: '网站与端口可用性探测', fn: viewServices },
   alerts: { title: '告警', sub: '规则触发与历史记录', fn: viewAlerts },
   assets: { title: '台账', sub: '资产、到期与成本', fn: viewAssets },
+  statuspage: { title: '状态页', sub: '公开页 /status 的展示、维护窗口与事件', fn: viewStatusPage },
   settings: { title: '设置', sub: '节点、探测与通知配置', fn: viewSettings },
 };
 

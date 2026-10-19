@@ -167,6 +167,174 @@ type NotifyStats struct {
 	LastSuccess int64 `json:"lastSuccess"`
 }
 
+// ---------- 公开状态页 ----------
+
+// 公告级别。与告警级别取值一致，便于前端复用同一套配色。
+const (
+	LevelInfo     = "info"
+	LevelWarn     = "warn"
+	LevelCritical = "critical"
+)
+
+// ValidLevel 判断公告/事件级别是否合法。
+func ValidLevel(v string) bool {
+	switch v {
+	case LevelInfo, LevelWarn, LevelCritical:
+		return true
+	}
+	return false
+}
+
+// StatusAnnouncement 是状态页顶部的置顶公告。
+// 用于"已知问题正在处理"这类人工说明，与自动告警相互独立。
+type StatusAnnouncement struct {
+	Enabled   bool   `json:"enabled"`
+	Level     string `json:"level"` // info | warn | critical
+	Text      string `json:"text"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+// StatusVisibility 控制哪些字段允许出现在**公开**状态页。
+//
+// 默认值全部为 false 的语义在这里不成立：未配置的字段按"不公开"处理最安全，
+// 因此这里逐项显式列出，由 DefaultStatusPage 决定默认开放哪些。
+// 主机名、内核版本、CPU 型号属于可用于指纹识别的信息，默认不公开。
+type StatusVisibility struct {
+	Metrics  bool `json:"metrics"`  // CPU / 内存 / 磁盘 使用率
+	Load     bool `json:"load"`     // 负载 1/5/15
+	Uptime   bool `json:"uptime"`   // 连续运行时间
+	Traffic  bool `json:"traffic"`  // 实时网速与累计流量
+	Procs    bool `json:"procs"`    // 进程数
+	TCPConn  bool `json:"tcpConn"`  // TCP 连接数
+	Swap     bool `json:"swap"`     // Swap 用量
+	Hostname bool `json:"hostname"` // 真实主机名（可用于指纹识别）
+	OS       bool `json:"os"`
+	Kernel   bool `json:"kernel"`
+	Arch     bool `json:"arch"`
+	CPUModel bool `json:"cpuModel"`
+	Cores    bool `json:"cores"`
+	Virt     bool `json:"virt"`     // 虚拟化类型
+	Region   bool `json:"region"`   // 地区
+	Provider bool `json:"provider"` // 服务商
+}
+
+// StatusBlocks 控制公开页显示哪些区块。
+type StatusBlocks struct {
+	Summary    bool `json:"summary"`    // 顶部 KPI 汇总条
+	Services   bool `json:"services"`   // 服务探测区
+	Incidents  bool `json:"incidents"`  // 事件时间线
+	History    bool `json:"history"`    // N 天可用率日柱
+	NodeDetail bool `json:"nodeDetail"` // 允许点进节点详情页
+}
+
+// StatusPage 是公开状态页的展示配置。
+//
+// 序列化时先填 DefaultStatusPage() 再反序列化：JSON 里不存在的键会保留默认值，
+// 这样"新增字段"不会让老配置被静默读成 false。
+type StatusPage struct {
+	Title        string             `json:"title"`
+	Announcement StatusAnnouncement `json:"announcement"`
+	Visibility   StatusVisibility   `json:"visibility"`
+	Blocks       StatusBlocks       `json:"blocks"`
+	HistoryDays  int                `json:"historyDays"` // 可用率日柱天数：30 / 60 / 90
+}
+
+// DefaultStatusPage 返回默认配置。
+// 默认只公开"对外可说"的聚合指标，主机指纹类字段一律关闭。
+func DefaultStatusPage() StatusPage {
+	return StatusPage{
+		Title: "服务状态",
+		Visibility: StatusVisibility{
+			Metrics: true, Load: true, Uptime: true,
+			Traffic: true, Procs: false, TCPConn: false, Swap: false,
+			Hostname: false, OS: false, Kernel: false, Arch: false,
+			CPUModel: false, Cores: false, Virt: false,
+			Region: true, Provider: false,
+		},
+		Blocks: StatusBlocks{
+			Summary: true, Services: true, Incidents: true,
+			History: true, NodeDetail: true,
+		},
+		HistoryDays: 90,
+	}
+}
+
+// Normalize 把配置修正到合法取值：非法级别退回 info，
+// 天数夹到 30–90，标题过长截断。任何非法输入都不能让公开页报错。
+func (c *StatusPage) Normalize() {
+	if c.Title == "" {
+		c.Title = "服务状态"
+	}
+	if len([]rune(c.Title)) > 64 {
+		c.Title = string([]rune(c.Title)[:64])
+	}
+	if !ValidLevel(c.Announcement.Level) {
+		c.Announcement.Level = LevelInfo
+	}
+	if len([]rune(c.Announcement.Text)) > 1000 {
+		c.Announcement.Text = string([]rune(c.Announcement.Text)[:1000])
+	}
+	if !c.Announcement.Enabled || c.Announcement.Text == "" {
+		// 空公告必须整体失效：否则前端会渲染一个空的横幅占位块。
+		c.Announcement.Enabled = false
+	}
+	switch c.HistoryDays {
+	case 30, 60, 90:
+	default:
+		c.HistoryDays = 90
+	}
+}
+
+// Maintenance 是一段计划维护窗口。
+//
+// 窗口内的节点：状态页标记为"维护中"，告警引擎不再对其产生新告警，
+// 已存在的活跃告警以"计划维护"为由关闭 —— 否则计划内重启会刷一屏离线告警。
+type Maintenance struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Reason    string   `json:"reason,omitempty"`
+	NodeIDs   []string `json:"nodeIds,omitempty"` // 空表示全部节点
+	StartAt   int64    `json:"startAt"`
+	EndAt     int64    `json:"endAt"`
+	CreatedAt int64    `json:"createdAt"`
+}
+
+// ActiveAt 判断窗口在 ts 时刻是否生效。
+// EndAt <= StartAt 视为配置错误，按不生效处理（否则窗口永不结束）。
+func (m *Maintenance) ActiveAt(ts int64) bool {
+	if m == nil || m.EndAt <= m.StartAt {
+		return false
+	}
+	return ts >= m.StartAt && ts < m.EndAt
+}
+
+// Covers 判断窗口是否覆盖指定节点。NodeIDs 为空表示全局。
+func (m *Maintenance) Covers(nodeID string) bool {
+	if m == nil || len(m.NodeIDs) == 0 {
+		return true
+	}
+	for _, id := range m.NodeIDs {
+		if id == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// Incident 是一条人工登记的事件（事故/变更/公告）。
+// 与告警的区别：告警由规则自动生成，事件由管理员手工撰写，
+// 用于状态页的"事件时间线"里说明那些没有触发告警但用户应该知道的事。
+type Incident struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body,omitempty"`
+	Level     string   `json:"level"`             // info | warn | critical
+	NodeIDs   []string `json:"nodeIds,omitempty"` // 受影响的节点，空表示全局
+	StartAt   int64    `json:"startAt"`
+	EndAt     int64    `json:"endAt"` // 0 表示仍在进行
+	CreatedAt int64    `json:"createdAt"`
+}
+
 // ---------- 以下是直接下发给前端的视图模型 ----------
 
 // 节点状态。online/stale/offline 由最后上报时间推导；
