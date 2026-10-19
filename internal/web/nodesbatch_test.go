@@ -100,8 +100,9 @@ func TestNodesBatchRejectsNonAdmin(t *testing.T) {
 // TestValidDate 到期日校验。
 func TestValidDate(t *testing.T) {
 	cases := map[string]bool{
-		"2027-01-31": true, "2027-12-01": true,
+		"2027-01-31": true, "2027-12-01": true, "2024-02-29": true,
 		"2027-13-01": false, "2027-00-10": false, "2027-01-32": false,
+		"2026-02-31": false, "2026-04-31": false, "2023-02-29": false,
 		"2027/01/01": false, "20270101": false, "2027-1-1": false, "": false,
 	}
 	for in, want := range cases {

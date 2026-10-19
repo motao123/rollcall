@@ -31,6 +31,9 @@
 # 不锚定根目录：运维常在任意工作目录下用相对路径启动 Agent，
 # 只拦 /agent.json 等于只保护了文档里的那一种启动方式。
 agent.json
+# 但随仓库分发的示例配置必须保留：未锚定的规则会在文件被删除后
+# 阻止重新 git add deploy/agent.json。
+!/deploy/agent.json
 
 # 工具链 / IDE / 系统产物
 .DS_Store
@@ -48,10 +51,17 @@ coverage.out
 *.p12
 *.pfx
 *.p8
+# 签名校验测试需要一次性密钥对作夹具，不属于运行时凭据
+!testdata/**/*.key
+!testdata/**/*.pem
 
 # 其他凭据载体：环境变量文件、导出的管理令牌、面板账号文件
 .env
 .env.*
+# 示例/模板文件不含真实凭据，按约定允许入库
+!.env.example
+!.env.sample
+!.env.template
 admin.token
 # 面板管理员账号（仅 PBKDF2 哈希）；运行时位于数据目录，此处防止本地测试时落在仓库里
 admin-user.json

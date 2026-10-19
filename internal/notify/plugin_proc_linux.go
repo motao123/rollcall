@@ -22,10 +22,26 @@ func prepareProcess(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
+		// Go 1.24 的 Process 通过 pidfd 追踪子进程：已被 Wait 回收时
+		// Signal 返回 ErrProcessDone。必须先做这个检查，再向 -pid 发信号；
+		// 否则延迟到达的 Cancel 可能命中 PID 复用后的无关进程组。
+		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+			return err
+		}
 		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 			// 进程组已消失或权限不足时退回单进程，保证 Cancel 仍能收尾。
 			return cmd.Process.Kill()
 		}
 		return nil
 	}
+}
+
+// cleanupProcess 在 Run 返回后回收进程组中的残留孙进程。
+// 组内仍有成员时 PGID 不会被内核复用，因此这里按 -pid 补刀不会
+// 命中无关进程；组已空时 kill 返回 ESRCH，忽略即可。
+func cleanupProcess(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }

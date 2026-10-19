@@ -121,6 +121,12 @@ func sign(args []string) {
 	var assets assetList
 	fs.Var(&assets, "asset", "平台=文件路径（可重复）")
 	_ = fs.Parse(args)
+	// Go 的 flag 解析在遇到第一个非 flag 参数时停止，后面的 -asset
+	// 会被静默忽略；宁可报错，也不能签出一份缺平台的清单。
+	if fs.NArg() > 0 {
+		fatal("无法识别的参数: %s（-asset 等选项必须写在位置参数之前）",
+			strings.Join(fs.Args(), " "))
+	}
 
 	if strings.TrimSpace(*ver) == "" || !selfupdate.ValidVersion(*ver) {
 		fatal("-version 必填且必须是合法版本号")
@@ -154,7 +160,9 @@ func sign(args []string) {
 		fmt.Println(string(env))
 		return
 	}
-	if err := os.WriteFile(*out, append(env, '\n'), 0o644); err != nil {
+	// 先写临时文件再 rename：既避免写到一半留下残缺清单，也避免
+	// WriteFile 跟随符号链接把 -out 指向的目标（例如私钥）截断。
+	if err := writeFileAtomic(*out, append(env, '\n'), 0o644); err != nil {
 		fatal("写入清单失败: %v", err)
 	}
 	fmt.Printf("已写入 %s（版本 %s，%d 个资产）\n", *out, m.Version, len(m.Assets))
@@ -192,17 +200,66 @@ func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }
 
+// writeFileAtomic 通过同目录临时文件 + rename 写入，
+// 符号链接会被替换而不是跟随，崩溃时也不会留下半份清单。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".rollsign-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if _, err := f.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // joinURL 把资产文件名安全地拼到基础地址后面。
 //
-// 直接做字符串拼接时，含空格、`#`、`?` 的文件名会生成非法或语义错误的地址：
-// `#` 之后被浏览器当成片段、`?` 被当成查询串，Agent 因此下载不到资产。
+// 直接在字符串末尾拼 "/" 会改到 query/fragment；只取解码后的 Path
+// 又会丢掉基础地址原有的转义（`%2F` 变成真正的分隔符）。这里分别
+// 维护 Path 与 RawPath：基础部分沿用原转义，文件名按路径段转义。
 func joinURL(base, name string) (string, error) {
-	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(base), "/") + "/")
+	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil {
 		return "", err
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/" + name
-	u.RawPath = ""
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("基础地址必须是完整 URL")
+	}
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("资产文件名无效: %q", name)
+	}
+	decoded := strings.TrimRight(u.Path, "/") + "/" + name
+	escaped := strings.TrimRight(u.EscapedPath(), "/") + "/" + url.PathEscape(name)
+	u.Path = decoded
+	if escaped != decoded {
+		u.RawPath = escaped
+	} else {
+		u.RawPath = ""
+	}
 	return u.String(), nil
 }
 
@@ -212,8 +269,11 @@ func joinURL(base, name string) (string, error) {
 // 签出的清单看起来完全正常却缺少一个架构 —— 而清单一旦签名发布，
 // 那个平台就再也收不到更新。
 func buildManifest(assets []string, version string, publishedAt int64, baseURL string, allowInsecure bool) (*selfupdate.Manifest, error) {
+	// ValidVersion 接受首尾空白与 v/V 前缀；清单里统一存不带前缀的版本。
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(strings.TrimPrefix(version, "v"), "V")
 	m := &selfupdate.Manifest{
-		Version:     strings.TrimPrefix(version, "v"),
+		Version:     version,
 		PublishedAt: publishedAt,
 		Assets:      make(map[string]selfupdate.Asset, len(assets)),
 	}

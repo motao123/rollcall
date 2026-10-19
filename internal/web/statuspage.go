@@ -506,10 +506,14 @@ footer .mono{color:var(--fg3)}
 .skel-hero{height:220px;margin-bottom:14px}
 .skel-row{display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin-top:16px}
 .skel-card{height:250px}
-#jsfail{display:none;animation:jsfailIn 1ms linear 12s forwards}
+/* 脚本正常执行时会立刻给 <html> 加 js-ok：兜底提示必须随之消失，
+ * 否则每次成功加载的页面在 12 秒后也会弹出「脚本未能加载」。
+ * 用 visibility/opacity 而不是 display：display 在部分浏览器里不可动画。 */
+#jsfail{visibility:hidden;opacity:0;animation:jsfailIn 1ms linear 12s forwards}
+html.js-ok #jsfail{display:none}
 @keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
 @keyframes skelOut{to{opacity:0;visibility:hidden}}
-@keyframes jsfailIn{to{display:block}}
+@keyframes jsfailIn{to{visibility:visible;opacity:1}}
 @keyframes cardIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
 @keyframes valueFlash{0%{color:var(--accent)}100%{color:inherit}}
 @keyframes livePulse{0%,100%{box-shadow:0 0 0 4px var(--ok-bg)}50%{box-shadow:0 0 0 7px transparent}}

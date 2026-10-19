@@ -28,13 +28,27 @@ func TestEnsureDefaultRulesDoesNotResurrect(t *testing.T) {
 	}
 }
 
-// TestEnsureDefaultRulesKeepsExisting 已有自定义规则的实例不应被塞入默认规则。
-func TestEnsureDefaultRulesKeepsExisting(t *testing.T) {
+// TestEnsureDefaultRulesCompletesPartialSeed 标记缺失代表上次播种未完整结束：
+// 已有自定义规则可以保留，但缺失的默认规则要补齐，且不能重复添加已有的。
+func TestEnsureDefaultRulesCompletesPartialSeed(t *testing.T) {
 	st := store.New(t.TempDir())
 	st.UpsertRule(&model.AlertRule{ID: "custom", Name: "自定义", Metric: "cpu", Enabled: true})
+	st.UpsertRule(&model.AlertRule{ID: "r_cpu", Name: "已存在", Metric: "cpu", Enabled: true})
 	ensureDefaultRules(st)
-	if got := len(st.Rules()); got != 1 {
-		t.Fatalf("已有规则时不应添加默认规则，实际 %d 条", got)
+	if got := len(st.Rules()); got != 5 {
+		t.Fatalf("1 条自定义 + 4 条默认规则应为 5 条，实际 %d 条", got)
+	}
+	var cpu *model.AlertRule
+	for _, r := range st.Rules() {
+		if r.ID == "r_cpu" {
+			cpu = r
+		}
+	}
+	if cpu == nil || cpu.Name != "已存在" {
+		t.Fatalf("已有的默认规则不应被覆盖: %+v", cpu)
+	}
+	if st.GetSetting("rulesInitialized") == "" {
+		t.Fatal("补齐后应写入初始化标记")
 	}
 }
 

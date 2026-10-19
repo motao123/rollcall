@@ -82,7 +82,17 @@ func (u *User) Authenticate(identifier, password string) bool {
 
 // LoadUser 读取并严格校验管理员配置文件。
 func LoadUser(path string) (*User, error) {
-	fi, err := os.Stat(path)
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("管理员配置文件不能是符号链接")
+	}
+	// O_NOFOLLOW + fstat：打开后所有校验都作用于同一个文件描述符，
+	// 避免「Stat/Chmod/ReadFile 各自解析路径」被换链攻击。
+	f, err := openNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +101,16 @@ func LoadUser(path string) (*User, error) {
 	}
 	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		// 哈希本身不是明文，但不应让同机其他用户读到盐与哈希。
-		if err := os.Chmod(path, 0o600); err != nil {
+		if err := f.Chmod(0o600); err != nil {
 			return nil, fmt.Errorf("管理员配置文件权限过宽且无法收紧: %w", err)
 		}
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := io.ReadAll(io.LimitReader(f, maxUserFile+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > maxUserFile {
+		return nil, errors.New("管理员配置文件超过 64KB")
 	}
 	var u User
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -201,7 +214,16 @@ func LoadOrCreateUser(path, username, email, initialPassword string, reset bool)
 		PasswordHash: hash,
 		UpdatedAt:    time.Now().Unix(),
 	}
-	if err := saveUser(path, u); err != nil {
+	if err := saveUserExclusive(path, u); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// 另一个实例已经创建了账号：复用它，避免两边各自生成随机密码、
+			// 后写入者覆盖前者，导致启动日志打印的密码无法登录。
+			existing, loadErr := LoadUser(path)
+			if loadErr != nil {
+				return nil, false, "", loadErr
+			}
+			return existing, false, "", nil
+		}
 		return nil, false, "", err
 	}
 	return u, true, generatedPassword, nil
@@ -257,5 +279,59 @@ func saveUser(path string, u *User) error {
 		_ = os.Remove(name)
 		return fmt.Errorf("替换管理员配置失败: %w", err)
 	}
+	syncDir(dir)
 	return nil
+}
+
+// saveUserExclusive 仅在配置文件不存在时创建，用于首次初始化账号。
+// 两个实例同时首次启动时，只有一个能创建成功，另一个会读到同一份配置。
+func saveUserExclusive(path string, u *User) error {
+	if err := u.validate(); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(u, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("创建管理员配置目录失败: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	name := path
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(name)
+	}
+	if _, err := f.Write(raw); err != nil {
+		cleanup()
+		return fmt.Errorf("写入管理员配置失败: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("落盘管理员配置失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return fmt.Errorf("关闭管理员配置失败: %w", err)
+	}
+	syncDir(dir)
+	return nil
+}
+
+// syncDir 让 rename/create 的目录项本身落盘（Windows 不支持目录 fsync）。
+func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }

@@ -12,6 +12,10 @@
 (function () {
   'use strict';
 
+  // 脚本能执行到这一行，就说明没有被 CSP/扩展拦截：
+  // 立刻关掉 CSS 里的「脚本未能加载」兜底提示（见 statuspage.go 的 html.js-ok）。
+  document.documentElement.classList.add('js-ok');
+
   /* ---------------- 转义与格式化 ---------------- */
 
   var esc = function (s) {
@@ -803,13 +807,13 @@
     var latSpark = s.latencySpark && s.latencySpark.length > 1 ?
       sparkSVG(s.latencySpark, 'var(--accent-2)', { height: 24 }) : '';
     var foot = [];
-    foot.push(has ? fixed(s.uptime, 1) + '% 可用' : '暂无数据');
+    foot.push(s.uptime != null ? fixed(s.uptime, 1) + '% 可用' : '暂无数据');
     if (s.failRate) foot.push('失败 ' + fixed(s.failRate, 2) + '%');
     return '<div class="svc" data-svc="' + i + '">' +
       '<span class="svc-dot ' + dot + '" data-f="svc-dot"></span>' +
       '<span class="svc-name">' + esc(s.name) + '</span>' +
       '<span class="svc-side"><span class="svc-lat ' + cls + '" data-f="svc-lat">' + latTxt + '</span>' +
-        '<span data-f="svc-uptime">' + (has ? fixed(s.uptime, 1) + '%' : '—') + '</span></span>' +
+        '<span data-f="svc-uptime">' + (s.uptime != null ? fixed(s.uptime, 1) + '%' : '—') + '</span></span>' +
       '<span class="svc-spark" data-f="svc-spark">' + latSpark + '</span>' +
       '<span class="svc-meta"><span data-f="svc-foot">' + esc(foot.join(' · ')) + '</span>' +
         '<span class="service-note">' + (has && !s.ok ? '探测失败' : '近 24 小时') + '</span></span>' +
@@ -1213,9 +1217,9 @@
         latEl.className = 'svc-lat ' + (lat != null ? latCls(lat) : 'none');
       }
       var upEl = el.querySelector('[data-f="svc-uptime"]');
-      if (upEl) upEl.textContent = has ? fixed(s.uptime, 1) + '%' : '—';
+      if (upEl) upEl.textContent = s.uptime != null ? fixed(s.uptime, 1) + '%' : '—';
       var foot = [];
-      foot.push(has ? fixed(s.uptime, 1) + '% 可用' : '暂无数据');
+      foot.push(s.uptime != null ? fixed(s.uptime, 1) + '% 可用' : '暂无数据');
       if (s.failRate) foot.push('失败 ' + fixed(s.failRate, 2) + '%');
       var footEl = el.querySelector('[data-f="svc-foot"]');
       if (footEl) footEl.textContent = foot.join(' · ');
@@ -1449,7 +1453,7 @@ function detailTitle(n) {
       var lat = has && s.latencyMs != null ? s.latencyMs : null;
       var cls = lat != null ? latCls(lat) : 'none';
       var stats = [];
-      if (has) stats.push('<span>24h 可用 <b>' + fixed(s.uptime, 1) + '%</b></span>');
+      if (s.uptime != null) stats.push('<span>24h 可用 <b>' + fixed(s.uptime, 1) + '%</b></span>');
       if (s.failRate) stats.push('<span>失败率 <b>' + fixed(s.failRate, 2) + '%</b></span>');
       if (s.avgLatency != null) stats.push('<span>平均延迟 <b>' + fixed(s.avgLatency, 0) + 'ms</b></span>');
       if (s.samples) stats.push('<span>成功样本 <b>' + s.samples + '</b></span>');

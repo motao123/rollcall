@@ -53,6 +53,9 @@ func TestCheckIPPolicy(t *testing.T) {
 		{"fe80::1", true, true},
 		{"0.0.0.0", true, true},
 		{"224.0.0.1", true, true},
+		// IPv4-compatible / IPv4-translated 内嵌地址，To4() 为 nil
+		{"::10.0.0.1", true, true},
+		{"::ffff:0:10.0.0.1", true, true},
 	}
 	for _, c := range cases {
 		p := Policy{AllowPrivate: c.allowPrivate}
@@ -61,6 +64,19 @@ func TestCheckIPPolicy(t *testing.T) {
 			t.Errorf("CheckIP(%s, allowPrivate=%v) err=%v, wantErr=%v",
 				c.ip, c.allowPrivate, err, c.wantErr)
 		}
+	}
+}
+
+// TestCheckHostNormalizesLiterals 防止方括号/区域后缀让 IP 字面量被当成域名放行。
+func TestCheckHostNormalizesLiterals(t *testing.T) {
+	p := Policy{}
+	for _, host := range []string{"[::1]", "::1", "[fe80::1%eth0]", "fe80::1%eth0"} {
+		if err := p.CheckHost(host); err == nil {
+			t.Errorf("CheckHost(%q) 应当被拒绝", host)
+		}
+	}
+	if err := p.CheckHost("example.com"); err != nil {
+		t.Errorf("域名应在拨号时校验，不应提前拒绝: %v", err)
 	}
 }
 

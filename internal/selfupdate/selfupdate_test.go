@@ -115,6 +115,9 @@ func TestVerifyEnvelope(t *testing.T) {
 		{"linux-amd64": {URL: "https://x/a", SHA256: sha(body), Size: 1}},
 		{"bad key": {URL: "https://x/a", SHA256: sha(body), Size: 2048}},
 		{"linux-amd64": {SHA256: sha(body), Size: 2048}},
+		{"linux-amd64": {URL: "file:///etc/passwd", SHA256: sha(body), Size: 2048}},
+		{"linux-amd64": {URL: "https://:443/a", SHA256: sha(body), Size: 2048}},
+		{"linux-amd64": {URL: "https://user:pass@example.com/a", SHA256: sha(body), Size: 2048}},
 	}
 	for _, assets := range cases {
 		raw := envelopeJSON(t, payload{Version: "1.7.0", Assets: assets}, priv)
@@ -240,6 +243,9 @@ func TestUpdaterURLPolicy(t *testing.T) {
 	}
 	if _, err := New("ftp://example.com/x", key, true); err == nil {
 		t.Fatal("非 http(s) 应拒绝")
+	}
+	if _, err := New("https://:443/x", key, true); err == nil {
+		t.Fatal("空主机名应拒绝")
 	}
 	if _, err := New("https://example.com/x", "not-base64", true); err == nil {
 		t.Fatal("非法公钥应拒绝")

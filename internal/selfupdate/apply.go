@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,17 @@ type updateState struct {
 func StatePath(exe string) string  { return exe + ".update-pending" }
 func BackupPath(exe string) string { return exe + ".prev" }
 
+// stateMu 串行化启动标记的读-改-写。
+//
+// Apply 在更新 goroutine 里写标记，上报循环同时会调用 MarkStable；
+// 没有锁时「读标记 → 比版本 → 删除」中间可能插入一次 Apply 的新标记写入，
+// 结果被 MarkStable 删掉，崩溃循环的新版本永远等不到回滚。
+var stateMu sync.Mutex
+
+// errCorruptState 标记状态文件内容损坏；只有这种情况可以安全丢弃标记，
+// 临时 I/O 错误必须保留，否则回滚计数会被清零。
+var errCorruptState = errors.New("更新状态文件损坏")
+
 func readState(exe string) (*updateState, error) {
 	b, err := os.ReadFile(StatePath(exe))
 	if err != nil {
@@ -40,7 +52,7 @@ func readState(exe string) (*updateState, error) {
 	}
 	var st updateState
 	if err := json.Unmarshal(b, &st); err != nil {
-		return nil, fmt.Errorf("更新状态文件损坏: %w", err)
+		return nil, fmt.Errorf("%w: %v", errCorruptState, err)
 	}
 	return &st, nil
 }
@@ -90,13 +102,19 @@ func writeState(exe string, st *updateState) error {
 //
 // 标记损坏或版本不匹配时直接清理，不阻塞 Agent 启动。
 func HandleStartup(exe, currentVersion string) (bool, error) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	st, err := readState(exe)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	if err != nil {
+	if errors.Is(err, errCorruptState) {
 		_ = os.Remove(StatePath(exe))
 		return false, nil
+	}
+	if err != nil {
+		// 临时 I/O 错误：保留标记，下次启动继续计数/回滚。
+		return false, fmt.Errorf("读取更新标记失败: %w", err)
 	}
 	if st.RolledBack {
 		return false, nil
@@ -135,13 +153,18 @@ func HandleStartup(exe, currentVersion string) (bool, error) {
 // 下次启动看不到 pending，HandleStartup 直接返回，
 // 一个启动即崩溃的版本会被 systemd 无限重启而永不回滚。
 func MarkStable(exe, currentVersion string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	st, err := readState(exe)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil {
+	if errors.Is(err, errCorruptState) {
 		_ = os.Remove(StatePath(exe))
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("读取更新标记失败: %w", err)
 	}
 	if st.RolledBack {
 		return nil
@@ -155,6 +178,8 @@ func MarkStable(exe, currentVersion string) error {
 
 // BlockedVersion 返回回滚后仍在冷却期内的版本。
 func BlockedVersion(exe string) (string, bool) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	st, err := readState(exe)
 	if err != nil || !st.RolledBack || st.FailedAt == 0 {
 		return "", false
@@ -168,6 +193,8 @@ func BlockedVersion(exe string) (string, bool) {
 // Apply 备份当前可执行文件、写入启动标记并原子替换为新版本。
 // downloaded 必须与 exe 同目录（Download 已保证）。
 func Apply(exe, downloaded, newVersion string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	if _, ok := parseVersion(newVersion); !ok {
 		return fmt.Errorf("更新版本号无效: %q", newVersion)
 	}
@@ -238,6 +265,8 @@ func Apply(exe, downloaded, newVersion string) error {
 
 // ManualRollback 把 .prev 恢复为当前可执行文件，并记录失败版本冷却。
 func ManualRollback(exe, failedVersion string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	if err := restoreBackup(exe); err != nil {
 		return err
 	}
@@ -252,7 +281,15 @@ var errNoBackup = errors.New("没有可用的上一版本备份（.prev）")
 func restoreBackup(exe string) error {
 	bak := BackupPath(exe)
 	fi, err := os.Stat(bak)
-	if err != nil || !fi.Mode().IsRegular() {
+	if errors.Is(err, os.ErrNotExist) {
+		return errNoBackup
+	}
+	if err != nil {
+		// 权限/IO 抖动不是「没有备份」：按暂时性失败上报，
+		// 让 HandleStartup 保留启动标记并在下次启动重试。
+		return fmt.Errorf("检查备份失败: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
 		return errNoBackup
 	}
 	perm := fi.Mode().Perm()
@@ -290,10 +327,12 @@ func copyToTemp(src, dir string, mode os.FileMode) (string, error) {
 	if _, err := io.Copy(tmp, in); err != nil {
 		return fail(err)
 	}
-	if err := tmp.Sync(); err != nil {
+	// chmod 改的是元数据，必须在 fsync 之前完成，否则崩溃后可能以
+	// CreateTemp 的 0600（无执行位）落盘，内核直接拒绝 exec。
+	if err := tmp.Chmod(mode); err != nil {
 		return fail(err)
 	}
-	if err := tmp.Chmod(mode); err != nil {
+	if err := tmp.Sync(); err != nil {
 		return fail(err)
 	}
 	if err := tmp.Close(); err != nil {

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -233,6 +234,11 @@ func main() {
 	}
 
 	send := func() error {
+		// 非 Linux 构建没有 /proc 采集实现，Collect 只能返回全零。
+		// 直接拒绝上报，避免面板把「没有数据」误当成「资源用量为 0」。
+		if !collect.Supported() {
+			return fmt.Errorf("当前平台 %s 不支持指标采集（仅 Linux），拒绝上报全零数据", runtime.GOOS)
+		}
 		m := c.Collect()
 		rep := model.Report{NodeID: cfg.NodeID, Host: host, Metrics: m}
 		body, err := json.Marshal(rep)
@@ -254,6 +260,10 @@ func main() {
 			return fmt.Errorf("上报失败: %w", err)
 		}
 		defer resp.Body.Close()
+		// 响应正文没有用途。有界读取并丢弃：既兑现 MaxResponseBytes
+		// 承诺（服务端被控也不能诱导 Agent 下载大文件），又能让
+		// keep-alive 连接在响应读完后复用。
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, agentwire.MaxResponseBytes))
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("上报被拒绝: HTTP %d", resp.StatusCode)
 		}
@@ -339,13 +349,22 @@ func reportEndpoint(server string, allowInsecure bool) (string, error) {
 	}
 	// 只接受「协议 + 主机 + 可选端口」：带路径、查询串、片段或用户信息时，
 	// 简单拼接 /api/report 会得到意料之外的地址（甚至把凭据写进 URL）。
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	// ForceQuery 覆盖 `https://host?` 这种 RawQuery 为空但带 `?` 的写法：
+	// 简单拼接会得到 `https://host?/api/report`，请求落到错误路径。
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return "", fmt.Errorf("server 不能包含路径、查询串、片段或用户信息: %q", redactServer(raw))
 	}
 	if u.Scheme == "http" && !allowInsecure && !isLoopbackHost(u.Hostname()) {
 		return "", fmt.Errorf("server 使用明文 HTTP 会泄露节点令牌，请改用 https 或显式加 -allow-insecure: %q", redactServer(raw))
 	}
-	return server + "/api/report", nil
+	// 用解析结果重组，而不是拼接原始字符串：原始写法里的 `?`、多余斜杠等
+	// 都可能让最终地址偏离「协议 + 主机」。
+	u.Path = ""
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return strings.TrimSuffix(u.String(), "/") + "/api/report", nil
 }
 
 // redactServer 去掉地址里的用户信息，供错误信息与日志使用。
@@ -354,16 +373,27 @@ func reportEndpoint(server string, allowInsecure bool) (string, error) {
 // 而 URL 中允许出现 `https://user:password@host` 形式，
 // 原样回显等于把凭据写进日志。
 func redactServer(raw string) string {
-	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil && u.User != nil {
-		u.User = url.User("***")
-		return u.String()
+	raw = strings.TrimSpace(raw)
+	// 路径/查询串/片段里也可能藏令牌（?access_token=…），而 host 本身
+	// 仍可用于排障。因此对能解析的地址只回显「协议 + 主机」。
+	// 只有 host、没有合法协议时，Hostname 为空，走下面的兜底分支。
+	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+		host := u.Host
+		if u.User != nil {
+			host = "***@" + host
+		}
+		return u.Scheme + "://" + host
 	}
 	// 解析失败时按 `@` 截断，避免把 `user:pass@` 部分带出去。
 	if i := strings.LastIndex(raw, "@"); i >= 0 {
-		return "***@" + raw[i+1:]
+		raw = "***@" + raw[i+1:]
+	}
+	// 再截掉查询串/片段，它们同样可能包含凭据。
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i] + "…"
 	}
 	if len(raw) > 200 {
-		return raw[:200] + "…"
+		raw = raw[:200] + "…"
 	}
 	return raw
 }

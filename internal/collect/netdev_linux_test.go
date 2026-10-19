@@ -78,4 +78,14 @@ func TestReadCPUModelSupportsNonX86(t *testing.T) {
 	if got := readCPUModel(); !strings.Contains(got, "Xeon") {
 		t.Fatalf("x86 型号解析异常: %q", got)
 	}
+
+	// 新版 ARM64 内核没有 Hardware：processor 行只是逻辑核编号，
+	// 不能把 "0" 当成 CPU 型号返回。
+	content = "processor\t: 0\nprocessor\t: 1\nBogoMIPS\t: 50.00\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCPUModel(); got != "" {
+		t.Fatalf("纯数字 processor 不应作为 CPU 型号，实际 %q", got)
+	}
 }

@@ -42,4 +42,19 @@ func TestReportEndpointRedactsCredentials(t *testing.T) {
 	if got := redactServer("garbage://user:pass@host"); strings.Contains(got, "pass") {
 		t.Fatalf("无法解析的地址也应脱敏: %q", got)
 	}
+	// 查询串/路径里的令牌同样不能出现在日志中。
+	if got := redactServer("https://monitor.example.com?access_token=SECRET"); strings.Contains(got, "SECRET") {
+		t.Fatalf("查询串凭据泄露: %q", got)
+	}
+	if got := redactServer("https://monitor.example.com/hooks/T000/SECRET"); strings.Contains(got, "SECRET") {
+		t.Fatalf("路径凭据泄露: %q", got)
+	}
+}
+
+// TestReportEndpointRejectsForceQuery 回归：`https://host?` 的 RawQuery 为空，
+// 只查 RawQuery 会漏过，随后拼出 `https://host?/api/report`。
+func TestReportEndpointRejectsForceQuery(t *testing.T) {
+	if _, err := reportEndpoint("https://monitor.example.com?", false); err == nil {
+		t.Fatal("带空查询串的地址应被拒绝")
+	}
 }

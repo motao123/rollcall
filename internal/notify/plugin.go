@@ -301,7 +301,7 @@ func resolvePluginCommand(root, raw string) (string, error) {
 	if !fi.Mode().IsRegular() {
 		return "", errors.New("command 必须是普通文件")
 	}
-	if fi.Mode().Perm()&0o111 == 0 {
+	if fi.Mode().Perm()&0o111 == 0 && permChecksEnabled {
 		return "", errors.New("command 缺少可执行权限")
 	}
 	// 只检查最终文件不够：中间目录可写时，本机其他用户可以在
@@ -327,6 +327,9 @@ func checkTrustedDir(dir string) error {
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("插件目录不能是同组或其他用户可写（权限 %04o）: %s", fi.Mode().Perm(), dir)
+	}
+	if err := checkPathOwner(dir, fi); err != nil {
+		return err
 	}
 	return nil
 }
@@ -354,6 +357,9 @@ func checkNoWritablePath(root, target string) error {
 		}
 		if fi.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("%s 可被同组或其他用户改写（权限 %04o）", cur, fi.Mode().Perm())
+		}
+		if err := checkPathOwner(cur, fi); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -433,11 +439,15 @@ func runPlugin(p *plugin, ch ChannelConfig, subject, body string, m Message) err
 	cmd.Stderr = out
 
 	err = cmd.Run()
+	// 直接子进程可能先于孙进程退出：WaitDelay 关闭管道让 Run 返回，
+	// 但孙进程（wrapper 脚本拉起的实际发送程序）还留在进程组里。
+	// 每次调用后补一次组回收，避免反复告警累积孤儿进程。
+	cleanupProcess(cmd)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("插件 %s 超时（%s）", p.def.Type, p.timeout)
 	}
 	if err != nil {
-		if msg := sanitizePluginOutput(out.buf.String()); msg != "" {
+		if msg := redactPluginOutput(out.buf.String(), ch); msg != "" {
 			if out.overflow {
 				msg += "…"
 			}
@@ -446,6 +456,24 @@ func runPlugin(p *plugin, ch ChannelConfig, subject, body string, m Message) err
 		return fmt.Errorf("插件 %s 调用失败: %v", p.def.Type, err)
 	}
 	return nil
+}
+
+// redactPluginOutput 在回显插件输出前抹掉通道密钥。
+//
+// 插件通过 stdin 拿到包含密码/令牌的 Options，调试输出里经常会原样
+// 打印整个请求；这些错误会进入 API 响应和 outbox 日志，必须先脱敏。
+func redactPluginOutput(s string, ch ChannelConfig) string {
+	for k, v := range ch.Options {
+		if v == "" || !secretKeys(ch.Type)[k] {
+			continue
+		}
+		s = strings.ReplaceAll(s, v, "********")
+		// JSON 转义后的常见形态（换行/引号被转义）也一并处理。
+		if esc, err := json.Marshal(v); err == nil {
+			s = strings.ReplaceAll(s, strings.Trim(string(esc), `"`), "********")
+		}
+	}
+	return sanitizePluginOutput(s)
 }
 
 func truncateRunes(s string, n int) string {

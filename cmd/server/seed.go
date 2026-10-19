@@ -167,13 +167,20 @@ func seedDemo(st *store.Store) {
 	}
 
 	// 24 小时探测历史
-	cert := map[string]int{"s2": 42, "s3": 8, "s7": 15, "s4": 63}
+	// s1 也是 https 目标，必须给证书天数；否则演示页会把它显示成非 TLS。
+	cert := map[string]int{"s1": 180, "s2": 42, "s3": 8, "s7": 15, "s4": 63}
 	for _, sv := range svcs {
 		cd := -1
 		if v, ok := cert[sv.ID]; ok {
 			cd = v
 		}
-		for t := now - 86400; t <= now; t += int64(sv.Interval) {
+		step := int64(sv.Interval)
+		if step <= 0 {
+			// 防御性下限：Interval 由服务定义提供，手工编辑或旧数据
+			// 可能为 0/负数，直接作为步长会导致死循环。
+			step = 60
+		}
+		for t := now - 86400; t <= now; t += step {
 			ok := true
 			lat := 30 + rnd.Intn(120)
 			if sv.ID == "s5" && t > now-7200 {

@@ -188,12 +188,15 @@ func (c *Config) Validate() error {
 		if _, ok := defOf(ch.Type); !ok {
 			return fmt.Errorf("第 %d 个通道类型无效：%s", i+1, ch.Type)
 		}
-		if ch.ID != "" {
-			if seen[ch.ID] {
-				return fmt.Errorf("通道 ID 重复：%s", ch.ID)
-			}
-			seen[ch.ID] = true
+		// 空 ID 会让 outbox 任务无法定位通道，也会让前端回传的掩码
+		// 无法按通道还原；必须在前端生成稳定 ID 后再保存。
+		if strings.TrimSpace(ch.ID) == "" {
+			return fmt.Errorf("第 %d 个通道缺少 ID", i+1)
 		}
+		if seen[ch.ID] {
+			return fmt.Errorf("通道 ID 重复：%s", ch.ID)
+		}
+		seen[ch.ID] = true
 	}
 	return nil
 }
@@ -677,8 +680,15 @@ func sendBark(o map[string]string, subject, body string) error {
 	if server == "" {
 		server = "https://api.day.app/"
 	}
-	if !strings.HasSuffix(server, "/") {
-		server += "/"
+	u, err := url.Parse(server)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("bark: serverUrl 无效")
+	}
+	// Bark 的 JSON 推送接口是 POST <server>/push；根路径只提供 GET 网页，
+	// 直接 POST 根路径会得到 404/405。反代前缀（如 /bark）后同样要拼 /push；
+	// 已显式以 /push 结尾的地址保持不变。
+	if p := strings.TrimRight(u.Path, "/"); !strings.HasSuffix(p, "/push") {
+		u.Path = p + "/push"
 	}
 	payload := map[string]any{"title": subject, "body": body}
 	if k := o["deviceKey"]; k != "" {
@@ -687,7 +697,7 @@ func sendBark(o map[string]string, subject, body string) error {
 	if g := o["group"]; g != "" {
 		payload["group"] = g
 	}
-	rb, err := postJSON(server, payload)
+	rb, err := postJSON(u.String(), payload)
 	if err != nil {
 		return err
 	}
@@ -774,9 +784,12 @@ func sendGotify(o map[string]string, subject, body string) error {
 	server := strings.TrimRight(strings.TrimSpace(o["serverUrl"]), "/")
 	prio := 5
 	if v := strings.TrimSpace(o["priority"]); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			prio = n
+		// 静默回退会掩盖拼写错误：用户以为配了 10，实际一直发 5。
+		n, err := strconv.Atoi(v)
+		if err != nil || n < -2 || n > 10 {
+			return fmt.Errorf("gotify: priority 必须是 -2 到 10 的整数")
 		}
+		prio = n
 	}
 	b, _ := json.Marshal(map[string]any{
 		"title": subject, "message": body, "priority": prio,
@@ -840,9 +853,18 @@ func sendWebhook(o map[string]string, m Message) error {
 // ---------- 邮件 ----------
 
 func sendEmail(o map[string]string, subject, body string) error {
+	// host:port 必须拒绝：net.JoinHostPort 会把 "host:587" 当成 IPv6
+	// 再套一层括号，得到 "[host:587]:465"，连接必然失败。
+	// IPv6 字面量（可带方括号）仍允许，JoinHostPort 会正确补括号。
 	host := strings.TrimSpace(o["smtpHost"])
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
 	if host == "" || strings.ContainsAny(host, " \r\n\t/") {
-		return fmt.Errorf("SMTP 主机无效")
+		return fmt.Errorf("SMTP 主机无效（只填主机名，端口用 smtpPort 单独配置）")
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return fmt.Errorf("SMTP 主机无效（只填主机名，端口用 smtpPort 单独配置）")
 	}
 	port := 465
 	if v := strings.TrimSpace(o["smtpPort"]); v != "" {

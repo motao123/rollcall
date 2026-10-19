@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -100,7 +99,26 @@ func contentDisposition(name string) string {
 		ascii.WriteRune(r)
 	}
 	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s",
-		ascii.String(), url.PathEscape(name))
+		ascii.String(), encodeRFC5987(name))
+}
+
+// encodeRFC5987 按 RFC 5987 的 attr-char 集合编码。
+// url.PathEscape 是路径段编码：它保留 = @ : 等字符，而这些在
+// filename* 中不合法，部分浏览器会把整个文件名当解析失败。
+func encodeRFC5987(s string) string {
+	const attrChars = "!#$&+-.^_`|~"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			strings.IndexByte(attrChars, c) >= 0:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }
 
 func (s *Server) exportAssets(w http.ResponseWriter) {

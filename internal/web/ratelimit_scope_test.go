@@ -49,3 +49,27 @@ func TestAuthGuardScopesFailuresByRouteLevel(t *testing.T) {
 		t.Fatalf("只读成功不应解除 admin 封禁，实际 %d", code)
 	}
 }
+
+// TestAuthGuardReleasePublicTraffic 防止公开页轮询耗尽失败名额：
+// 公开路由的 2xx 既不清零失败计数，也必须归还在途名额，
+// 否则第 21 次公开请求就会被 429。
+func TestAuthGuardReleasePublicTraffic(t *testing.T) {
+	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin"}
+	levelOf := func(*http.Request) authLevel { return authPublic }
+	h := s.withAuthGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), levelOf)
+
+	for i := 0; i < 100; i++ {
+		r := httptest.NewRequest("GET", "/api/public/status", nil)
+		r.RemoteAddr = "203.0.113.9:12345"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("第 %d 次公开请求不应被限速，实际 %d", i+1, w.Code)
+		}
+	}
+	if len(s.limiter.state) != 0 {
+		t.Fatalf("公开请求不应留下常驻条目，实际 %d", len(s.limiter.state))
+	}
+}

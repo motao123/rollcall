@@ -123,8 +123,8 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 		t.Fatalf("未知字段应 400，实际 %d", w.Code)
 	}
 
-	// 带 X-Forwarded-Proto: https 登录，Cookie 必须标记 Secure。
-	w = doAuthReq(h, http.MethodPost, "/api/auth/login", "10.10.0.4",
+	// 来自可信代理（默认回环）且带 X-Forwarded-Proto: https 时，Cookie 必须标记 Secure。
+	w = doAuthReq(h, http.MethodPost, "/api/auth/login", "127.0.0.1",
 		`{"identifier":"imotao","password":"`+testAdminPassword+`"}`,
 		map[string]string{"Content-Type": "application/json", "X-Forwarded-Proto": "https"}, nil)
 	if w.Code != http.StatusOK {
@@ -177,6 +177,32 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 	cleared := findSessionCookie(t, w)
 	if cleared.MaxAge >= 0 {
 		t.Errorf("退出登录应清除 Cookie（MaxAge<0），实际 %d", cleared.MaxAge)
+	}
+
+	// 登出后旧令牌必须在服务端失效：只清浏览器 Cookie 挡不住被复制的令牌。
+	if w = doAuthReq(h, http.MethodGet, "/api/auth/session", "10.10.0.11", "", nil, cookie); w.Code != http.StatusOK {
+		t.Fatalf("会话探测应保持 200，实际 %d", w.Code)
+	} else if authed, _ := decodeSession(t, w); authed {
+		t.Fatal("已登出的令牌不应再通过会话校验")
+	}
+	if w = doAuthReq(h, http.MethodGet, "/api/admin/nodes", "10.10.0.12", "", nil, cookie); w.Code != http.StatusUnauthorized {
+		t.Fatalf("已登出的令牌访问管理接口应 401，实际 %d", w.Code)
+	}
+}
+
+// TestAuthUntrustedForwardedProtoIgnored 直连客户端伪造 X-Forwarded-Proto
+// 不得让 Cookie 带上 Secure：那会让真实 HTTP 浏览器丢弃会话，
+// 也会误导后续的安全判断。
+func TestAuthUntrustedForwardedProtoIgnored(t *testing.T) {
+	h, _ := newAuthWeb(t, time.Hour)
+	w := doAuthReq(h, http.MethodPost, "/api/auth/login", "203.0.113.9",
+		`{"identifier":"imotao","password":"`+testAdminPassword+`"}`,
+		map[string]string{"Content-Type": "application/json", "X-Forwarded-Proto": "https"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
+	}
+	if c := findSessionCookie(t, w); c.Secure {
+		t.Error("不可信来源的 X-Forwarded-Proto 不应影响 Cookie 的 Secure 标记")
 	}
 }
 

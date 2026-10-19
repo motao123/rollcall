@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/sanitize"
 	"github.com/motao/rollcall/internal/store"
 )
 
@@ -81,7 +82,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 			NodeIDs []string `json:"nodeIds"`
 			StartAt int64    `json:"startAt"`
 			EndAt   int64    `json:"endAt"`
-			Minutes int      `json:"minutes"` // 便捷入参：从现在起 N 分钟
+			Minutes int      `json:"minutes"` // 便捷入参：从开始时间起 N 分钟
 		}
 		if err := dec.Decode(&req); err != nil {
 			fail(w, 400, "bad json: "+err.Error())
@@ -115,7 +116,11 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 			fail(w, 400, "维护窗口不能超过 30 天")
 			return
 		}
-		req.NodeIDs = trimListSpace(req.NodeIDs)
+		if req.ID != "" && !validRecordID(req.ID) {
+			fail(w, 400, "维护窗口 ID 只能包含字母、数字、下划线与短横线")
+			return
+		}
+		req.NodeIDs = dedupeStrings(trimListSpace(req.NodeIDs))
 		for _, id := range req.NodeIDs {
 			if _, ok := s.st.Node(id); !ok {
 				fail(w, 400, "节点不存在: "+id)
@@ -134,7 +139,10 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 		if m.ID == "" {
 			m.ID = store.NewID("mt")
 		}
-		s.st.UpsertMaintenance(m)
+		if err := s.st.UpsertMaintenance(m); err != nil {
+			fail(w, 500, "保存维护窗口失败: "+err.Error())
+			return
+		}
 		writeJSON(w, 200, map[string]any{"item": m})
 
 	default:
@@ -152,7 +160,12 @@ func (s *Server) handleAdminMaintenanceByID(w http.ResponseWriter, r *http.Reque
 		fail(w, 405, "method not allowed")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": s.st.DeleteMaintenance(id), "id": id})
+	deleted, err := s.st.DeleteMaintenance(id)
+	if err != nil {
+		fail(w, 500, "删除维护窗口失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": deleted, "id": id})
 }
 
 // ---------- 人工事件 ----------
@@ -190,6 +203,14 @@ func (s *Server) handleAdminIncidents(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "事件标题不能为空")
 			return
 		}
+		// 先按存储层同样的规则清洗并回写：标题若只包含控制符/双向控制符，
+		// 存储层会判定为空并返回错误，这里提前给出 400 而不是 500。
+		req.Title = sanitize.Text(req.Title, 200)
+		req.Body = sanitize.Text(req.Body, 4000)
+		if req.Title == "" {
+			fail(w, 400, "事件标题不能为空")
+			return
+		}
 		if req.Level == "" {
 			req.Level = model.LevelInfo
 		}
@@ -197,7 +218,11 @@ func (s *Server) handleAdminIncidents(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "事件级别必须是 info / warn / critical 之一")
 			return
 		}
-		req.NodeIDs = trimListSpace(req.NodeIDs)
+		if req.ID != "" && !validRecordID(req.ID) {
+			fail(w, 400, "事件 ID 只能包含字母、数字、下划线与短横线")
+			return
+		}
+		req.NodeIDs = dedupeStrings(trimListSpace(req.NodeIDs))
 		for _, id := range req.NodeIDs {
 			if _, ok := s.st.Node(id); !ok {
 				fail(w, 400, "节点不存在: "+id)
@@ -205,6 +230,15 @@ func (s *Server) handleAdminIncidents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		now := time.Now().Unix()
+		if req.StartAt <= 0 {
+			req.StartAt = now
+		}
+		// EndAt == 0 表示仍在进行，是合法输入；其余情况下结束不能早于开始，
+		// 不能像存储层那样静默改写成「进行中」。
+		if req.EndAt != 0 && req.EndAt < req.StartAt {
+			fail(w, 400, "事件结束时间不能早于开始时间")
+			return
+		}
 		it := &model.Incident{
 			ID:        req.ID,
 			Title:     req.Title,
@@ -218,12 +252,33 @@ func (s *Server) handleAdminIncidents(w http.ResponseWriter, r *http.Request) {
 		if it.ID == "" {
 			it.ID = store.NewID("inc")
 		}
-		s.st.UpsertIncident(it)
+		if err := s.st.UpsertIncident(it); err != nil {
+			fail(w, 500, "保存事件失败: "+err.Error())
+			return
+		}
 		writeJSON(w, 200, map[string]any{"item": it})
 
 	default:
 		fail(w, 405, "method not allowed")
 	}
+}
+
+// validRecordID 校验管理员可回填的记录 ID。
+// ID 会出现在 URL 路径与前端 DOM 中，限制为安全字符集，
+// 避免斜杠、引号之类的内容破坏路由或模板。
+func validRecordID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleAdminIncidentByID(w http.ResponseWriter, r *http.Request) {
@@ -236,5 +291,10 @@ func (s *Server) handleAdminIncidentByID(w http.ResponseWriter, r *http.Request)
 		fail(w, 405, "method not allowed")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": s.st.DeleteIncident(id), "id": id})
+	deleted, err := s.st.DeleteIncident(id)
+	if err != nil {
+		fail(w, 500, "删除事件失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": deleted, "id": id})
 }

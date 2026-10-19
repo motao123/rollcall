@@ -5,12 +5,16 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const sessionCookieName = "rollcall_session"
+
+// revokedSessionsKey 是持久化的会话吊销列表（令牌指纹 -> 过期 Unix 秒）。
+const revokedSessionsKey = "revoked_sessions"
 
 type loginRequest struct {
 	Identifier string `json:"identifier"`
@@ -47,6 +51,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "面板登录未启用")
 		return
 	}
+	// 只接受 JSON：跨站 HTML 表单只能发 text/plain / form-urlencoded，
+	// 不校验就会形成 login CSRF（把受害者登进攻击者的账号）。
+	if ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))); !strings.HasPrefix(ct, "application/json") {
+		fail(w, http.StatusUnsupportedMediaType, "Content-Type 必须为 application/json")
+		return
+	}
 	body := http.MaxBytesReader(w, r.Body, 4<<10)
 	var in loginRequest
 	dec := json.NewDecoder(body)
@@ -79,7 +89,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, s.trustedProxies)
 	// 登录端点的 2xx 不参与通用清零（否则探测 /api/auth/session 就能
 	// 重置爆破计数），成功登录在这里显式清零。
-	s.limiter.succeed(ip + "|" + authLogin.String())
+	s.limiter.succeed(rateLimitKey(ip) + "|" + authLogin.String())
 	log.Printf("面板登录成功 user=%s ip=%s", s.user.Username, ip)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
@@ -88,15 +98,87 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAuthLogout 清除会话 Cookie。重复调用是幂等的。
+// handleAuthLogout 清除会话 Cookie，并吊销当前令牌。重复调用是幂等的。
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" && s.sessions != nil {
+		// 只有验签通过的令牌才值得写入吊销表，避免未认证请求把表撑大。
+		if sess, ok := s.sessions.Verify(c.Value); ok {
+			s.revokeSession(c.Value, sess.Expires)
+		}
+	}
 	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// loadRevokedSessions 从设置里恢复吊销列表，并丢弃已过期条目。
+func (s *Server) loadRevokedSessions() {
+	s.revoked = map[string]int64{}
+	raw := s.st.GetSetting(revokedSessionsKey)
+	if raw == "" {
+		return
+	}
+	var m map[string]int64
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		log.Printf("会话吊销列表损坏，已忽略: %v", err)
+		return
+	}
+	now := time.Now().Unix()
+	for id, exp := range m {
+		if exp > now {
+			s.revoked[id] = exp
+		}
+	}
+}
+
+// revokeSession 把令牌指纹写入吊销表并立即落盘：
+// 只走防抖保存时，登出后立刻重启会让被吊销的令牌重新可用。
+func (s *Server) revokeSession(token string, exp time.Time) {
+	if s.sessions == nil || token == "" {
+		return
+	}
+	id := s.sessions.TokenID(token)
+	now := time.Now().Unix()
+	s.revokedMu.Lock()
+	if s.revoked == nil {
+		s.revoked = map[string]int64{}
+	}
+	for k, v := range s.revoked {
+		if v <= now {
+			delete(s.revoked, k)
+		}
+	}
+	s.revoked[id] = exp.Unix()
+	b, err := json.Marshal(s.revoked)
+	s.revokedMu.Unlock()
+	if err != nil {
+		log.Printf("序列化会话吊销列表失败: %v", err)
+		return
+	}
+	s.st.SetSetting(revokedSessionsKey, string(b))
+	if err := s.st.Save(); err != nil {
+		log.Printf("保存会话吊销列表失败: %v", err)
+	}
+}
+
+func (s *Server) sessionRevoked(token string) bool {
+	if s.sessions == nil || token == "" {
+		return false
+	}
+	id := s.sessions.TokenID(token)
+	now := time.Now().Unix()
+	s.revokedMu.Lock()
+	exp, ok := s.revoked[id]
+	if ok && exp <= now {
+		delete(s.revoked, id)
+		ok = false
+	}
+	s.revokedMu.Unlock()
+	return ok
 }
 
 func (s *Server) sessionUser(r *http.Request) (sess authSession, ok bool) {
@@ -112,6 +194,9 @@ func (s *Server) sessionUser(r *http.Request) (sess authSession, ok bool) {
 		return authSession{}, false
 	}
 	if !strings.EqualFold(got.Username, s.user.Username) || got.Version != s.user.SessionVersion() {
+		return authSession{}, false
+	}
+	if s.sessionRevoked(c.Value) {
 		return authSession{}, false
 	}
 	return authSession{Username: got.Username, Expires: got.Expires}, true
@@ -137,7 +222,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
+		Secure:   s.requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 		Expires:  exp,
 		MaxAge:   maxAge,
@@ -150,20 +235,31 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
+		Secure:   s.requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 		Expires:  time.Unix(1, 0),
 		MaxAge:   -1,
 	})
 }
 
-func requestIsHTTPS(r *http.Request) bool {
+func (s *Server) requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	for _, v := range strings.Split(r.Header.Get("X-Forwarded-Proto"), ",") {
-		if strings.EqualFold(strings.TrimSpace(v), "https") {
-			return true
+	// X-Forwarded-Proto 可被任意客户端伪造；只有请求确实来自可信代理时
+	// 才采信。否则直连 HTTP 的客户端可以声称 https，让 Cookie 带上
+	// Secure 后被浏览器丢弃（或反过来误导安全判断）。
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if !isTrustedProxy(host, s.trustedProxies) {
+		return false
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if v := strings.TrimSpace(parts[i]); v != "" {
+			return strings.EqualFold(v, "https")
 		}
 	}
 	return false

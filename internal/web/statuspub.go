@@ -50,7 +50,7 @@ type statusNodePub struct {
 	CPU       float64       `json:"cpu"`
 	Mem       float64       `json:"mem"`
 	Disk      float64       `json:"disk"`
-	Up        uint64        `json:"uptime"`
+	Up        uint64        `json:"uptime,omitempty"`
 	Uptime24  float64       `json:"uptime24"`
 	Bars      []statusBar   `json:"bars"`
 	Spark     []model.Point `json:"spark,omitempty"` // 24h CPU 迷你曲线（降采样）
@@ -160,39 +160,45 @@ func dayStartUTC(ts int64) int64 {
 // nodeDailyUptime 计算节点最近 days 天、每天的可用率。
 //
 // 数据源是 1 小时聚合桶：桶内 Count>0 表示该小时至少上报过一次，
-// 当天可用率 = 有数据的小时数 / 24。
+// 当天可用率 = 有数据的小时数 / 当天已过小时数（完整历史日为 24）。
 // 用"小时是否有上报"而不是"桶内平均在线时长"，是因为聚合桶
 // 不保留"这一小时里在线了多久"，只保留平均值与峰值。
 func (s *Server) nodeDailyUptime(nodeID string, days int, now int64) []dailyUptime {
 	if days <= 0 {
 		days = 90
 	}
-	start := dayStartUTC(now-int64(days-1)*86400) - 0
+	start := dayStartUTC(now - int64(days-1)*86400)
 	pts := s.st.HistorySeries(nodeID, store.HistoryResolution1h, start)
 
 	// 按 UTC 日分桶：桶的 TS 就是该小时起点（Index），可直接整除归日。
-	perDay := make(map[int64][2]int) // dayStart -> [有数据的小时数, 总小时数]
+	perDay := make(map[int64]int) // dayStart -> 有数据的小时数
 	for _, p := range pts {
 		if p.TS < start || p.Count == 0 {
 			continue
 		}
-		d := dayStartUTC(p.TS)
-		v := perDay[d]
-		v[1]++
-		if p.Count > 0 {
-			v[0]++
-		}
-		perDay[d] = v
+		perDay[dayStartUTC(p.TS)]++
 	}
 
+	today := dayStartUTC(now)
 	out := make([]dailyUptime, 0, days)
 	for i := 0; i < days; i++ {
 		d := start + int64(i)*86400
-		v, ok := perDay[d]
 		item := dailyUptime{TS: d}
-		if ok && v[1] > 0 {
+		expected := 24
+		if d == today {
+			// 当天只按已经过去的小时数计分母，否则上午会显示成低可用率。
+			expected = int((now-d)/3600) + 1
+			if expected < 1 {
+				expected = 1
+			}
+		}
+		seen := perDay[d]
+		if seen > expected {
+			seen = expected
+		}
+		if seen > 0 {
 			item.Has = true
-			item.Up = round1(float64(v[0]) * 100 / float64(v[1]))
+			item.Up = round1(float64(seen) * 100 / float64(expected))
 		}
 		out = append(out, item)
 	}
@@ -246,46 +252,64 @@ func (s *Server) buildTimeline(since int64, limit int, nameOf func(string) strin
 		inc  statusIncident
 		seen map[string]struct{}
 	}
-	groups := make(map[string]*bucket) // ruleID|窗口序号 -> 归并桶
-	var order []*bucket                // 记录首次出现顺序，输出前再统一排序
+	var order []*bucket // 记录首次出现顺序，输出前再统一排序
 
 	now := time.Now().Unix()
+	// 先按规则分组并按开始时间升序：用「与首条相差 ≤ mergeWindow」的
+	// 滑动窗口归并。按 StartedAt/mergeWindow 取整会在窗口边界把相隔
+	// 1 秒的两条告警拆成两场事故，与文档描述的语义不符。
+	byRule := make(map[string][]*model.Alert)
 	for _, a := range s.st.Alerts(0) {
 		if a == nil || a.StartedAt < since {
 			continue
 		}
-		end := a.ResolvedAt
-		key := a.RuleID + "|" + itoa64(a.StartedAt/mergeWindow)
-		b, ok := groups[key]
-		if !ok {
-			b = &bucket{
-				inc: statusIncident{
-					ID:      "a_" + a.ID,
-					Title:   a.RuleName,
-					Level:   a.Severity,
-					StartAt: a.StartedAt,
-					EndAt:   end,
-					Auto:    true,
-				},
-				seen: map[string]struct{}{},
+		byRule[a.RuleID] = append(byRule[a.RuleID], a)
+	}
+	ruleIDs := make([]string, 0, len(byRule))
+	for id := range byRule {
+		ruleIDs = append(ruleIDs, id)
+	}
+	sort.Strings(ruleIDs)
+	for _, ruleID := range ruleIDs {
+		list := byRule[ruleID]
+		sort.SliceStable(list, func(i, j int) bool {
+			if list[i].StartedAt != list[j].StartedAt {
+				return list[i].StartedAt < list[j].StartedAt
 			}
-			groups[key] = b
-			order = append(order, b)
-		}
-		if _, dup := b.seen[a.NodeID]; !dup {
-			b.seen[a.NodeID] = struct{}{}
-			if nm := nameOf(a.NodeID); nm != "" {
-				b.inc.NodeNames = append(b.inc.NodeNames, nm)
+			return list[i].ID < list[j].ID
+		})
+		var b *bucket
+		for _, a := range list {
+			end := a.ResolvedAt
+			if b == nil || a.StartedAt-b.inc.StartAt > mergeWindow {
+				b = &bucket{
+					inc: statusIncident{
+						ID:      "a_" + a.ID,
+						Title:   a.RuleName,
+						Level:   a.Severity,
+						StartAt: a.StartedAt,
+						EndAt:   end,
+						Auto:    true,
+					},
+					seen: map[string]struct{}{},
+				}
+				order = append(order, b)
 			}
-		}
-		// 同一窗口内取最早开始；任一分片未恢复则整条事件仍视为进行中
-		if a.StartedAt < b.inc.StartAt {
-			b.inc.StartAt = a.StartedAt
-		}
-		if end == 0 {
-			b.inc.EndAt = 0
-		} else if b.inc.EndAt != 0 && end > b.inc.EndAt {
-			b.inc.EndAt = end
+			if _, dup := b.seen[a.NodeID]; !dup {
+				b.seen[a.NodeID] = struct{}{}
+				if nm := nameOf(a.NodeID); nm != "" {
+					b.inc.NodeNames = append(b.inc.NodeNames, nm)
+				}
+			}
+			// 同一窗口内取最早开始；任一分片未恢复则整条事件仍视为进行中
+			if a.StartedAt < b.inc.StartAt {
+				b.inc.StartAt = a.StartedAt
+			}
+			if end == 0 {
+				b.inc.EndAt = 0
+			} else if b.inc.EndAt != 0 && end > b.inc.EndAt {
+				b.inc.EndAt = end
+			}
 		}
 	}
 	for _, b := range order {
@@ -333,29 +357,6 @@ func endOr(v, def int64) int64 {
 		return def
 	}
 	return v
-}
-
-// itoa64 是 strconv.FormatInt 的轻量别名，避免在热路径上重复写包名。
-func itoa64(v int64) string {
-	if v == 0 {
-		return "0"
-	}
-	neg := v < 0
-	if neg {
-		v = -v
-	}
-	var buf [24]byte
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 // ---------- 实时速率 ----------
@@ -478,48 +479,48 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	rangeKey, rangeResolution, rangeSince, rangeBucket := parseStatusRange(r.URL.Query().Get("range"), now)
 	m, ts, _ := s.st.Latest(id)
 	state := store.NodeState(ts, now)
-	_, maintNodes := s.st.MaintenanceAt(now)
+	maintGlobal, maintNodes := s.st.MaintenanceAt(now)
 	vis := cfg.Visibility
 
 	// 使用率/负载/运行时间/流量即使在恰好为 0 时也要下发：
 	// 对公开页来说"0%"是一个有意义的读数，不能和"未开启"混为一谈。
-	// 负载用指针 + omitempty：关闭时不出现，开启时即使为 0.00 也保留。
+	// 因此可见字段用指针 + omitempty：关闭时整个键消失，开启时 0 也会保留。
 	// 进程数、TCP、Swap、核心数属于指纹类信息，保持关闭时彻底省略。
 	type latestOut struct {
-		CPU       float64  `json:"cpu"`
-		MemPct    float64  `json:"memPct"`
-		DiskPct   float64  `json:"diskPct"`
+		CPU       *float64 `json:"cpu,omitempty"`
+		MemPct    *float64 `json:"memPct,omitempty"`
+		DiskPct   *float64 `json:"diskPct,omitempty"`
 		Load1     *float64 `json:"load1,omitempty"`
 		Load5     *float64 `json:"load5,omitempty"`
 		Load15    *float64 `json:"load15,omitempty"`
-		Uptime    uint64   `json:"uptime"`
+		Uptime    *uint64  `json:"uptime,omitempty"`
 		Procs     int      `json:"procs,omitempty"`
 		TCPConn   int      `json:"tcpConn,omitempty"`
-		NetRx     uint64   `json:"netRx"` // B/s
-		NetTx     uint64   `json:"netTx"` // B/s
-		TotRx     uint64   `json:"totRx"`
-		TotTx     uint64   `json:"totTx"`
-		MemUsed   uint64   `json:"memUsed"`
-		MemTotal  uint64   `json:"memTotal"`
-		DiskUsed  uint64   `json:"diskUsed"`
-		DiskTotal uint64   `json:"diskTotal"`
-		SwapUsed  uint64   `json:"swapUsed,omitempty"`
-		SwapTotal uint64   `json:"swapTotal,omitempty"`
+		NetRx     *uint64  `json:"netRx,omitempty"` // B/s
+		NetTx     *uint64  `json:"netTx,omitempty"` // B/s
+		TotRx     *uint64  `json:"totRx,omitempty"`
+		TotTx     *uint64  `json:"totTx,omitempty"`
+		MemUsed   *uint64  `json:"memUsed,omitempty"`
+		MemTotal  *uint64  `json:"memTotal,omitempty"`
+		DiskUsed  *uint64  `json:"diskUsed,omitempty"`
+		DiskTotal *uint64  `json:"diskTotal,omitempty"`
+		SwapUsed  *uint64  `json:"swapUsed,omitempty"`
+		SwapTotal *uint64  `json:"swapTotal,omitempty"`
 		Cores     int      `json:"cores,omitempty"`
 	}
 	var lo latestOut
 	if vis.Metrics {
-		lo.CPU = round1(m.CPUPct)
-		lo.MemPct = round1(pctF(m.MemUsed, m.MemTotal))
-		lo.DiskPct = round1(pctF(m.DiskUsed, m.DiskTotal))
-		lo.MemUsed, lo.MemTotal = m.MemUsed, m.MemTotal
-		lo.DiskUsed, lo.DiskTotal = m.DiskUsed, m.DiskTotal
+		lo.CPU = floatPtr(round1(m.CPUPct))
+		lo.MemPct = floatPtr(round1(pctF(m.MemUsed, m.MemTotal)))
+		lo.DiskPct = floatPtr(round1(pctF(m.DiskUsed, m.DiskTotal)))
+		lo.MemUsed, lo.MemTotal = uintPtr(m.MemUsed), uintPtr(m.MemTotal)
+		lo.DiskUsed, lo.DiskTotal = uintPtr(m.DiskUsed), uintPtr(m.DiskTotal)
 	}
 	if vis.Load {
 		lo.Load1, lo.Load5, lo.Load15 = floatPtr(round2(m.Load1)), floatPtr(round2(m.Load5)), floatPtr(round2(m.Load15))
 	}
 	if vis.Uptime {
-		lo.Uptime = m.Uptime
+		lo.Uptime = uintPtr(m.Uptime)
 	}
 	if vis.Procs {
 		lo.Procs = m.Procs
@@ -528,12 +529,13 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		lo.TCPConn = m.TCPConn
 	}
 	if vis.Swap {
-		lo.SwapUsed, lo.SwapTotal = m.SwapUsed, m.SwapTotal
+		lo.SwapUsed, lo.SwapTotal = uintPtr(m.SwapUsed), uintPtr(m.SwapTotal)
 	}
 	if vis.Traffic {
 		series := s.st.Series(id, now-1800)
-		lo.NetRx, lo.NetTx = netRates(series)
-		lo.TotRx, lo.TotTx = m.NetRx, m.NetTx
+		rx, tx := netRates(series)
+		lo.NetRx, lo.NetTx = uintPtr(rx), uintPtr(tx)
+		lo.TotRx, lo.TotTx = uintPtr(m.NetRx), uintPtr(m.NetTx)
 	}
 	if vis.Cores {
 		if h := s.st.Host(id); h.Cores > 0 {
@@ -624,12 +626,15 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 			hist := s.st.ServiceSeries(sv.ID)
 			_, lat, ok, has := s.st.ServiceLast(sv.ID)
 			rate, rateHas := serviceUptime24(hist, now)
-			item := map[string]any{"name": sv.Name, "has": has, "uptime": round1(rate)}
+			// 没有探测样本时不能发布 uptime=0：那会让"尚未探测"看起来
+			// 像"100% 故障"，与 rollcall_service_up / 证书指标的 no-data 语义冲突。
+			item := map[string]any{"name": sv.Name, "has": has}
 			if has {
 				item["ok"] = ok
 				item["latencyMs"] = lat
 			}
 			if rateHas {
+				item["uptime"] = round1(rate)
 				item["failRate"] = round1(100 - rate)
 			}
 			if pts, avg, samples := serviceLatencyPoints(hist, now, 60); len(pts) > 0 {
@@ -657,6 +662,8 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	mTitle := ""
 	if m, ok := maintNodes[id]; ok && m != nil {
 		mTitle = m.Title
+	} else if maintGlobal != nil {
+		mTitle = maintGlobal.Title
 	}
 
 	resp := map[string]any{
@@ -686,6 +693,8 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }
 
 func floatPtr(v float64) *float64 { return &v }
+
+func uintPtr(v uint64) *uint64 { return &v }
 
 // handleStatusIncidents 单独暴露事件时间线，便于详情页/前端按需加载。
 func (s *Server) handleStatusIncidents(w http.ResponseWriter, r *http.Request) {

@@ -24,7 +24,8 @@ type authFailureLimiter struct {
 }
 
 type authFailState struct {
-	count        int
+	fails        int // 已确认的 401 次数
+	inflight     int // 已放行但尚未结算的请求
 	windowStart  time.Time
 	blockedUntil time.Time
 }
@@ -39,22 +40,57 @@ func newAuthFailureLimiter() *authFailureLimiter {
 }
 
 // allow 返回是否放行以及剩余封禁时长。
+// 每次放行都会先占用一个在途名额：否则并发请求会在任何一次 fail()
+// 之前全部通过，10 次阈值对并行爆破形同虚设。请求结束后必须调用
+// fail（401）、succeed（受保护 2xx）或 release（其余情况）结算。
 func (l *authFailureLimiter) allow(ip string) (bool, time.Duration) {
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.sweepLocked(now)
+	if len(l.state) >= maxLimiterEntries {
+		l.evictLocked()
+	}
 	st, ok := l.state[ip]
 	if !ok {
-		return true, 0
+		st = &authFailState{windowStart: now}
+		l.state[ip] = st
 	}
 	if now.Before(st.blockedUntil) {
 		return false, st.blockedUntil.Sub(now)
 	}
 	if now.Sub(st.windowStart) > l.window {
-		delete(l.state, ip)
+		*st = authFailState{windowStart: now}
 	}
+	// 在途名额给得比失败阈值宽：面板首屏会并发拉多个接口，
+	// 若并发数也卡在 maxFails，正常用户会在慢网络下被误伤。
+	// 并行爆破最多也只能突破到 2*maxFails 次，仍然有界。
+	if st.fails+st.inflight >= l.maxFails*2 {
+		return false, 0
+	}
+	st.inflight++
 	return true, 0
+}
+
+// maxLimiterEntries 限制来源状态表大小：IPv6 轮换/僵尸网络可以让
+// 每条来源都留下一个条目，没有上限时内存会随请求数增长。
+const maxLimiterEntries = 10000
+
+// evictLocked 在状态表打满时优先删除过期条目；仍然超限就删除任意一条。
+// 攻击者可以借此挤掉自己的封禁状态，但代价远高于换一个 IPv6 地址。
+func (l *authFailureLimiter) evictLocked() {
+	now := time.Now()
+	for k, v := range l.state {
+		if now.Sub(v.windowStart) > l.window && now.After(v.blockedUntil) {
+			delete(l.state, k)
+		}
+	}
+	for k := range l.state {
+		if len(l.state) < maxLimiterEntries {
+			break
+		}
+		delete(l.state, k)
+	}
 }
 
 // sweepLocked 回收过期条目，最多每分钟一次。
@@ -74,23 +110,46 @@ func (l *authFailureLimiter) sweepLocked(now time.Time) {
 	}
 }
 
+// fail 结算一次确定失败。若失败次数达到阈值则封禁一段时间。
 func (l *authFailureLimiter) fail(ip string) {
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st, ok := l.state[ip]
-	if !ok || now.Sub(st.windowStart) > l.window {
+	if !ok {
 		st = &authFailState{windowStart: now}
 		l.state[ip] = st
 	}
-	st.count++
-	if st.count >= l.maxFails {
+	if st.inflight > 0 {
+		st.inflight--
+	}
+	st.fails++
+	if st.fails >= l.maxFails {
 		st.blockedUntil = now.Add(l.block)
-		st.count = 0
+		st.fails = 0
+		st.inflight = 0
 		st.windowStart = now
 	}
 	// 过期回收统一交给 allow 中的节流清扫：
 	// 不能在攻击者可控的失败路径上做 O(n) 全表扫描。
+}
+
+// release 归还未确认失败的在途名额（非 401、非受保护 2xx 的响应）。
+func (l *authFailureLimiter) release(ip string) {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st, ok := l.state[ip]
+	if !ok {
+		return
+	}
+	if st.inflight > 0 {
+		st.inflight--
+	}
+	// 公开页高频轮询不应在状态表里留下常驻条目。
+	if st.fails == 0 && st.inflight == 0 && !now.Before(st.blockedUntil) {
+		delete(l.state, ip)
+	}
 }
 
 func (l *authFailureLimiter) succeed(ip string) {
@@ -146,7 +205,10 @@ func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	if !isTrustedProxy(host, trusted) {
 		return host
 	}
-	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	// 有的代理（如 HAProxy）会把真实客户端追加成新的一行，
+	// Header.Get 只拿第一行，必须把所有行按序拼起来再从右向左找。
+	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
+	parts := strings.Split(xff, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
 		cand := strings.TrimSpace(parts[i])
 		if cand == "" {
@@ -177,12 +239,27 @@ func isTrustedProxy(host string, trusted []*net.IPNet) bool {
 	return false
 }
 
+// rateLimitKey 把 IPv6 地址折叠到 /64 再分桶：一个终端通常握有整段 /64，
+// 逐地址分桶等于给攻击者每请求一次免费换桶的机会，阈值永远触发不了。
+func rateLimitKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
+	// 1xx 是中间响应，后面还会有最终状态码，不能记为最终结果。
+	if code >= 100 && code < 200 {
+		r.ResponseWriter.WriteHeader(code)
+		return
+	}
 	if r.status == 0 {
 		r.status = code
 	}
@@ -206,25 +283,42 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authLevel) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r, s.trustedProxies)
+		level := levelOf(r)
 		// 按「来源 IP + 路由鉴权级别」分桶：否则只读面板或 /metrics 的
 		// 正常轮询成功后，会把同一 IP 上针对 admin token 的失败计数一并
 		// 清零，攻击者每轮试 9 次再等一次正常请求即可无限重试。
-		scope := ip + "|" + levelOf(r).String()
+		scope := rateLimitKey(ip) + "|" + level.String()
 		if ok, wait := s.limiter.allow(scope); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 			fail(w, http.StatusTooManyRequests, "鉴权失败次数过多，请稍后再试")
 			return
 		}
 		rec := &statusRecorder{ResponseWriter: w}
+		defer func() {
+			// handler panic 时也要归还名额，否则每次崩溃都会永久
+			// 消耗一个在途名额，十次之后整个来源被误封。
+			if p := recover(); p != nil {
+				s.limiter.release(scope)
+				panic(p)
+			}
+		}()
 		h.ServeHTTP(rec, r)
+		// 处理器什么都没写时由 net/http 隐式返回 200，此时 recorder
+		// 里仍是零值；补成 200，受保护路由的成功请求才能正常清零计数。
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
 		switch {
 		case rec.status == http.StatusUnauthorized:
 			s.limiter.fail(scope)
-			log.Printf("鉴权失败 ip=%s scope=%s method=%s path=%s", ip, scope, r.Method, r.URL.Path)
-		case rec.status >= 200 && rec.status < 300 && levelOf(r).protected(s.authUser != ""):
+			log.Printf("鉴权失败 ip=%s level=%s method=%s path=%q", ip, level, r.Method, r.URL.Path)
+		case rec.status >= 200 && rec.status < 300 && level.protected():
 			// 只认 2xx：3xx 不代表鉴权通过（例如登录跳转），
 			// 用它清零会让攻击者在拿到重定向后继续重试。
 			s.limiter.succeed(scope)
+		default:
+			// 公开页 2xx、404/400、3xx 等都归还名额，只是不清零失败计数。
+			s.limiter.release(scope)
 		}
 	})
 }

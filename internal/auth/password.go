@@ -65,6 +65,10 @@ func ValidatePassword(password string) error {
 
 // VerifyPassword 以常量时间比较密码哈希。格式非法时返回 false。
 func VerifyPassword(encoded, password string) bool {
+	if len(password) > maxPasswordLen {
+		// 与 HashPassword 同一上限：不可能被哈希的输入也无需计算。
+		return false
+	}
 	iter, salt, want, err := parseHash(encoded)
 	if err != nil {
 		return false
@@ -89,7 +93,7 @@ func parseHash(encoded string) (int, []byte, []byte, error) {
 		return 0, nil, nil, errors.New("密码哈希迭代次数无效")
 	}
 	salt, err := b64.DecodeString(parts[2])
-	if err != nil || len(salt) < 8 || len(salt) > 64 {
+	if err != nil || len(salt) != saltSize {
 		return 0, nil, nil, errors.New("密码哈希盐值无效")
 	}
 	key, err := b64.DecodeString(parts[3])

@@ -67,6 +67,17 @@ func TestParseAndMarshal(t *testing.T) {
 	if _, err := Parse("not-json"); err == nil {
 		t.Fatal("损坏配置应报错")
 	}
+	// 严格解析：null、未知字段、尾随内容都说明配置损坏，
+	// 静默按默认值处理会让管理员找不到样式异常的原因。
+	for _, raw := range []string{
+		"null",
+		`{"mode":"auto","extra":1}`,
+		`{"mode":"auto"}{"mode":"dark"}`,
+	} {
+		if _, err := Parse(raw); err == nil {
+			t.Fatalf("应拒绝非严格主题配置: %s", raw)
+		}
+	}
 }
 
 // TestNormalizeFillsRadiusDefault 是回归测试。

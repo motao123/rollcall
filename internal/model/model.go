@@ -315,8 +315,12 @@ func (m *Maintenance) ActiveAt(ts int64) bool {
 }
 
 // Covers 判断窗口是否覆盖指定节点。NodeIDs 为空表示全局。
+// nil 窗口与 ActiveAt 保持一致，视为不覆盖任何节点。
 func (m *Maintenance) Covers(nodeID string) bool {
-	if m == nil || len(m.NodeIDs) == 0 {
+	if m == nil {
+		return false
+	}
+	if len(m.NodeIDs) == 0 {
 		return true
 	}
 	for _, id := range m.NodeIDs {

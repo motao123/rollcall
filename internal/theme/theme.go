@@ -6,7 +6,9 @@ package theme
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 )
@@ -72,20 +74,30 @@ func (t Theme) Normalize() Theme {
 	return t
 }
 
-// Parse 解析已保存的主题；空值或字面量 null 返回默认主题。
+// Parse 解析已保存的主题；空值表示尚未配置，返回默认主题。
+// 已保存的 JSON 必须严格合法：未知字段、null、尾随内容都视为配置损坏，
+// 否则错误会被静默吞掉，管理员看到的是另一套样式却查不到原因。
 func Parse(raw string) (Theme, error) {
 	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || trimmed == "null" {
+	if trimmed == "" {
 		return Default(), nil
 	}
-	var t Theme
-	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+	var tp *Theme
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&tp); err != nil {
 		return Theme{}, err
 	}
-	if err := t.Validate(); err != nil {
+	if tp == nil {
+		return Theme{}, errors.New("主题配置不能为 null")
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return Theme{}, errors.New("主题配置包含多余内容")
+	}
+	if err := tp.Validate(); err != nil {
 		return Theme{}, err
 	}
-	return t.Normalize(), nil
+	return tp.Normalize(), nil
 }
 
 // Marshal 返回可持久化的 JSON。

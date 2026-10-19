@@ -56,10 +56,20 @@ func TestAlertMutationsRequestSave(t *testing.T) {
 	}
 	waitSave(t, st, "OpenAlert")
 
-	// 同一规则/节点再次打开：走「就地更新值」分支，同样必须落盘
+	// 同一规则/节点再次打开且数值变化：走「就地更新值」分支，同样必须落盘
 	drainSave(st)
-	st.OpenAlert(&model.Alert{RuleID: "r1", NodeID: "n1", StartedAt: time.Now().Unix()})
+	st.OpenAlert(&model.Alert{RuleID: "r1", NodeID: "n1", StartedAt: time.Now().Unix(), Value: 99, Message: "cpu 99%"})
 	waitSave(t, st, "OpenAlert（就地更新）")
+
+	// 值没有变化时不应反复触发全量快照：引擎每 15 秒评估一次，
+	// 否则一条活动告警会让进程持续写盘。
+	drainSave(st)
+	st.OpenAlert(&model.Alert{RuleID: "r1", NodeID: "n1", StartedAt: time.Now().Unix(), Value: 99, Message: "cpu 99%"})
+	select {
+	case <-st.saveReq:
+		t.Fatal("未变化的重复 OpenAlert 不应请求落盘")
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	drainSave(st)
 	if !st.ResolveAlert("r1", "n1") {

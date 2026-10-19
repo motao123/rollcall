@@ -15,9 +15,9 @@ import (
 // 四类一并处理：
 //   - C0（0x00–0x1F）与 DEL：能伪造日志换行，把一条记录伪装成两条；
 //   - C1（0x80–0x9F）：终端控制序列；
-//   - 双向控制符（U+202A–U+202E、U+2066–U+2069、U+200E/U+200F）：能让一段
-//     文本在编辑器、终端和日志里显示成与真实字节序不同的样子（Trojan Source
-//     一类手法）。监控系统的告警正是靠人读这些文本做判断，必须剔除；
+//   - 双向控制符（U+061C、U+200E/U+200F、U+202A–U+202E、U+2066–U+2069）：
+//     能让一段文本在编辑器、终端和日志里显示成与真实字节序不同的样子
+//     （Trojan Source 一类手法）。监控系统的告警正是靠人读这些文本做判断，必须剔除；
 //   - U+2028/U+2029：在 JSON 字符串里合法，却是 JavaScript 的行终止符，
 //     进入页面脚本上下文会截断字符串。
 //
@@ -30,6 +30,8 @@ func IsControl(r rune) bool {
 	case r == 0x7f: // DEL
 		return true
 	case r >= 0x80 && r <= 0x9f: // C1
+		return true
+	case r == 0x061c: // ALM（阿拉伯字母标记，Bidi_Control）
 		return true
 	case r >= 0x202a && r <= 0x202e: // LRE RLE PDF LRO RLO
 		return true
@@ -47,16 +49,23 @@ func IsControl(r rune) bool {
 // 截断落在 rune 边界上，不会产出半个字符导致下游 UTF-8 解码失败。
 // maxBytes <= 0 表示不截断。
 func String(s string, maxBytes int) string {
-	if !strings.ContainsFunc(s, IsControl) && (maxBytes <= 0 || len(s) <= maxBytes) {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, IsControl) && (maxBytes <= 0 || len(s) <= maxBytes) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		// 非法 UTF-8 解码成 U+FFFD 且 size=1；直接丢弃，
+		// 否则下游会拿到无法解码的字节。真实的 U+FFFD 字符 size=3，予以保留。
+		if r == utf8.RuneError && size == 1 {
+			continue
+		}
 		if IsControl(r) {
 			continue
 		}
-		if maxBytes > 0 && b.Len()+utf8.RuneLen(r) > maxBytes {
+		if maxBytes > 0 && b.Len()+size > maxBytes {
 			break
 		}
 		b.WriteRune(r)

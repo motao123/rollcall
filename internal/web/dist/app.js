@@ -1348,7 +1348,7 @@ async function viewSettings() {
       </table></div>
       <p class="field-hint" style="margin:0 0 12px">
         Agent 版本低于控制端时会标记「可升级」。在目标节点执行
-        <code>curl -fsSL ${esc(panelBase)}/agent/install.sh | sudo sh -s -- --upgrade</code>
+        <code>curl -fsSL ${esc(panelBase)}/agent/install.sh | sudo sh -s -- ${installInsecureFlag(panelBase)}--upgrade</code>
         即可只替换二进制、保留现有配置（需服务端启用 <code>-agent-dir</code>）。
       </p>
       <details class="panel panel-pad">
@@ -1786,6 +1786,13 @@ function isLoopbackHost(hostname) {
   return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
 }
 
+// 安装脚本对非回环明文 HTTP 强制要求 --allow-insecure（下载即 root 执行）。
+function installInsecureFlag(base) {
+  let host = '';
+  try { host = new URL(base).hostname; } catch (e) { return ''; }
+  return base.startsWith('http://') && !isLoopbackHost(host) ? '--allow-insecure ' : '';
+}
+
 function agentServerURL() {
   const configured = (state.panelLink || '').trim().replace(/\/+$/, '');
   return configured || location.origin;
@@ -1797,7 +1804,8 @@ function showAgentConfig(node) {
   let host = '';
   try { host = new URL(server).hostname; } catch (e) { host = ''; }
   const insecure = server.startsWith('http://') && !isLoopbackHost(host);
-  const oneCmd = `curl -fsSL ${server}/agent/install.sh | sh -s -- ${server} ${node.id} ${node.token}`;
+  // 明文 HTTP 下安装脚本要求显式 --allow-insecure，否则拒绝以 root 执行下载的二进制。
+  const oneCmd = `curl -fsSL ${server}/agent/install.sh | sh -s -- ${insecure ? '--allow-insecure ' : ''}${server} ${node.id} ${node.token}`;
   const cfg = JSON.stringify({
     server,
     nodeId: node.id,
@@ -1820,7 +1828,7 @@ systemctl enable --now rollcall-agent`;
       <pre class="code" id="oneCmdText">${esc(oneCmd)}</pre>
       <button class="btn primary" id="copyCmd" type="button">复制命令</button>
     </div>
-    <p class="modal-sub" style="margin-top:10px">脚本会自动识别架构（amd64/arm64），HTTP 明文场景自动追加 -allow-insecure。约 30 秒后面板即可看到该节点。</p>
+    <p class="modal-sub" style="margin-top:10px">脚本会自动识别架构（amd64/arm64）；明文 HTTP 场景需显式加 --allow-insecure（上方命令已按当前地址自动补上）才会继续安装。约 30 秒后面板即可看到该节点。</p>
     ${insecure ? '<p class="modal-sub" style="color:var(--warn)">注意：控制端当前是明文 HTTP，节点令牌会在链路上明文传输。长期使用建议上 TLS 或保持隧道。</p>' : ''}
     <details style="margin-top:12px">
       <summary class="modal-sub" style="cursor:pointer">手动安装（备选）</summary>

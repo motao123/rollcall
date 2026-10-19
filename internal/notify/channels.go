@@ -171,6 +171,13 @@ func defOf(t string) (ChannelDef, bool) {
 	return ChannelDef{}, false
 }
 
+// urlCredentialKeys 是「字段本身即凭据」的地址类选项。
+//
+// webhook 的 url（Slack/DingTalk 的 /hooks/…、?access_token=…）以及
+// Bark/Gotify 的 serverUrl 常把令牌写进路径或查询串，按普通字段明文
+// 下发前端等于泄露。它们必须和 Field.Secret 一样参与脱敏与还原。
+var urlCredentialKeys = map[string]bool{"url": true, "serverUrl": true}
+
 // secretKeys 返回某通道的敏感字段名集合。
 func secretKeys(t string) map[string]bool {
 	d, ok := defOf(t)
@@ -182,6 +189,9 @@ func secretKeys(t string) map[string]bool {
 		if f.Secret {
 			m[f.Key] = true
 		}
+	}
+	for k := range urlCredentialKeys {
+		m[k] = true
 	}
 	return m
 }

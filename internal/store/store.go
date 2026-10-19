@@ -136,6 +136,11 @@ type Store struct {
 	alerts   []*model.Alert
 	settings map[string]string
 
+	// spMu 串行化状态页列表（维护窗口/人工事件）的读-改-写。
+	// settings 的读写各自加锁，但「读列表 → 修改 → 写回」跨了两次加锁，
+	// 两个并发管理员操作会互相覆盖。
+	spMu sync.Mutex
+
 	notifyJobs   map[string]*model.NotifyJob
 	notifyStats  model.NotifyStats
 	notifySilent map[string]*model.Silence // scope(global|ruleID) -> 静默期
@@ -561,13 +566,36 @@ func (s *Store) UpsertNode(n *model.Node) {
 	s.RequestSave()
 }
 
+// UpdateNode 在持锁状态下按字段更新单个节点。
+//
+// 批量操作若先 Node() 取副本、改完再 UpsertNode() 整条写回，会把两次
+// 调用之间 Agent 上报写入的 AgentVersion 覆盖回旧值；更严重的是，节点
+// 若已被并发删除，整条写回会让它连同旧令牌一起「复活」。
+// 返回值表示节点是否存在（已被删除时不做任何写入）。
+func (s *Store) UpdateNode(id string, fn func(*model.Node)) bool {
+	s.mu.Lock()
+	n, ok := s.nodes[id]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	fn(n)
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
 // DeleteNode 删除节点及其监控数据，并关闭其所有未恢复的告警。
+// 返回 false 表示节点已经不存在。
 //
 // 告警必须一并关闭：否则被删节点的活跃告警会永远挂在「进行中」，
 // 而且它已不在 Nodes() 里，Evaluate 的恢复分支永远走不到 —— 成为无法自愈的僵尸告警。
-func (s *Store) DeleteNode(id string) {
+func (s *Store) DeleteNode(id string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if _, ok := s.nodes[id]; !ok {
+		s.mu.Unlock()
+		return false
+	}
 	delete(s.nodes, id)
 	delete(s.series, id)
 	delete(s.hosts, id)
@@ -590,7 +618,9 @@ func (s *Store) DeleteNode(id string) {
 			s.notifyStats.Suppressed++
 		}
 	}
+	s.mu.Unlock()
 	s.RequestSave()
+	return true
 }
 
 func (s *Store) Nodes() []*model.Node {
@@ -737,6 +767,24 @@ func (s *Store) UpsertService(sv *model.Service) {
 	s.services[sv.ID] = sv
 	s.mu.Unlock()
 	s.RequestSave()
+}
+
+// CreateService 仅在 ID 不存在时创建服务，返回是否创建成功。
+// 管理端 POST 用它避免覆盖同 ID 的已有服务（与节点创建保持一致）。
+func (s *Store) CreateService(sv *model.Service) bool {
+	s.mu.Lock()
+	if _, exists := s.services[sv.ID]; exists {
+		s.mu.Unlock()
+		return false
+	}
+	if s.svcRes[sv.ID] == nil {
+		s.svcRes[sv.ID] = NewRing(ServiceRingSize)
+	}
+	cp := *sv
+	s.services[sv.ID] = &cp
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
 }
 
 func (s *Store) BackupServices() []*model.Service {
@@ -895,12 +943,15 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 	}
 	for _, ex := range s.alerts {
 		if ex.RuleID == a.RuleID && ex.NodeID == a.NodeID && ex.ResolvedAt == 0 {
-			ex.Value = a.Value
-			ex.Message = a.Message
 			// 回填持久化告警的真实 ID，通知任务据此关联告警记录。
 			a.ID = ex.ID
-			// 值/文案已就地改写，必须落盘：否则重启后「当前值」回到旧数字。
-			s.RequestSave()
+			// 只在值/文案真的变化时请求落盘：引擎每 15 秒评估一次，
+			// 无条件的 RequestSave 会让活动告警期间永久保持全量快照写入。
+			if ex.Value != a.Value || ex.Message != a.Message {
+				ex.Value = a.Value
+				ex.Message = a.Message
+				s.RequestSave()
+			}
 			return false, true
 		}
 	}
@@ -1067,6 +1118,22 @@ func (s *Store) ResolveRuleAlerts(ruleID string) []*model.Alert {
 	if len(closed) > 0 {
 		// 与 ResolveAlert 同理：不落盘的话重启后这批告警会重新变成「进行中」，
 		// 而引擎已经不会为停用/删除的规则跑恢复分支，形成永不自愈的僵尸告警。
+		s.RequestSave()
+	}
+	// 规则停用后，队列里尚未投递的 firing 通知同样应该作废；
+	// 否则恢复通知已经发出，旧告警却还会晚一步到达。
+	suppressed := 0
+	for _, j := range s.notifyJobs {
+		if j.RuleID == ruleID && j.Status == model.NotifyPending {
+			j.Status = model.NotifySuppressed
+			j.SuppressedBy = ruleID
+			j.LastError = "规则已停用"
+			j.NextAttemptAt = 0
+			s.notifyStats.Suppressed++
+			suppressed++
+		}
+	}
+	if suppressed > 0 {
 		s.RequestSave()
 	}
 	return closed
@@ -1307,6 +1374,10 @@ func (s *Store) RetryNotifyJob(id string, now int64) error {
 	j.LastError = ""
 	j.SuppressedBy = ""
 	j.NextAttemptAt = now
+	// 重新入队后它不再是终态任务：保留 FinishedAt/SentAt 会让面板把
+	// 「投递中」的任务显示成早已失败/成功的时间。
+	j.FinishedAt = 0
+	j.SentAt = 0
 	s.mu.Unlock()
 	s.RequestSave()
 	return nil
@@ -1328,22 +1399,32 @@ func (s *Store) NotifyStats() model.NotifyStats {
 // PruneNotify 清理过期/超量的已结束任务与过期静默，不影响未完成任务。
 func (s *Store) PruneNotify(now int64) {
 	s.mu.Lock()
-	s.pruneNotifyLocked(now)
+	changed := s.pruneNotifyLocked(now)
 	s.mu.Unlock()
+	if changed {
+		s.RequestSave()
+	}
 }
 
-func (s *Store) pruneNotifyLocked(now int64) {
+// pruneNotifyLocked 返回是否有条目被删除，调用方据此决定是否落盘。
+func (s *Store) pruneNotifyLocked(now int64) bool {
+	changed := false
 	retain := int64(NotifyJobRetention / time.Second)
 	for id, j := range s.notifyJobs {
 		if j.Status == model.NotifyPending {
 			continue
 		}
+		// 失败/静默任务没有 SentAt，FinishedAt 才是它们进入终态的时间。
 		ts := j.CreatedAt
 		if j.SentAt > ts {
 			ts = j.SentAt
 		}
+		if j.FinishedAt > ts {
+			ts = j.FinishedAt
+		}
 		if ts > 0 && now-ts > retain {
 			delete(s.notifyJobs, id)
+			changed = true
 		}
 	}
 	// 已结束任务按时间倒序保留最近 N 条；未完成任务永不淘汰。
@@ -1362,13 +1443,16 @@ func (s *Store) pruneNotifyLocked(now int64) {
 		})
 		for _, j := range final[MaxFinalNotifyJobs:] {
 			delete(s.notifyJobs, j.ID)
+			changed = true
 		}
 	}
 	for scope, sl := range s.notifySilent {
 		if sl.Until > 0 && sl.Until <= now {
 			delete(s.notifySilent, scope)
+			changed = true
 		}
 	}
+	return changed
 }
 
 // SetSilence 新增或覆盖某个范围（global / 规则 ID）的静默期。

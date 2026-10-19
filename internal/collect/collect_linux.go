@@ -55,6 +55,9 @@ type Collector struct {
 
 func New() *Collector { return &Collector{} }
 
+// Supported 表示当前平台有真实采集实现。
+func Supported() bool { return true }
+
 // Host 返回静态硬件信息（仅首次真正读取）。
 // 用 sync.Once 而非与 CPU 采样共用锁：Host 会读多个文件，
 // 不应把文件 IO 串行到每次指标采集之前。
@@ -85,9 +88,10 @@ func (c *Collector) Host() model.HostInfo {
 }
 
 // cpuModelKeys 是各架构 /proc/cpuinfo 里表示型号的键。
-// x86 用 "model name"，arm64 用 "Hardware" 或 "Processor"，
-// s390x 用 "processor 0: version = ..."，ppc64 用 "cpu"。
-var cpuModelKeys = []string{"model name", "hardware", "processor", "cpu model", "cpu"}
+// x86 用 "model name"，arm64 用 "Hardware" 或 "model name"，
+// ppc64 用 "cpu"。注意 ARM64/ppc64 的 "processor" 行数值是逻辑核编号，
+// 只有 x86 的 "processor" 才带型号描述，因此把它放在最后并跳过纯数字。
+var cpuModelKeys = []string{"model name", "hardware", "cpu model", "cpu", "processor"}
 
 // readCPUModel 提取 CPU 型号。
 // 只认 "model name" 时，arm64 机器的型号永远是空字符串（面板上不可见）。
@@ -109,12 +113,29 @@ func readCPUModel() string {
 			if !strings.EqualFold(strings.TrimSpace(line[:i]), key) {
 				continue
 			}
-			if v := strings.TrimSpace(line[i+1:]); v != "" {
+			v := strings.TrimSpace(line[i+1:])
+			// ARM64/ppc64: "processor : 0" 是核编号，不是型号。
+			if key == "processor" && isAllDigits(v) {
+				continue
+			}
+			if v != "" {
 				return v
 			}
 		}
 	}
 	return ""
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // detectVirt 判断虚拟化类型。
@@ -213,15 +234,27 @@ func (c *Collector) Collect() model.Metrics {
 	}
 
 	// 内存 / Swap（KB → 字节）
+	// /proc/meminfo 缺键时 readMemInfo 返回 0：所有减法都必须先比较，
+	// 否则 uint64 回绕成约 1.8e19 字节，面板与历史会记录天文数字。
 	mem := readMemInfo()
 	m.MemTotal = mem["MemTotal"] * 1024
 	if avail, ok := mem["MemAvailable"]; ok {
-		m.MemUsed = (mem["MemTotal"] - avail) * 1024
+		if mem["MemTotal"] > avail {
+			m.MemUsed = (mem["MemTotal"] - avail) * 1024
+		}
 	} else {
-		m.MemUsed = (mem["MemTotal"] - mem["MemFree"] - mem["Buffers"] - mem["Cached"]) * 1024
+		buffered := mem["MemFree"] + mem["Buffers"] + mem["Cached"]
+		if mem["MemTotal"] > buffered {
+			m.MemUsed = (mem["MemTotal"] - buffered) * 1024
+		}
+	}
+	if m.MemUsed > m.MemTotal {
+		m.MemUsed = m.MemTotal
 	}
 	m.SwapTotal = mem["SwapTotal"] * 1024
-	m.SwapUsed = (mem["SwapTotal"] - mem["SwapFree"]) * 1024
+	if mem["SwapTotal"] > mem["SwapFree"] {
+		m.SwapUsed = (mem["SwapTotal"] - mem["SwapFree"]) * 1024
+	}
 
 	// 磁盘（根分区）
 	var st syscall.Statfs_t
@@ -357,7 +390,9 @@ var sysClassNet = "/sys/class/net"
 // 同一批报文重复累加，累计流量放大 2–3 倍，而历史层正是用这些累计值
 // 做差分算流量。这里按拓扑补充两条判据：
 //   - 有 master 链接 = 从设备，其流量已计入主设备；
-//   - 容器/网桥侧的虚拟网卡按名字前缀跳过（无 master 但同样重复）。
+//   - 容器/网桥侧的虚拟网卡按名字前缀跳过（无 master 但同样重复）；
+//   - macvlan/ipvlan/vlan 没有 master，但有 lower_* 链接指向承载网卡，
+//     报文同时计入 lower 设备，必须跳过以免流量翻倍。
 func skipIface(name string) bool {
 	if name == "" || name == "lo" {
 		return true
@@ -368,6 +403,9 @@ func skipIface(name string) bool {
 		}
 	}
 	if _, err := os.Lstat(filepath.Join(sysClassNet, name, "master")); err == nil {
+		return true
+	}
+	if lower, _ := filepath.Glob(filepath.Join(sysClassNet, name, "lower_*")); len(lower) > 0 {
 		return true
 	}
 	return false

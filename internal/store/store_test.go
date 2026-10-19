@@ -269,6 +269,34 @@ func TestOpenAlertRejectsDeletedTargets(t *testing.T) {
 	}
 }
 
+// TestUpdateNodeDoesNotResurrect 批量更新必须持锁只改目标字段：
+// 用「取副本 + 整条写回」会在并发删除后把节点连同旧令牌复活，
+// 也会覆盖上报路径刚写入的 AgentVersion。
+func TestUpdateNodeDoesNotResurrect(t *testing.T) {
+	st := New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n", Token: "t"})
+	st.SetAgentVersion("n1", "v9.9.9")
+
+	if !st.UpdateNode("n1", func(n *model.Node) { n.Group = "prod" }) {
+		t.Fatal("存在的节点更新应成功")
+	}
+	n, _ := st.Node("n1")
+	if n.Group != "prod" || n.AgentVersion != "v9.9.9" || n.Token != "t" {
+		t.Fatalf("更新应只改目标字段: %+v", n)
+	}
+
+	st.DeleteNode("n1")
+	if st.UpdateNode("n1", func(n *model.Node) { n.Group = "again" }) {
+		t.Fatal("已删除节点不应更新成功")
+	}
+	if _, ok := st.Node("n1"); ok {
+		t.Fatal("已删除节点不应被更新路径复活")
+	}
+	if st.DeleteNode("n1") {
+		t.Fatal("重复删除应返回 false")
+	}
+}
+
 // TestSnapshotSchemaVersionRejectsNewer 防止新版快照被旧程序静默读成零值：
 // 更高版本必须隔离备份并报错，让运维先升级服务端，而不是带着残缺数据启动。
 func TestSnapshotSchemaVersionRejectsNewer(t *testing.T) {
@@ -512,4 +540,30 @@ func TestDeleteRuleSuppressesPendingJobs(t *testing.T) {
 	if _, _, ok := st.SilenceFor("r_x", now); ok {
 		t.Fatal("规则删除后其静默应一并清理")
 	}
+}
+
+// TestResolveRuleAlertsSuppressesPendingJobs 是回归测试：
+// 规则被停用（而不是删除）时，未投递的 firing 通知也必须作废，
+// 否则恢复通知先到、旧告警后到，管理员会看到已经解除的故障。
+func TestResolveRuleAlertsSuppressesPendingJobs(t *testing.T) {
+	st := New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
+	st.UpsertRule(&model.AlertRule{ID: "r_off", Name: "停用规则", Enabled: true})
+	now := time.Now().Unix()
+	st.OpenAlert(&model.Alert{RuleID: "r_off", NodeID: "n1", StartedAt: now})
+	st.EnqueueNotifyJob(&model.NotifyJob{
+		ID: "nj_off", RuleID: "r_off", NodeID: "n1", Status: model.NotifyPending, CreatedAt: now, NextAttemptAt: now,
+	})
+
+	drainSave(st)
+	if got := st.ResolveRuleAlerts("r_off"); len(got) != 1 {
+		t.Fatalf("应关闭 1 条告警，实际 %d", len(got))
+	}
+	if got := st.ClaimNotifyJobs(now, 10); len(got) != 0 {
+		t.Fatalf("停用规则的任务不应继续投递: %+v", got)
+	}
+	if s := st.NotifyStats(); s.Suppressed != 1 {
+		t.Fatalf("应累计 1 条静默拦截，实际 %+v", s)
+	}
+	waitSave(t, st, "ResolveRuleAlerts 停用规则")
 }

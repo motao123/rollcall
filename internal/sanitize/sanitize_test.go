@@ -23,6 +23,7 @@ func TestTextStripsControlAndBidi(t *testing.T) {
 		{"LRI U+2066", "a\u2066b", "ab"},
 		{"PDI U+2069", "a\u2069b", "ab"},
 		{"RLM U+200F", "a\u200Fb", "ab"},
+		{"ALM U+061C", "a\u061Cb", "ab"},
 		// U+2028/U+2029 在 JSON 字符串里合法，却是 JavaScript 的行终止符，
 		// 进入页面脚本上下文会截断字符串，必须一并剔除。
 		{"LS U+2028", "a\u2028b", "ab"},
@@ -73,6 +74,14 @@ func TestHasControl(t *testing.T) {
 	}
 	if !HasControl(string([]byte{0xff, 0xfe})) {
 		t.Fatal("非法 UTF-8 应被判为含控制字符")
+	}
+	// String 同样不能把非法字节原样放行（快路径曾直接返回未校验的字符串）。
+	if got := String("a"+string([]byte{0xff})+"b", 0); got != "ab" {
+		t.Fatalf("String 应剔除非法 UTF-8 字节，实际 %q", got)
+	}
+	// 合法的 U+FFFD 是正常字符，必须保留。
+	if got := String("a\uFFFDb", 0); got != "a\uFFFDb" {
+		t.Fatalf("合法替换符不应被剔除，实际 %q", got)
 	}
 }
 

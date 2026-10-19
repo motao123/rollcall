@@ -26,6 +26,35 @@ func TestMaskHidesShortSecrets(t *testing.T) {
 	}
 }
 
+// TestRedactedMasksURLCredentials 防止 webhook/serverUrl 里的令牌明文下发前端。
+// Slack/DingTalk 的 webhook 地址本身就是凭据，Bark/Gotify 的自建地址也可能带查询令牌。
+func TestRedactedMasksURLCredentials(t *testing.T) {
+	cfg := &Config{Channels: []ChannelConfig{
+		{ID: "c1", Type: "webhook", Enabled: true, Options: map[string]string{
+			"url": "https://hooks.example.com/services/T000/B000/SECRETTOKEN",
+		}},
+		{ID: "c2", Type: "bark", Enabled: true, Options: map[string]string{
+			"serverUrl": "https://bark.example.com?token=SECRETTOKEN", "deviceKey": "abcdefghijklmnop",
+		}},
+	}}
+	red := cfg.Redacted()
+	for _, ch := range red.Channels {
+		for k, v := range ch.Options {
+			if strings.Contains(v, "SECRETTOKEN") {
+				t.Fatalf("通道 %s 的 %s 明文泄露: %q", ch.ID, k, v)
+			}
+		}
+	}
+	// 掩码必须能还原真实值，否则编辑保存会把地址清空。
+	red.MergeSecrets(cfg)
+	if got := red.Channels[0].Options["url"]; got != cfg.Channels[0].Options["url"] {
+		t.Fatalf("地址掩码未还原: %q", got)
+	}
+	if got := red.Channels[1].Options["serverUrl"]; got != cfg.Channels[1].Options["serverUrl"] {
+		t.Fatalf("serverUrl 掩码未还原: %q", got)
+	}
+}
+
 // TestMergeSecretsDropsOrphanPlaceholder 是回归测试。
 //
 // 前端回传掩码占位符但找不到可复用旧值时（通道 ID 变了、类型变了、

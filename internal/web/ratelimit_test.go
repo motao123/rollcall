@@ -2,6 +2,7 @@ package web
 
 import (
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -65,6 +66,63 @@ func TestParseTrustedProxies(t *testing.T) {
 	}
 	if nets, err := ParseTrustedProxies(""); err != nil || len(nets) != 0 {
 		t.Fatalf("空串应得到空列表: %v %d", err, len(nets))
+	}
+}
+
+// TestClientIPReadsAllXFFHeaderLines 覆盖代理把客户端追加成新 header 行的情况。
+func TestClientIPReadsAllXFFHeaderLines(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Add("X-Forwarded-For", "1.1.1.1")
+	r.Header.Add("X-Forwarded-For", "203.0.113.9")
+	if got := clientIP(r, defaultTrustedProxies); got != "203.0.113.9" {
+		t.Fatalf("多行 XFF 应取最右侧非可信地址，实际 %s", got)
+	}
+}
+
+// TestRateLimitKeyFoldsIPv6To64 防止轮换 IPv6 源地址绕过失败限速。
+func TestRateLimitKeyFoldsIPv6To64(t *testing.T) {
+	a := rateLimitKey("2001:db8:1:2::1")
+	b := rateLimitKey("2001:db8:1:2:ffff::9")
+	if a != b {
+		t.Fatalf("同一 /64 内应折叠为同一 key: %q != %q", a, b)
+	}
+	if a == rateLimitKey("2001:db8:1:3::1") {
+		t.Fatal("不同 /64 不应折叠")
+	}
+	if got := rateLimitKey("203.0.113.9"); got != "203.0.113.9" {
+		t.Fatalf("IPv4 应保持原样，实际 %q", got)
+	}
+}
+
+// TestLimiterReservesInflightSlots 防止并发请求在 fail() 之前全部放行。
+func TestLimiterReservesInflightSlots(t *testing.T) {
+	l := newAuthFailureLimiter()
+	const reserve = 2 * 10 // maxFails*2
+	for i := 0; i < reserve; i++ {
+		if ok, _ := l.allow("scope"); !ok {
+			t.Fatalf("第 %d 个在途请求不应被拒", i+1)
+		}
+	}
+	if ok, _ := l.allow("scope"); ok {
+		t.Fatal("在途名额耗尽后应拒绝新请求")
+	}
+	l.release("scope")
+	if ok, _ := l.allow("scope"); !ok {
+		t.Fatal("结算后应重新放行")
+	}
+}
+
+// TestStatusRecorderIgnoresInformational 防止 1xx 中间响应顶掉最终状态码。
+func TestStatusRecorderIgnoresInformational(t *testing.T) {
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	rec.WriteHeader(http.StatusEarlyHints)
+	if rec.status != 0 {
+		t.Fatalf("1xx 不应被记为最终状态，实际 %d", rec.status)
+	}
+	rec.WriteHeader(http.StatusOK)
+	if rec.status != http.StatusOK {
+		t.Fatalf("最终状态应为 200，实际 %d", rec.status)
 	}
 }
 

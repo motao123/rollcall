@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,13 +65,22 @@ func (s *Store) SetStatusPage(c model.StatusPage) {
 
 // Maintenances 返回全部维护窗口，按开始时间升序。
 func (s *Store) Maintenances() []*model.Maintenance {
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	out, _ := s.maintenancesLocked()
+	return out
+}
+
+// maintenancesLocked 在持有 spMu 时读取并清洗列表。
+// 返回错误而不是空列表：调用方据此拒绝写入，避免把损坏的旧数据覆盖掉。
+func (s *Store) maintenancesLocked() ([]*model.Maintenance, error) {
 	var out []*model.Maintenance
 	raw := s.GetSetting(keyMaintenance)
 	if raw == "" {
-		return out
+		return out, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil
+		return nil, fmt.Errorf("维护窗口配置损坏: %w", err)
 	}
 	// 丢弃结构不完整或时间非法的条目，避免一条坏数据让整个列表不可用
 	kept := out[:0]
@@ -80,15 +92,18 @@ func (s *Store) Maintenances() []*model.Maintenance {
 	}
 	out = kept
 	sort.Slice(out, func(i, j int) bool { return out[i].StartAt < out[j].StartAt })
-	return out
+	return out, nil
 }
 
 // UpsertMaintenance 新增或更新一个维护窗口。
 // Title 为空时用一个稳定的占位标题：公开页要显示"为什么在维护"，
 // 空标题会让用户只看到一个无解释的徽章。
-func (s *Store) UpsertMaintenance(m *model.Maintenance) {
+func (s *Store) UpsertMaintenance(m *model.Maintenance) error {
 	if m == nil {
-		return
+		return errors.New("维护窗口为空")
+	}
+	if strings.TrimSpace(m.ID) == "" {
+		return errors.New("维护窗口缺少 ID")
 	}
 	m.Title = sanitize.Text(m.Title, 128)
 	m.Reason = sanitize.Text(m.Reason, 500)
@@ -96,12 +111,22 @@ func (s *Store) UpsertMaintenance(m *model.Maintenance) {
 		m.Title = "计划维护"
 	}
 	if m.EndAt <= m.StartAt {
-		return // 时间非法的窗口永不结束，直接拒绝写入
+		return errors.New("维护窗口结束时间必须晚于开始时间")
 	}
-	list := s.Maintenances()
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	list, err := s.maintenancesLocked()
+	if err != nil {
+		return err
+	}
 	replaced := false
 	for i, cur := range list {
 		if cur.ID == m.ID {
+			// CreatedAt 是服务端记账字段：更新既有窗口时不能被客户端的
+			// now 覆盖，否则「创建时间」会随每次编辑漂移。
+			if cur.CreatedAt > 0 {
+				m.CreatedAt = cur.CreatedAt
+			}
 			list[i] = m
 			replaced = true
 			break
@@ -110,12 +135,17 @@ func (s *Store) UpsertMaintenance(m *model.Maintenance) {
 	if !replaced {
 		list = append(list, m)
 	}
-	s.saveMaintenances(list)
+	return s.saveMaintenances(list)
 }
 
 // DeleteMaintenance 删除维护窗口。
-func (s *Store) DeleteMaintenance(id string) bool {
-	list := s.Maintenances()
+func (s *Store) DeleteMaintenance(id string) (bool, error) {
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	list, err := s.maintenancesLocked()
+	if err != nil {
+		return false, err
+	}
 	kept := make([]*model.Maintenance, 0, len(list))
 	removed := false
 	for _, m := range list {
@@ -126,32 +156,34 @@ func (s *Store) DeleteMaintenance(id string) bool {
 		kept = append(kept, m)
 	}
 	if !removed {
-		return false
+		return false, nil
 	}
-	s.saveMaintenances(kept)
-	return true
+	return true, s.saveMaintenances(kept)
 }
 
-func (s *Store) saveMaintenances(list []*model.Maintenance) {
+func (s *Store) saveMaintenances(list []*model.Maintenance) error {
 	b, err := json.Marshal(list)
 	if err != nil {
-		return
+		return err
 	}
 	s.SetSetting(keyMaintenance, string(b))
+	return nil
 }
 
 // MaintenanceAt 返回 ts 时刻处于维护中的窗口。
-// 返回两个结果：全局窗口（覆盖全部节点）与按节点 ID 索引的窗口，
+// 返回全局窗口（覆盖全部节点，可能为 nil）与按节点 ID 索引的窗口，
 // 调用方据此判断某个节点当前是否"计划维护中"。
-// global 为真时 nodeIDs 里的条目仍然有效（用于展示更具体的标题）。
-func (s *Store) MaintenanceAt(ts int64) (global bool, nodeIDs map[string]*model.Maintenance) {
+// 全局窗口存在时 nodeIDs 里的条目仍然有效（用于展示更具体的标题）。
+func (s *Store) MaintenanceAt(ts int64) (global *model.Maintenance, nodeIDs map[string]*model.Maintenance) {
 	nodeIDs = map[string]*model.Maintenance{}
 	for _, m := range s.Maintenances() {
-		if !m.ActiveAt(ts) {
+		if m == nil || !m.ActiveAt(ts) {
 			continue
 		}
 		if len(m.NodeIDs) == 0 {
-			global = true
+			if global == nil {
+				global = m
+			}
 			continue
 		}
 		for _, id := range m.NodeIDs {
@@ -164,7 +196,12 @@ func (s *Store) MaintenanceAt(ts int64) (global bool, nodeIDs map[string]*model.
 // PruneMaintenance 清理已经结束很久的窗口，避免列表无限增长。
 // 保留 grace 秒内的历史，便于"刚刚结束的维护"仍能在时间线里查到。
 func (s *Store) PruneMaintenance(now, grace int64) int {
-	list := s.Maintenances()
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	list, err := s.maintenancesLocked()
+	if err != nil {
+		return 0 // 配置损坏时不动它，交给管理员排查
+	}
 	kept := make([]*model.Maintenance, 0, len(list))
 	for _, m := range list {
 		if m.EndAt+grace < now {
@@ -175,7 +212,9 @@ func (s *Store) PruneMaintenance(now, grace int64) int {
 	if len(kept) == len(list) {
 		return 0
 	}
-	s.saveMaintenances(kept)
+	if err := s.saveMaintenances(kept); err != nil {
+		return 0
+	}
 	return len(list) - len(kept)
 }
 
@@ -183,13 +222,20 @@ func (s *Store) PruneMaintenance(now, grace int64) int {
 
 // Incidents 返回全部人工事件，按开始时间倒序（最近的在前）。
 func (s *Store) Incidents() []*model.Incident {
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	out, _ := s.incidentsLocked()
+	return out
+}
+
+func (s *Store) incidentsLocked() ([]*model.Incident, error) {
 	var out []*model.Incident
 	raw := s.GetSetting(keyIncidents)
 	if raw == "" {
-		return out
+		return out, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil
+		return nil, fmt.Errorf("人工事件配置损坏: %w", err)
 	}
 	kept := out[:0]
 	for _, it := range out {
@@ -200,18 +246,18 @@ func (s *Store) Incidents() []*model.Incident {
 	}
 	out = kept
 	sort.Slice(out, func(i, j int) bool { return out[i].StartAt > out[j].StartAt })
-	return out
+	return out, nil
 }
 
 // UpsertIncident 新增或更新一条人工事件。
-func (s *Store) UpsertIncident(it *model.Incident) {
+func (s *Store) UpsertIncident(it *model.Incident) error {
 	if it == nil || it.ID == "" {
-		return
+		return errors.New("人工事件缺少 ID")
 	}
 	it.Title = sanitize.Text(it.Title, 200)
 	it.Body = sanitize.Text(it.Body, 4000)
 	if it.Title == "" {
-		return
+		return errors.New("人工事件缺少标题")
 	}
 	if !model.ValidLevel(it.Level) {
 		it.Level = model.LevelInfo
@@ -220,15 +266,23 @@ func (s *Store) UpsertIncident(it *model.Incident) {
 		it.StartAt = time.Now().Unix()
 	}
 	if it.EndAt != 0 && it.EndAt < it.StartAt {
-		it.EndAt = 0 // 结束早于开始按"进行中"处理，而不是产生负时长
+		return errors.New("事件结束时间不能早于开始时间")
 	}
 	if it.CreatedAt <= 0 {
 		it.CreatedAt = time.Now().Unix()
 	}
-	list := s.Incidents()
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	list, err := s.incidentsLocked()
+	if err != nil {
+		return err
+	}
 	replaced := false
 	for i, cur := range list {
 		if cur.ID == it.ID {
+			if cur.CreatedAt > 0 {
+				it.CreatedAt = cur.CreatedAt
+			}
 			list[i] = it
 			replaced = true
 			break
@@ -237,12 +291,17 @@ func (s *Store) UpsertIncident(it *model.Incident) {
 	if !replaced {
 		list = append(list, it)
 	}
-	s.saveIncidents(list)
+	return s.saveIncidents(list)
 }
 
 // DeleteIncident 删除一条人工事件。
-func (s *Store) DeleteIncident(id string) bool {
-	list := s.Incidents()
+func (s *Store) DeleteIncident(id string) (bool, error) {
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	list, err := s.incidentsLocked()
+	if err != nil {
+		return false, err
+	}
 	kept := make([]*model.Incident, 0, len(list))
 	removed := false
 	for _, it := range list {
@@ -253,24 +312,29 @@ func (s *Store) DeleteIncident(id string) bool {
 		kept = append(kept, it)
 	}
 	if !removed {
-		return false
+		return false, nil
 	}
-	s.saveIncidents(kept)
-	return true
+	return true, s.saveIncidents(kept)
 }
 
-func (s *Store) saveIncidents(list []*model.Incident) {
+func (s *Store) saveIncidents(list []*model.Incident) error {
 	b, err := json.Marshal(list)
 	if err != nil {
-		return
+		return err
 	}
 	s.SetSetting(keyIncidents, string(b))
+	return nil
 }
 
 // PruneIncidents 删除结束时间早于截止点的事件。
 // 进行中的（EndAt == 0）永不清理。
 func (s *Store) PruneIncidents(before int64) int {
-	list := s.Incidents()
+	s.spMu.Lock()
+	defer s.spMu.Unlock()
+	list, err := s.incidentsLocked()
+	if err != nil {
+		return 0
+	}
 	kept := make([]*model.Incident, 0, len(list))
 	for _, it := range list {
 		if it.EndAt != 0 && it.EndAt < before {
@@ -281,7 +345,9 @@ func (s *Store) PruneIncidents(before int64) int {
 	if len(kept) == len(list) {
 		return 0
 	}
-	s.saveIncidents(kept)
+	if err := s.saveIncidents(kept); err != nil {
+		return 0
+	}
 	return len(list) - len(kept)
 }
 
@@ -351,6 +417,8 @@ func (s *Store) publicSalt() string {
 	if _, err := rand.Read(b); err != nil {
 		// crypto/rand 失败极罕见（fd 耗尽等）。此时仍要保证进程内稳定，
 		// 否则同一节点每次请求都换句柄，前端详情页会一直 404。
+		// 退化后的盐值可预测，必须留下明确日志供运维排查。
+		log.Printf("crypto/rand 失败，公开句柄盐值退化为时间派生值: %v", err)
 		b = []byte(strconv.FormatInt(time.Now().UnixNano(), 10))
 	}
 	v := hex.EncodeToString(b)
@@ -359,8 +427,11 @@ func (s *Store) publicSalt() string {
 	}
 	s.settings[keyPublicSalt] = v
 	s.mu.Unlock()
-	// 立即请求落盘：盐值丢失等于所有公开链接失效。
-	s.RequestSave()
+	// 同步落盘：盐值丢失等于所有公开链接失效。
+	// 走 RequestSave 的 2 秒合并窗口时，这段窗口内崩溃就会让盐值消失。
+	if err := s.Save(); err != nil {
+		log.Printf("保存公开句柄盐值失败（重启后公开链接可能失效）: %v", err)
+	}
 	return v
 }
 

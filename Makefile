@@ -13,7 +13,25 @@ endif
 ifeq ($(strip $(VERSION)),)
 VERSION := dev
 endif
-# 单引号包裹：tag 名允许包含空格与 $()，不加引号会被 shell 当成语法解析。
+# VERSION_FLAG 最终位于 recipe 的双引号 shell 字符串里，而双引号内的
+# 单引号只是普通字符，$ / ` 仍会触发命令替换。这些字符在版本号里没有
+# 任何用途，直接拒绝，而不是指望引号保护。
+ifneq ($(findstring $$,$(VERSION)),)
+$(error VERSION 不能包含 $: $(VERSION))
+endif
+ifneq ($(findstring `,$(VERSION)),)
+$(error VERSION 不能包含反引号: $(VERSION))
+endif
+ifneq ($(findstring ",$(VERSION)),)
+$(error VERSION 不能包含双引号: $(VERSION))
+endif
+ifneq ($(findstring ',$(VERSION)),)
+$(error VERSION 不能包含单引号: $(VERSION))
+endif
+ifneq ($(findstring \,$(VERSION)),)
+$(error VERSION 不能包含反斜杠: $(VERSION))
+endif
+# 单引号供链接器的 quoted.Split 使用：值里有空格时也不会被拆成多个参数。
 VERSION_FLAG := -X 'github.com/motao/rollcall/internal/version.Version=$(VERSION)'
 
 # 交叉编译的统一参数（静态链接，无 CGO 依赖）
@@ -26,7 +44,7 @@ endef
 
 .PHONY: all server agent rollsign linux clean clean-data demo fmt vet test
 
-all: server agent
+all: server agent rollsign
 
 server:
 	go build -trimpath -ldflags "$(VERSION_FLAG)" -o $(BINARY_SERVER) ./cmd/server
@@ -75,6 +93,8 @@ clean:
 # 显式清空运行时数据，仅在确认要丢弃监控历史与令牌时使用。
 # 用绝对路径 + 二次确认，避免 `make -C` 或误触时删到别处的目录。
 clean-data:
-	@test "$(CONFIRM)" = "yes" || { echo "拒绝执行：请使用 make clean-data CONFIRM=yes"; exit 1; }
+	# 只接受命令行赋值：环境里残留的 CONFIRM=yes 不应让一条误敲的命令删库。
+	@test "$(origin CONFIRM)" = "command line" && test "$(CONFIRM)" = "yes" \
+		|| { echo "拒绝执行：请使用 make clean-data CONFIRM=yes"; exit 1; }
 	@echo "将删除 $(CURDIR)/data（监控历史与令牌）"
 	@test -n "$(CURDIR)" && test -d "$(CURDIR)/data" && rm -rf "$(CURDIR)/data"

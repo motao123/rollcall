@@ -103,6 +103,58 @@ func TestHTTPProbeBlocksRedirectToMetadata(t *testing.T) {
 	}
 }
 
+// TestHTTPProbeRedirectDiagnostics 回归测试：跨主机/跨端口跳转后，
+// 最终状态码与跳转目标都必须出现在 Detail 里，
+// 否则「配了 A、实际一直在看 B」完全不可见。
+func TestHTTPProbeRedirectDiagnostics(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer final.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, final.URL, http.StatusFound)
+	}))
+	defer redir.Close()
+
+	r := NewRunner(Config{AllowPrivate: true})
+	res := r.Do(model.Service{Type: "http", Target: redir.URL})
+	if res.OK {
+		t.Fatalf("最终 404 不应判定为健康: %+v", res)
+	}
+	if !strings.Contains(res.Detail, "status 404") {
+		t.Errorf("Detail 应保留最终状态码: %q", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "redirected to "+final.URL) {
+		t.Errorf("Detail 应说明跳转目标: %q", res.Detail)
+	}
+}
+
+// TestHTTPProbeCertDaysUsesFirstHop 回归测试：
+// 配置目标是 http 时，跳到 https 拿到的证书不属于目标，
+// 不能把它的剩余天数当成目标的证书监控数据。
+func TestHTTPProbeCertDaysUsesFirstHop(t *testing.T) {
+	final := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer final.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, final.URL, http.StatusFound)
+	}))
+	defer redir.Close()
+
+	r := NewRunner(Config{AllowPrivate: true, InsecureTLS: true})
+	res := r.Do(model.Service{Type: "http", Target: redir.URL})
+	if !res.OK {
+		t.Fatalf("跳转后的 200 应判定为健康: %+v", res)
+	}
+	if res.CertDays != -1 {
+		t.Errorf("首跳为 http 时不应采信终点证书天数，CertDays=%d", res.CertDays)
+	}
+	if !strings.Contains(res.Detail, "redirected to https://") {
+		t.Errorf("Detail 应说明跨协议跳转: %q", res.Detail)
+	}
+}
+
 func TestTCPProbe(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

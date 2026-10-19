@@ -46,9 +46,11 @@ func DefaultConfig() Config {
 			10 * time.Minute,
 			30 * time.Minute,
 		},
-		// 8 个 worker 各最多一次 12 秒的 HTTP 超时，留一倍余量；
-		// 上限 60 秒，避免拖过 systemd 默认的 TimeoutStopSec。
-		DrainTimeout: 30 * time.Second,
+		// notify.Send 串行遍历通道，单个任务最坏耗时 = 通道数 × 12 秒；
+		// 多个 worker 并行，所以预算按「单任务上限」估算。60 秒可覆盖约
+		// 5 个通道，同时在 systemd 默认 TimeoutStopSec(90s) 之前留出落盘余量。
+		// 超时后未完成的任务保持 pending，下次启动继续重试。
+		DrainTimeout: 60 * time.Second,
 	}
 }
 
@@ -190,7 +192,7 @@ func (m *Manager) Start() {
 	go m.loop()
 }
 
-// Stop 停止调度并等待在途投递完成（最多 20 秒）。
+// Stop 停止调度并等待在途投递完成（上限为 cfg.DrainTimeout，默认 60 秒）。
 // 未完成的任务保持 pending，重启后会继续重试。
 func (m *Manager) Stop() {
 	// 持 startMu 关闭 stop：与 Start 的 Add 互斥，
@@ -331,8 +333,14 @@ func (m *Manager) work(job *model.NotifyJob) {
 		// 而租约到期后任务本可以重新投递。
 		return
 	}
-	if !cfg.Enabled || len(cfg.EnabledChannels()) == 0 {
-		m.st.NotifyJobSuppressed(job.ID, "config", "通知配置已停用或没有可用通道", now)
+	if !cfg.Enabled {
+		m.st.NotifyJobSuppressed(job.ID, "config", "通知已停用", now)
+		return
+	}
+	// 「启用中但没有可用通道」通常是配置写错（缺必填项）或全部通道被临时
+	// 关闭，是可恢复状态：像配置未加载一样保持 pending，租约到期后重试。
+	// 若在这里标记 suppressed，恢复通道后这些告警会被永久丢弃。
+	if len(cfg.EnabledChannels()) == 0 {
 		return
 	}
 	if !cfg.ShouldSend(job.Severity) {

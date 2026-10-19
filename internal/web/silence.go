@@ -48,9 +48,13 @@ func (s *Server) handleAdminNotifyJobByID(w http.ResponseWriter, r *http.Request
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "id": id})
 	case errors.Is(err, store.ErrNotifyJobNotFound):
-		fail(w, 404, err.Error())
+		fail(w, 404, "通知任务不存在")
+	case errors.Is(err, store.ErrNotifyJobPending):
+		fail(w, 409, "通知任务已在队列中")
+	case errors.Is(err, store.ErrNotifyJobSent):
+		fail(w, 409, "通知任务已投递成功，无需重试")
 	default:
-		fail(w, 409, err.Error())
+		fail(w, 500, "重试通知任务失败")
 	}
 }
 
@@ -77,15 +81,17 @@ func (s *Server) handleAdminSilenceByScope(w http.ResponseWriter, r *http.Reques
 		fail(w, 400, "invalid silence scope")
 		return
 	}
-	if scope != "global" {
-		if _, ok := s.ruleByID(scope); !ok {
-			fail(w, 404, "rule not found")
-			return
-		}
-	}
 
 	switch r.Method {
 	case http.MethodPut, http.MethodPost:
+		// 规则存在性只影响「新建静默」：规则删除后遗留的静默仍应可删除，
+		// 否则 GET 还能看到它、DELETE 却永远 404。
+		if scope != "global" {
+			if _, ok := s.ruleByID(scope); !ok {
+				fail(w, 404, "rule not found")
+				return
+			}
+		}
 		body := http.MaxBytesReader(w, r.Body, 4<<10)
 		var req struct {
 			Minutes int    `json:"minutes"`

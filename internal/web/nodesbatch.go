@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/sanitize"
@@ -43,6 +44,12 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.IDs) > 500 {
 		fail(w, 400, "单次最多操作 500 个节点")
+		return
+	}
+	// 重复 ID 会让 delete 被计数多次、分组被写多次；去重后再校验。
+	req.IDs = dedupeStrings(trimListSpace(req.IDs))
+	if len(req.IDs) == 0 {
+		fail(w, 400, "ids 不能为空")
 		return
 	}
 	req.Value = sanitize.Text(req.Value, 128)
@@ -84,46 +91,38 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 	changed := 0
 	for _, old := range nodes {
 		if req.Action == "delete" {
-			s.st.DeleteNode(old.ID)
-			changed++
+			if s.st.DeleteNode(old.ID) {
+				changed++
+			}
 			continue
 		}
-		updated := *old
-		switch req.Action {
-		case "group":
-			updated.Group = req.Value
-		case "provider":
-			updated.Provider = req.Value
-		case "region":
-			updated.Region = req.Value
-		case "expire":
-			updated.ExpireAt = req.Value
-		case "currency":
-			updated.Currency = req.Value
+		if s.st.UpdateNode(old.ID, func(n *model.Node) {
+			switch req.Action {
+			case "group":
+				n.Group = req.Value
+			case "provider":
+				n.Provider = req.Value
+			case "region":
+				n.Region = req.Value
+			case "expire":
+				n.ExpireAt = req.Value
+			case "currency":
+				n.Currency = req.Value
+			}
+		}) {
+			changed++
 		}
-		s.st.UpsertNode(&updated)
-		changed++
 	}
 	writeJSON(w, 200, map[string]any{"changed": changed, "action": req.Action})
 }
 
 // validDate 校验 YYYY-MM-DD。台账里的到期日一直是这个格式，
 // 批量写入混入别的格式会让"30 天内到期"的筛选静默失效。
+// 必须按真实日历校验：手写 1..31 会放过 2026-02-31，
+// 而 daysUntil 解析失败后该节点会从"即将到期"列表里静默消失。
 func validDate(s string) bool {
-	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
-		return false
-	}
-	for i, c := range s {
-		if i == 4 || i == 7 {
-			continue
-		}
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	m := int(s[5]-'0')*10 + int(s[6]-'0')
-	d := int(s[8]-'0')*10 + int(s[9]-'0')
-	return m >= 1 && m <= 12 && d >= 1 && d <= 31
+	t, err := time.Parse("2006-01-02", s)
+	return err == nil && t.Format("2006-01-02") == s
 }
 
 // trimListSpace 去掉字符串列表里的空项与首尾空白。
@@ -136,6 +135,23 @@ func trimListSpace(in []string) []string {
 		if v != "" {
 			out = append(out, v)
 		}
+	}
+	return out
+}
+
+// dedupeStrings 按首次出现顺序去重，保留原顺序。
+func dedupeStrings(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0]
+	for _, v := range in {
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
 	}
 	return out
 }

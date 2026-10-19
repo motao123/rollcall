@@ -59,14 +59,16 @@ var metadataIPs = []net.IP{
 // `64:ff9b::a9fe:a9fe` 在 NAT64 环境会落到 169.254.169.254，
 // `2002:0a00:0001::` 会落到 10.0.0.1 —— 即使 AllowPrivate=false 也一样。
 var reservedIPv6 = mustCIDRs(
-	"fec0::/10",      // 站点本地（已废弃）
-	"2001:db8::/32",  // 文档
-	"2001:2::/48",    // 基准测试
-	"2001::/32",      // Teredo（内嵌 IPv4）
-	"2002::/16",      // 6to4（内嵌 IPv4）
-	"64:ff9b::/96",   // NAT64（内嵌 IPv4）
-	"64:ff9b:1::/48", // NAT64 本地
-	"100::/64",       // 丢弃前缀
+	"fec0::/10",       // 站点本地（已废弃）
+	"2001:db8::/32",   // 文档
+	"2001:2::/48",     // 基准测试
+	"2001::/32",       // Teredo（内嵌 IPv4）
+	"2002::/16",       // 6to4（内嵌 IPv4）
+	"64:ff9b::/96",    // NAT64（内嵌 IPv4）
+	"64:ff9b:1::/48",  // NAT64 本地
+	"100::/64",        // 丢弃前缀
+	"::/96",           // IPv4-compatible（已废弃，可内嵌 IPv4）
+	"::ffff:0:0:0/96", // IPv4-translated（SIIT，可内嵌 IPv4）
 )
 
 func mustCIDRs(cidrs ...string) []*net.IPNet {
@@ -95,8 +97,9 @@ func (p Policy) CheckIP(ip net.IP) error {
 		}
 	}
 	// IPv6 保留/过渡网段必须在 AllowPrivate 之前拦截：
-	// 6to4 / NAT64 / Teredo 内嵌 IPv4，可绕过上面的 IPv4 检查。
-	if ip.To4() == nil {
+	// 6to4 / NAT64 / Teredo / IPv4-compatible 内嵌 IPv4，可绕过上面的 IPv4 检查。
+	// 回环地址（::1）本身落在 ::/96 内，放行与否交给下面的私网策略决定。
+	if ip.To4() == nil && !ip.IsLoopback() {
 		for _, n := range reservedIPv6 {
 			if n.Contains(ip) {
 				return fmt.Errorf("目标地址 %s 属于不可路由的 IPv6 保留网段", ip)
@@ -129,15 +132,23 @@ func (p Policy) CheckHost(host string) error {
 	if host == "" {
 		return errors.New("目标主机为空")
 	}
-	// IPv6 字面量可能带区域后缀（fe80::1%eth0，URL 中写作 %25eth0）。
-	// net.ParseIP 不认 zone，会把整串当成域名放行，从而绕过地址策略。
-	if i := strings.IndexByte(host, '%'); i >= 0 && strings.Contains(host, ":") {
-		host = host[:i]
-	}
-	if ip := net.ParseIP(host); ip != nil {
+	if ip := net.ParseIP(normalizeIPHost(host)); ip != nil {
 		return p.CheckIP(ip)
 	}
 	return nil
+}
+
+// normalizeIPHost 去掉 URL/字面量里的方括号与 IPv6 区域后缀。
+// net.ParseIP 两者都不认，原样放行会让 `[::1]`、`fe80::1%eth0`
+// 被当成域名，从而绕过地址策略（拨号时再解析到受限地址）。
+func normalizeIPHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 && strings.Contains(host, ":") {
+		host = host[:i]
+	}
+	return host
 }
 
 // CheckURL 校验出站 URL 的协议、主机与地址范围。
@@ -172,7 +183,7 @@ func (p Policy) DialContext(ctx context.Context, network, addr string) (net.Conn
 	defer cancel()
 	d := net.Dialer{Timeout: timeout}
 
-	if ip := net.ParseIP(host); ip != nil {
+	if ip := net.ParseIP(normalizeIPHost(host)); ip != nil {
 		if err := p.CheckIP(ip); err != nil {
 			return nil, err
 		}

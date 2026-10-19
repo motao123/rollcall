@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -56,6 +58,11 @@ func (s *Sessions) TTL() time.Duration { return s.ttl }
 
 // Issue 为指定用户签发会话。version 绑定当前密码版本，改密后旧会话失效。
 func (s *Sessions) Issue(username string, version int64) (string, time.Time, error) {
+	// 载荷用 '|' 分隔；用户名若含分隔符、换行或为空，Verify 会解析出错，
+	// 或让不同用户名签出同一字段结构。这里复用登录名规则，只允许安全字符。
+	if err := ValidateUsername(username); err != nil {
+		return "", time.Time{}, err
+	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", time.Time{}, fmt.Errorf("生成会话随机数失败: %w", err)
@@ -110,6 +117,13 @@ func (s *Sessions) Verify(token string) (Session, bool) {
 	return Session{Username: fields[1], Version: version, Expires: exp}, true
 }
 
+// TokenID 返回会话令牌的指纹，供服务端吊销列表持久化使用。
+// 令牌本身是高熵随机值，明文摘要不会泄露签名密钥。
+func (s *Sessions) TokenID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 func signSession(key, payload []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(payload)
@@ -119,14 +133,8 @@ func signSession(key, payload []byte) []byte {
 // LoadOrCreateSessionKey 从文件读取会话签名密钥；不存在时生成。
 // 密钥持久化后，服务重启不会让已登录用户掉线。
 func LoadOrCreateSessionKey(path string) ([]byte, error) {
-	key, err := os.ReadFile(path)
+	key, err := readPrivate(path)
 	if err == nil {
-		if len(key) != sessionKeySize {
-			return nil, fmt.Errorf("会话密钥长度无效: %d", len(key))
-		}
-		if err := ensurePrivate(path); err != nil {
-			return nil, err
-		}
 		return key, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -136,61 +144,76 @@ func LoadOrCreateSessionKey(path string) ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("生成会话密钥失败: %w", err)
 	}
-	if err := writePrivate(path, key); err != nil {
+	if err := createPrivate(path, key); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// 并发启动的另一个实例先创建了密钥：复用它，避免两边
+			// 各签各的 Cookie，表现为用户随机掉线。
+			return readPrivate(path)
+		}
 		return nil, err
 	}
 	return key, nil
 }
 
-func ensurePrivate(path string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	fi, err := os.Stat(path)
+// readPrivate 用 O_NOFOLLOW 打开并校验权限，读取最多 sessionKeySize 字节。
+func readPrivate(path string) ([]byte, error) {
+	f, err := openNoFollow(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("会话密钥权限过宽且无法收紧: %w", err)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errors.New("会话密钥必须是普通文件")
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+		if err := f.Chmod(0o600); err != nil {
+			return nil, fmt.Errorf("会话密钥权限过宽且无法收紧: %w", err)
 		}
 	}
-	return nil
+	raw, err := io.ReadAll(io.LimitReader(f, sessionKeySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) != sessionKeySize {
+		return nil, fmt.Errorf("会话密钥长度无效: %d", len(raw))
+	}
+	return raw, nil
 }
 
-func writePrivate(path string, raw []byte) error {
+// createPrivate 仅在文件不存在时创建（O_EXCL）；已存在返回 os.ErrExist。
+func createPrivate(path string, raw []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("创建密钥目录失败: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".session-key-*")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("写入会话密钥失败: %w", err)
+		return err
 	}
-	name := tmp.Name()
 	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(name)
+		_ = f.Close()
+		_ = os.Remove(path)
 	}
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := f.Chmod(0o600); err != nil {
 		cleanup()
 		return fmt.Errorf("设置会话密钥权限失败: %w", err)
 	}
-	if _, err := tmp.Write(raw); err != nil {
+	if _, err := f.Write(raw); err != nil {
 		cleanup()
 		return fmt.Errorf("写入会话密钥失败: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := f.Sync(); err != nil {
 		cleanup()
 		return fmt.Errorf("落盘会话密钥失败: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
 		return fmt.Errorf("关闭会话密钥失败: %w", err)
 	}
-	if err := os.Rename(name, path); err != nil {
-		_ = os.Remove(name)
-		return fmt.Errorf("替换会话密钥失败: %w", err)
-	}
+	syncDir(dir)
 	return nil
 }

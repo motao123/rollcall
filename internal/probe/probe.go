@@ -153,13 +153,18 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 	// resp 是跳转链的**最后一跳**，它的 TLS 描述的是跳转目标的证书。
 	// 目标 301 到 http:// 或别的域名时，用 resp.TLS 取天数会得到
 	// 「无 TLS(-1)」或「另一台主机的证书」，证书到期监控静默失效。
-	// 这里在 CheckRedirect 里抓首跳的 TLS 状态，重定向判定仍走原有策略。
-	var firstTLS *tls.ConnectionState
+	// 因此只记录**配置目标本身**（首跳响应）的 TLS：首跳是 http 时
+	// 后续跳转到的 https 证书不能冒充目标证书。
+	var targetTLS *tls.ConnectionState
+	redirected := false
 	cli := *r.client
 	baseRedirect := r.client.CheckRedirect
 	cli.CheckRedirect = func(next *http.Request, via []*http.Request) error {
-		if firstTLS == nil && next.Response != nil && next.Response.TLS != nil {
-			firstTLS = next.Response.TLS
+		if len(via) == 1 {
+			redirected = true
+			if next.Response != nil {
+				targetTLS = next.Response.TLS
+			}
 		}
 		if baseRedirect != nil {
 			return baseRedirect(next, via)
@@ -184,19 +189,33 @@ func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {
 	// 3xx 不再默认健康：跳转已在客户端逐跳校验，最终仍返回 3xx 视为异常。
 	res.OK = (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
 		resp.StatusCode == 401 || resp.StatusCode == 403
+
+	// 跨主机/跨协议跳转：最终响应不代表配置目标的健康状态，
+	// 无论最终状态是否健康都要在详情里可见，避免「配了 A、一直在看 B」。
+	redirNote := ""
+	if resp.Request != nil {
+		from := u.Scheme + "://" + u.Host
+		to := resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
+		if to != from {
+			redirNote = "redirected to " + to
+		}
+	}
 	if !res.OK {
 		res.Detail = "status " + strconv.Itoa(resp.StatusCode)
-	} else if resp.Request != nil && resp.Request.URL.Host != u.Host {
-		// 跨主机/跨协议跳转：最终响应不代表配置目标的健康状态，
-		// 至少要让它在详情里可见，避免「配了 A、一直在看 B」。
-		res.Detail = "redirected to " + resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
+		if redirNote != "" {
+			res.Detail += "; " + redirNote
+		}
+	} else if redirNote != "" {
+		res.Detail = redirNote
 	}
 
 	// TLS 证书剩余天数。默认握手已校验证书链，能走到这里说明链有效；
 	// 仅在显式开启 InsecureTLS 时链未验证，此时天数只作展示。
-	// 优先用首跳（配置目标本身）的证书；没有跳转时首跳就是最终响应。
-	tlsState := firstTLS
-	if tlsState == nil {
+	// 无跳转时用最终响应；有跳转时只认配置目标（首跳）的证书。
+	var tlsState *tls.ConnectionState
+	if redirected {
+		tlsState = targetTLS
+	} else {
 		tlsState = resp.TLS
 	}
 	if tlsState != nil && len(tlsState.PeerCertificates) > 0 {

@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/motao/rollcall/internal/theme"
@@ -29,9 +30,11 @@ func (s *Server) themeWithErr() (theme.Theme, error) {
 }
 
 // handleTheme 公开下发外观配置，供仪表盘与公开状态页应用。
+// 与其他公开只读接口一致：接受 HEAD 并返回 Allow 头。
 func (s *Server) handleTheme(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		fail(w, 405, "method not allowed")
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	writeJSON(w, 200, s.currentTheme())
@@ -54,11 +57,19 @@ func (s *Server) handleAdminTheme(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPut, http.MethodPost:
 		body := http.MaxBytesReader(w, r.Body, 4<<10)
-		var in theme.Theme
+		var in *theme.Theme
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&in); err != nil {
 			fail(w, 400, "bad json: "+err.Error())
+			return
+		}
+		if in == nil {
+			fail(w, 400, "主题配置不能为 null")
+			return
+		}
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			fail(w, 400, "bad json: 只接受单个 JSON 对象")
 			return
 		}
 		if err := in.Validate(); err != nil {

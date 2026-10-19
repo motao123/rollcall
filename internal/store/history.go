@@ -176,13 +176,18 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 		b = &r.buf[(r.head-1+r.size)%r.size]
 	}
 	if !b.UsageOK {
-		// 旧 schema 桶没有绝对用量总和：用当时的总量把平均值补成总和，
-		// 之后继续累计本期样本，避免 sum/count 把旧样本漏掉。
+		// 旧 schema 桶没有绝对用量总和；单侧损坏（只有内存或只有磁盘
+		// 的 total 缺失）也会走到这里。只回填确实缺失的一侧，
+		// 不能把另一侧仍然有效的总和用平均值覆盖掉。
 		if b.Count > 0 {
 			// Count 与总量都直接来自 JSON，普通乘法可能 uint64 溢出后
 			// 回绕成一个极小的值，让历史聚合看起来「用量骤降」。
-			b.MemUsedSum = satMul(pctBytes(b.MemTotal, float64(b.MemAvg)), uint64(b.Count))
-			b.DiskUsedSum = satMul(pctBytes(b.DiskTotal, float64(b.DiskAvg)), uint64(b.Count))
+			if b.MemUsedSum == 0 || b.MemTotal == 0 {
+				b.MemUsedSum = satMul(pctBytes(b.MemTotal, float64(b.MemAvg)), uint64(b.Count))
+			}
+			if b.DiskUsedSum == 0 || b.DiskTotal == 0 {
+				b.DiskUsedSum = satMul(pctBytes(b.DiskTotal, float64(b.DiskAvg)), uint64(b.Count))
+			}
 		}
 		b.UsageOK = true
 	}
@@ -470,6 +475,11 @@ func sanitizeBucket(b historyBucket) historyBucket {
 	}
 	if b.MemUsedSum > 0 && b.MemTotal == 0 {
 		// 没有总量却有用量总和：无法再计算百分比，标记为不可用重新累计。
+		b.UsageOK = false
+	}
+	if b.DiskUsedSum > 0 && b.DiskTotal == 0 {
+		// 磁盘侧同样要检查：否则 HistorySeries 会返回
+		// DiskUsed > 0 而 DiskTotal == 0 的自相矛盾点。
 		b.UsageOK = false
 	}
 	return b

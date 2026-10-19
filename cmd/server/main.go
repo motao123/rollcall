@@ -132,7 +132,7 @@ func main() {
 		}
 	}
 	if generatedPwd != "" {
-		log.Printf("初始管理员密码: %s（仅本次启动打印一次，请立即保存；落盘仅保存哈希）", generatedPwd)
+		announceGeneratedPassword(*dataDir, generatedPwd)
 	}
 	log.Printf("面板账号登录已启用（用户 %s，会话有效期 %s）", panelUser.Username, auth.DefaultSessionTTL)
 
@@ -227,15 +227,23 @@ func main() {
 	// 否则最终快照之后仍会有 AddServiceResult 写入，那些结果永远不会落盘，
 	// 而且关机期间还在对外发起探测。
 	bgStop := make(chan struct{})
+	probeDone := make(chan struct{})
 
 	// 服务探测循环
 	// 注意：演示模式下不发起真实探测，避免对本机产生意外外连
 	if !*demo {
 		go func() {
+			defer close(probeDone)
 			t := time.NewTicker(*probeEvery)
 			defer t.Stop()
 			last := map[string]time.Time{}
 			for {
+				// 先看停止信号：刚启动就关机时不必等满一个 tick。
+				select {
+				case <-bgStop:
+					return
+				default:
+				}
 				svcs := st.Services()
 				due := make([]*model.Service, 0, len(svcs))
 				for _, sv := range svcs {
@@ -288,6 +296,8 @@ func main() {
 				}
 			}
 		}()
+	} else {
+		close(probeDone)
 	}
 
 	stopProducers := func() {
@@ -295,6 +305,14 @@ func main() {
 		case <-bgStop:
 		default:
 			close(bgStop)
+		}
+		// 等待探测循环真正退出：它只在每轮结束时检查 bgStop，
+		// 不 join 的话关机保存之后仍可能有 AddServiceResult 写入并丢失。
+		// 黑洞目标最坏要等单轮超时，这里给 15 秒上限，避免拖死整个关机。
+		select {
+		case <-probeDone:
+		case <-time.After(15 * time.Second):
+			log.Printf("⚠ 探测循环 15 秒内未退出，继续关闭流程")
 		}
 	}
 
@@ -346,11 +364,17 @@ func main() {
 			// 不能直接 log.Fatal：它走 os.Exit(1)，会跳过 main 里所有 defer
 			// （ob.Stop），退出前的最终落盘也永远不会执行 —— 丢掉的正是最近
 			// 一个快照周期内的状态（待投递通知、探测结果）。
-			shutdown(srv, ob, st, stopProducers, "HTTP 服务异常")
+			if serr := shutdown(srv, ob, st, stopProducers, "HTTP 服务异常"); serr != nil {
+				log.Printf("退出前保存失败: %v", serr)
+			}
 			log.Fatalf("%v", err)
 		}
 	case <-ctx.Done():
-		shutdown(srv, ob, st, stopProducers, "收到退出信号")
+		// 最终快照写失败时以非零状态退出：调用方（systemd/容器）
+		// 需要能区分「干净关机」与「关机时丢数据」。
+		if serr := shutdown(srv, ob, st, stopProducers, "收到退出信号"); serr != nil {
+			log.Fatalf("退出前保存失败: %v", serr)
+		}
 	}
 }
 
@@ -362,7 +386,7 @@ func main() {
 //  2. Shutdown 超时则 Close 强制断开剩余连接 —— 否则那些 handler 会被
 //     进程退出直接掐掉，正在提交的管理变更写一半；
 //  3. 排空通知队列；4. 最后落盘，让哨兵记录覆盖在途投递的最终状态。
-func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProducers func(), reason string) {
+func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProducers func(), reason string) error {
 	started := time.Now()
 	log.Printf("%s，正在关闭并保存状态…", reason)
 	if stopProducers != nil {
@@ -381,9 +405,10 @@ func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProduce
 	}
 	if saveErr != nil {
 		log.Printf("退出前保存失败: %v", saveErr)
-		return
+		return saveErr
 	}
 	log.Printf("状态已保存，退出（关停耗时 %.1fs）", time.Since(started).Seconds())
+	return nil
 }
 
 // ensureDefaultRules 只在从未初始化过的实例上播种默认规则。
@@ -394,12 +419,24 @@ func ensureDefaultRules(st *store.Store) {
 	if st.GetSetting(key) != "" {
 		return
 	}
-	if len(st.Rules()) == 0 {
-		for _, r := range alert.DefaultRules() {
+	// 标记缺失意味着「播种从未完整跑完」。此时补齐缺失的默认规则即可：
+	// 如果上次在两次 Upsert 之间崩溃，只按 len(Rules())==0 判断会把
+	// 半套规则当成用户主动删光，永久固化残缺状态。
+	have := make(map[string]bool)
+	for _, r := range st.Rules() {
+		have[r.ID] = true
+	}
+	for _, r := range alert.DefaultRules() {
+		if !have[r.ID] {
 			st.UpsertRule(r)
 		}
 	}
 	st.SetSetting(key, "1")
+	// 规则与标记必须在同一次快照里落盘：自动保存尚未启动，
+	// 这里显式保存一次，避免崩溃后出现「有标记但没规则」。
+	if err := st.Save(); err != nil {
+		log.Printf("保存默认规则失败（将随自动保存重试）: %v", err)
+	}
 }
 
 // isLoopbackListen 判断监听地址是否只绑定回环，包含 ":19080" 这种全接口写法。
@@ -417,6 +454,23 @@ func isLoopbackListen(addr string) bool {
 
 // minAdminTokenLen 是管理令牌的最小长度（与自动生成的 48 位十六进制对齐取整）。
 const minAdminTokenLen = 16
+
+// announceGeneratedPassword 只在交互式终端打印初始密码。
+// systemd 下 stdout 会进 journal，等于把唯一的管理员凭据写进日志与
+// 日志采集系统；非 TTY 时改为写入 0600 文件，只记录路径。
+func announceGeneratedPassword(dataDir, pwd string) {
+	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		fmt.Printf("初始管理员密码: %s（仅本次启动打印一次，请立即保存；落盘仅保存哈希）\n", pwd)
+		return
+	}
+	path := filepath.Join(dataDir, "initial-admin-password.txt")
+	if err := os.WriteFile(path, []byte(pwd+"\n"), 0o600); err != nil {
+		log.Printf("无法安全输出初始管理员密码（写入 %s 失败: %v）；请使用 -reset-admin-password 重新设置", path, err)
+		return
+	}
+	_ = os.Chmod(path, 0o600)
+	log.Printf("初始管理员密码已写入 %s（仅本次启动生成；登录后请删除）", path)
+}
 
 // loadOrCreateAdminToken 从数据目录读取管理令牌，不存在则生成并落盘（权限 0600）。
 // 读取失败（权限、IO 错误、文件为空）必须报错而不是悄悄换新令牌 ——

@@ -33,21 +33,34 @@ const MinReportInterval = 5
 // 服务端不该对一次上报返回大包；Agent 侧硬夹一次，避免被诱导下载大文件。
 const MaxResponseBytes = 64 << 10
 
-// ReportInterval 是推荐上报间隔的唯一算法。两侧都从它推出，而不是各写一个数。
-func ReportInterval(ttl int) int {
-	if ttl <= 0 {
-		ttl = OnlineTTL
+// normalizeTTL 把 TTL 夹进合法区间。ReportInterval/MaxReportInterval 是
+// 纯函数，调用方可能传入任意值；不先归一化时，ttl=1 会让推荐间隔变成 0，
+// 而 ClampReportInterval 会看到 lo > hi 并错误地判定输入合法。
+func normalizeTTL(ttl int) int {
+	if ttl < MinOnlineTTL {
+		return MinOnlineTTL
 	}
-	return ttl / ReportsPerTTL
+	if ttl > MaxOnlineTTL {
+		return MaxOnlineTTL
+	}
+	return ttl
 }
 
-// MaxReportInterval 是本地配置允许放宽到的上限：不超过 TTL 的一半，
-// 保证一个 TTL 内至少有两次上报机会，单次丢包不会误判离线。
-func MaxReportInterval(ttl int) int {
-	if ttl <= 0 {
-		ttl = OnlineTTL
+// ReportInterval 是推荐上报间隔的唯一算法。两侧都从它推出，而不是各写一个数。
+func ReportInterval(ttl int) int {
+	v := normalizeTTL(ttl) / ReportsPerTTL
+	if v < MinReportInterval {
+		return MinReportInterval
 	}
-	return ttl / 2
+	return v
+}
+
+// MaxReportInterval 是本地配置允许放宽到的上限：不超过 TTL 的一半。
+// 最小 TTL 为 30 秒，因此该值始终不小于 MinReportInterval（15 > 5），
+// [lo, hi] 区间不会倒置。理论上一个 TTL 内只剩两次上报机会时，
+// 单次丢包仍可能误判离线 —— 这是允许放宽到 TTL/2 的固有取舍。
+func MaxReportInterval(ttl int) int {
+	return normalizeTTL(ttl) / 2
 }
 
 // ClampReportInterval 把配置值夹进 [MinReportInterval, MaxReportInterval]，

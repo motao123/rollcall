@@ -63,6 +63,12 @@ type Server struct {
 	testMu   sync.Mutex
 	lastTest time.Time
 
+	// revokedMu 保护 revoked：会话令牌指纹 -> 过期时间。
+	// HMAC 会话是无状态的，只清 Cookie 无法阻止被窃取的令牌继续使用，
+	// 登出时把令牌指纹记入持久化吊销列表。
+	revokedMu sync.Mutex
+	revoked   map[string]int64
+
 	// notifySaveMu 串行化「写设置 + 应用配置」这一对操作。
 	// 两者是分开的两步：两个并发保存可能交错成「持久化的是 A、内存生效的是 B」，
 	// 重启后行为突然改变。
@@ -101,6 +107,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
 		trustedProxies: trusted}
+	srv.loadRevokedSessions()
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
 		srv.notifyErr = err
@@ -171,7 +178,7 @@ func (l authLevel) String() string {
 
 // protected 表示该级别下 2xx 响应能否证明请求持有有效凭证，
 // 用于清零鉴权失败限速计数。公开页与 Agent 上报不能清零。
-func (l authLevel) protected(authConfigured bool) bool {
+func (l authLevel) protected() bool {
 	switch l {
 	case authReadonly, authAdmin, authMetrics:
 		return true
@@ -619,6 +626,21 @@ func sanitizeMetrics(m model.Metrics) model.Metrics {
 	if m.Procs < 0 {
 		m.Procs = 0
 	}
+	// 累计流量计数器参与历史差分，异常大的值（或 MaxUint64）会让
+	// 单桶增量溢出/爆表；1 EiB 远高于任何真实网卡的生命周期总量。
+	const maxNetCounter = uint64(1) << 60
+	if m.NetRx > maxNetCounter {
+		m.NetRx = maxNetCounter
+	}
+	if m.NetTx > maxNetCounter {
+		m.NetTx = maxNetCounter
+	}
+	// 运行时长同样是 Agent 自报值，异常值会进入 Prometheus 与导出；
+	// 100 年足够覆盖任何真实主机，又能挡住 uint64 上限。
+	const maxUptime = uint64(100 * 365 * 24 * 60 * 60)
+	if m.Uptime > maxUptime {
+		m.Uptime = maxUptime
+	}
 	return m
 }
 
@@ -940,7 +962,9 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 //	· 仅保留：展示名、在线状态、三项使用率、运行时长、24h 可用率色块
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := s.st.StatusPage()
-	views := s.buildNodeViews()
+	// 公开页自己按 24h 序列计算迷你曲线与可用率，不需要 NodeView 的
+	// 告警计数和 30 点 sparkline —— 后者会为每个节点额外取一次序列。
+	views := s.buildNodeViewsLite()
 	svcs := s.st.Services()
 	vis := cfg.Visibility
 
@@ -956,7 +980,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().Unix()
-	maintAll, maintNodes := s.st.MaintenanceAt(now)
+	maintGlobal, maintNodes := s.st.MaintenanceAt(now)
+	maintAll := maintGlobal != nil
 
 	out := make([]statusNodePub, 0, len(views))
 	for _, v := range views {
@@ -1036,7 +1061,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			p.Spark = spark
 		}
 		if maintAll {
-			p.MaintenanceTitle = globalMaintenanceTitle(maintNodes, s.st.Maintenances())
+			p.MaintenanceTitle = maintGlobal.Title
 		} else if m, ok := maintNodes[v.ID]; ok && m != nil {
 			p.MaintenanceTitle = m.Title
 		}
@@ -1117,7 +1142,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg.Announcement.Enabled {
 		resp["announcement"] = cfg.Announcement
 	}
-	resp["maintenance"] = maintenanceBanner(maintAll, maintNodes, s.st.Maintenances())
+	resp["maintenance"] = maintenanceBanner(maintGlobal, maintNodes)
 	resp["visibility"] = vis
 	resp["blocks"] = cfg.Blocks
 	resp["generatedAt"] = now
@@ -1127,49 +1152,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // maintenanceBanner 生成整站级别的维护提示。
 // 全局窗口优先展示；只有部分节点在维护时说明受影响数量，
 // 避免访客看到"维护中"却不知道是全部还是一台。
-func maintenanceBanner(all bool, nodes map[string]*model.Maintenance, list []*model.Maintenance) map[string]any {
-	if !all && len(nodes) == 0 {
+// 只使用 MaintenanceAt 返回的生效窗口，避免把尚未开始/已经结束的标题展示出来。
+func maintenanceBanner(global *model.Maintenance, nodes map[string]*model.Maintenance) map[string]any {
+	if global == nil && len(nodes) == 0 {
 		return nil
 	}
 	title := "计划维护"
-	for _, m := range list {
-		if m != nil && m.Title != "" && (all || len(m.NodeIDs) == 0 || inNodeSet(m, nodes)) {
-			title = m.Title
-			break
+	if global != nil && global.Title != "" {
+		title = global.Title
+	} else {
+		for _, m := range nodes {
+			if m != nil && m.Title != "" {
+				title = m.Title
+				break
+			}
 		}
 	}
-	out := map[string]any{"title": title, "global": all, "count": len(nodes)}
-	if all {
+	out := map[string]any{"title": title, "global": global != nil, "count": len(nodes)}
+	if global != nil {
 		out["text"] = "正在进行计划维护，期间可能出现短暂中断。"
 	} else {
 		out["text"] = "部分节点正在进行计划维护。"
 	}
 	return out
-}
-
-func inNodeSet(m *model.Maintenance, nodes map[string]*model.Maintenance) bool {
-	for _, id := range m.NodeIDs {
-		if cur, ok := nodes[id]; ok && cur != nil && cur.ID == m.ID {
-			return true
-		}
-	}
-	return false
-}
-
-// globalMaintenanceTitle 为全局维护窗口挑一个标题：
-// 优先取真正的全局窗口（NodeIDs 为空），否则取第一个生效的。
-func globalMaintenanceTitle(nodes map[string]*model.Maintenance, list []*model.Maintenance) string {
-	for _, m := range list {
-		if m != nil && len(m.NodeIDs) == 0 && m.Title != "" {
-			return m.Title
-		}
-	}
-	for _, m := range nodes {
-		if m != nil && m.Title != "" {
-			return m.Title
-		}
-	}
-	return "计划维护"
 }
 
 // handleStatusPage 渲染公开状态页 HTML（独立于管理界面，免登录）。
@@ -1618,7 +1623,15 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "interval 不能超过 86400 秒")
 			return
 		}
-		s.st.UpsertService(&in)
+		// 客户端自带 ID 时按「新建」处理：已存在必须报 409，
+		// 不能让一次复制粘贴的 POST 静默覆盖线上服务配置。
+		if req.ID != "" && !s.st.CreateService(&in) {
+			fail(w, 409, "service id already exists")
+			return
+		}
+		if req.ID == "" {
+			s.st.UpsertService(&in)
+		}
 		writeJSON(w, 201, in)
 
 	default:
@@ -1683,25 +1696,28 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, err.Error())
 			return
 		}
-		// 还原前端回传的脱敏占位符。旧配置损坏时按「首次配置」处理，
-		// 否则上面那条 500/409 会把损坏状态永久固化，再也无法覆盖。
+		// 读取旧配置、还原脱敏占位符、落盘与生效必须整体串行：
+		// 否则两个并发保存会各自基于同一份旧配置还原密钥，后写入者
+		// 把前一次刚保存的新密钥覆盖回旧值。
+		s.notifySaveMu.Lock()
+		// 旧配置损坏时按「首次配置」处理，否则上面那条 500/409
+		// 会把损坏状态永久固化，再也无法覆盖。
 		old, err := notify.Parse(s.st.GetSetting("notify"))
 		if err != nil {
 			log.Printf("已保存的通知配置损坏，按首次配置覆盖: %v", err)
 			old = nil
 		}
 		in.MergeSecrets(old)
-
-		raw, err := json.Marshal(&in)
-		if err != nil {
+		raw, merr := json.Marshal(&in)
+		if merr == nil {
+			s.st.SetSetting("notify", string(raw))
+			s.applyNotifyConfig(&in)
+		}
+		s.notifySaveMu.Unlock()
+		if merr != nil {
 			fail(w, 500, "序列化失败")
 			return
 		}
-		// 落盘与生效必须作为整体：并发保存交错会让两者指向不同配置。
-		s.notifySaveMu.Lock()
-		s.st.SetSetting("notify", string(raw))
-		s.applyNotifyConfig(&in)
-		s.notifySaveMu.Unlock()
 		writeJSON(w, 200, map[string]any{"saved": true, "channels": in.EnabledChannels()})
 
 	default:
@@ -1763,7 +1779,15 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 所有校验都通过，才扣减这 3 秒一次的配额。
+	// 这里必须再次检查并与写入放在同一临界区：上面的快速失败不占配额，
+	// 两个并发请求可能同时通过快速检查，只有这里能保证只放行一个。
 	s.testMu.Lock()
+	if wait := 3*time.Second - time.Since(s.lastTest); wait > 0 && !s.lastTest.IsZero() {
+		s.testMu.Unlock()
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		fail(w, 429, "测试通知过于频繁，请稍后再试")
+		return
+	}
 	s.lastTest = time.Now()
 	s.testMu.Unlock()
 

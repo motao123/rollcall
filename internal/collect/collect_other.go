@@ -19,10 +19,14 @@ type Collector struct {
 
 func New() *Collector { return &Collector{} }
 
+// Supported 表示当前平台是否有真实采集实现。
+// Agent 在非 Linux 上据此拒绝上报全零指标，而不是把它们当成真实数据。
+func Supported() bool { return false }
+
 func (c *Collector) Host() model.HostInfo {
 	c.hostOnce.Do(func() {
-		hostname := "dev-host"
-		// 用真实主机名，避免联调时节点在面板里显示成假名字、污染资产台账。
+		// 查不到主机名时用 unknown，不要编造一个看起来像真名的 dev-host。
+		hostname := "unknown"
 		if hn, err := os.Hostname(); err == nil && hn != "" {
 			hostname = hn
 		}

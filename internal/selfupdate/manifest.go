@@ -84,6 +84,7 @@ func New(manifestURL, publicKeyB64 string, allowInsecure bool) (*Updater, error)
 	if err != nil {
 		return nil, err
 	}
+	manifestURL = strings.TrimSpace(manifestURL)
 	if err := CheckURL(manifestURL, allowInsecure); err != nil {
 		return nil, fmt.Errorf("update.manifestUrl: %w", err)
 	}
@@ -115,7 +116,8 @@ func DecodePublicKey(s string) (ed25519.PublicKey, error) {
 // CheckURL 校验更新地址：默认 HTTPS，本机或显式放行时允许 HTTP。
 func CheckURL(raw string, allowInsecure bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
+	// 只检查 Host 非空会放过 https://:443：Host 是 ":443"，Hostname 为空。
+	if err != nil || u.Host == "" || u.Hostname() == "" {
 		return errors.New("更新地址无效")
 	}
 	if u.User != nil {
@@ -199,6 +201,12 @@ func VerifyEnvelope(raw []byte, pub ed25519.PublicKey) (*Manifest, error) {
 		if a.URL == "" {
 			return nil, fmt.Errorf("资产 %s 缺少 url", k)
 		}
+		// 验签阶段就拒绝非 http/https、带 userinfo 或空主机名的地址。
+		// allowInsecure 传 true 只校验形状：是否允许明文 HTTP 是下载时的
+		// 部署策略（Download 会再按 AllowInsecure 完整校验一次）。
+		if err := CheckURL(a.URL, true); err != nil {
+			return nil, fmt.Errorf("资产 %s 的 url 无效: %w", k, err)
+		}
 	}
 	return &Manifest{Version: p.Version, PublishedAt: p.PublishedAt, Assets: p.Assets}, nil
 }
@@ -208,10 +216,11 @@ func (u *Updater) Fetch(ctx context.Context) (*Manifest, error) {
 	// Fetch 是导出方法，Updater 的字段也可写：不能假设调用方一定走 New。
 	// 重新校验 URL（否则改成 http:// 就绕过 New 里的 HTTPS 要求，
 	// 清单与签名可被中间人整体替换），并兜住零值 Updater 的 nil client。
-	if err := CheckURL(u.ManifestURL, u.AllowInsecure); err != nil {
+	manifestURL := strings.TrimSpace(u.ManifestURL)
+	if err := CheckURL(manifestURL, u.AllowInsecure); err != nil {
 		return nil, fmt.Errorf("更新清单地址: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.ManifestURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if err != nil {
 		return nil, errors.New("构造更新清单请求失败")
 	}
@@ -239,7 +248,14 @@ func (u *Updater) httpClient() *http.Client {
 	if u.client != nil {
 		return u.client
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		// 与 New 保持一致：零值/手工构造的 Updater 也不能跟随重定向，
+		// 否则清单或资产可能被引到 HTTP 或未校验的主机。
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // Candidate 返回适用于当前平台的资产；第二个返回值表示是否有更新。
@@ -467,10 +483,11 @@ func (u *Updater) Download(ctx context.Context, a Asset, dir string) (string, er
 	if a.Size < MinAssetSize || a.Size > MaxAssetSize {
 		return "", fmt.Errorf("更新资产大小 %d 超出允许范围", a.Size)
 	}
-	if err := CheckURL(a.URL, u.AllowInsecure); err != nil {
+	assetURL := strings.TrimSpace(a.URL)
+	if err := CheckURL(assetURL, u.AllowInsecure); err != nil {
 		return "", fmt.Errorf("更新资产地址: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return "", errors.New("构造更新下载请求失败")
 	}

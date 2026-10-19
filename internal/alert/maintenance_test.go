@@ -127,4 +127,9 @@ func TestMaintenanceActiveAtCovers(t *testing.T) {
 	if (&model.Maintenance{NodeIDs: []string{"a"}}).Covers("b") {
 		t.Error("指定节点列表时不应覆盖其他节点")
 	}
+	// nil 窗口与 ActiveAt 一致：不生效，也不覆盖任何节点。
+	var nilWin *model.Maintenance
+	if nilWin.ActiveAt(150) || nilWin.Covers("任意节点") {
+		t.Error("nil 窗口不应生效或覆盖节点")
+	}
 }

@@ -1,14 +1,20 @@
 name: CI
 
 on:
+  # PR 分支由 pull_request 覆盖；push 只跑 main 与 tag，
+  # 否则同仓库 PR 的每次推送会完整跑两遍。
   push:
+    branches: [main]
+    tags: ["**"]
   pull_request:
 
 # 只在 PR 上取消旧运行：push 到分支（尤其 main）时取消前一次，
 # 会让那个提交永远没有 test/race 的成功结果，branch protection 只能看到
 # cancelled —— 等于「未测试」（若该检查是必过项，还会挡住合并）。
+# push 用 commit SHA 分组：GitHub 即使 cancel-in-progress=false，也会在
+# 同组有新任务入队时取消**排队中**的旧任务，快速连续推送仍会漏测中间提交。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -30,12 +36,12 @@ jobs:
         with:
           go-version: "1.24.x"
 
-      # tag 名可以合法包含 $ ( ) ` 等字符。VERSION 最终会进入链接器参数，
-      # 先按白名单校验，避免任何形式的命令替换被带进构建。
+      # tag 名可以合法包含 $ ( ) ` 与 / 等字符。VERSION 最终会进入链接器参数，
+      # 先按白名单校验，避免任何形式的命令替换被带进构建；/ 在引用内无害。
       - name: validate version
         run: |
           case "$VERSION" in
-            "" | *[!A-Za-z0-9._+-]*)
+            "" | *[!A-Za-z0-9._+/-]*)
               echo "::error::VERSION 含不安全字符，拒绝构建: $VERSION"
               exit 1
               ;;
