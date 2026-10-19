@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f5d8a'/><path d='M8 20l5-7 4 5 3-4 4 6' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 </head>
-<body>
+<body class="auth-checking">
 <div class="app">
 
   <aside class="sidebar">
@@ -84,6 +84,21 @@
         <button class="icon-btn" id="refreshBtn" title="刷新 (R)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
         </button>
+        <div class="user-menu" id="userMenu">
+          <button class="user-btn" id="userBtn" type="button" aria-haspopup="menu" aria-expanded="false" title="账号">
+            <span class="user-avatar" id="userAvatar">A</span>
+            <span class="user-name" id="userName">管理员</span>
+            <svg class="user-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="user-pop" id="userPop" role="menu">
+            <div class="user-pop-head">
+              <div class="user-pop-name" id="userPopName">admin</div>
+              <div class="user-pop-mail" id="userPopEmail">未设置邮箱</div>
+            </div>
+            <a class="user-item" href="/status" target="_blank" rel="noopener" role="menuitem">公开状态页 ↗</a>
+            <button class="user-item danger" id="userLogoutBtn" type="button" role="menuitem">退出登录</button>
+          </div>
+        </div>
       </div>
     </header>
 

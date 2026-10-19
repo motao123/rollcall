@@ -16,6 +16,8 @@ const state = {
   data: {},
   panelLink: '',
   authRequired: false,
+  authenticated: false,
+  user: null,
   timers: [],
 };
 
@@ -98,19 +100,29 @@ function tone(v, warnAt, critAt) {
 /* ---------------- 请求 ---------------- */
 
 async function api(path) {
-  const headers = { Accept: 'application/json' };
-  const tok = adminToken();
-  if (tok) headers['X-Admin-Token'] = tok;
-  const r = await fetch(path, { headers });
+  const r = await fetch(path, {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  });
   if (r.status === 401) {
-    state.authRequired = true;
-    const e = new Error('需要管理令牌');
+    authLost();
+    const e = new Error('登录状态已失效');
     e.status = 401;
     throw e;
   }
   if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
-  state.authRequired = false;
   return r.json();
+}
+
+// 会话失效统一入口：停掉轮询并弹出登录页。authRequired 同时是
+// "登录页已显示" 的标记，重复触发不再重绘，避免抹掉用户正在输入的内容。
+function authLost() {
+  state.authenticated = false;
+  state.user = null;
+  updateUserMenu();
+  if (state.authRequired) return;
+  state.authRequired = true;
+  setTimeout(() => { if (state.authRequired) showLoginGate(); }, 0);
 }
 
 /* ---------------- SVG 绘图 ---------------- */
@@ -678,7 +690,7 @@ async function viewServices() {
 }
 
 async function viewAlerts() {
-  const canManage = !!adminToken();
+  const canManage = state.authenticated;
   const [d, rules, meta, nodes] = await Promise.all([
     api('/api/alerts'),
     api('/api/rules').catch(() => []),
@@ -1094,10 +1106,8 @@ async function viewAssets() {
 
 /* ---------------- 设置 / 管理 ---------------- */
 
-// localStorage key 随项目改名从 probe-* 迁到 rollcall-*。
-// 读取时回退旧 key，避免升级后用户已保存的管理令牌凭空消失、需要重新粘贴。
-const LS_TOKEN = 'rollcall-admin-token';
-const LS_TOKEN_LEGACY = 'probe-admin-token';
+// 主题偏好仍保存在本机；管理会话由服务端 HttpOnly Cookie 承载，
+// 前端不再保存任何凭证。
 const LS_THEME = 'rollcall-theme';
 const LS_THEME_LEGACY = 'probe-theme';
 
@@ -1112,24 +1122,28 @@ function lsSet(key, legacy, v) {
   localStorage.setItem(key, v);
   localStorage.removeItem(legacy); // 迁移后清掉旧 key，避免两份不一致
 }
-function lsDel(key, legacy) {
-  localStorage.removeItem(key);
-  localStorage.removeItem(legacy);
-}
 
-const adminToken = () => lsGet(LS_TOKEN, LS_TOKEN_LEGACY);
-
+// 登录后所有管理请求都靠同源 Cookie；写操作额外带 X-Requested-With，
+// 与服务端的 CSRF 校验配套。
 async function adminApi(path, opts = {}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  const headers = { Accept: 'application/json', ...(opts.headers || {}) };
+  if (opts.body != null) headers['Content-Type'] = 'application/json';
+  if (method !== 'GET' && method !== 'HEAD') headers['X-Requested-With'] = 'XMLHttpRequest';
   const r = await fetch(path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken(), ...(opts.headers || {}) },
+    headers,
+    credentials: 'same-origin',
   });
   const txt = await r.text();
   let data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { raw: txt }; }
-  if (r.status === 401) state.authRequired = true;
-  else if (r.ok) state.authRequired = false;
-  if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
+  if (r.status === 401) authLost();
+  if (!r.ok) {
+    const err = new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
+    err.status = r.status;
+    throw err;
+  }
   return data;
 }
 
@@ -1184,13 +1198,11 @@ function formData(form) {
 }
 
 async function viewSettings() {
-  const tok = adminToken();
-
-  if (!tok) {
+  if (!state.authenticated) {
     // 与首屏登录共用同一个全屏登录层：验证通过后 render() 会回到当前路由
-    // （hash 仍是 #/settings），自然落回设置页，不再维护第二份令牌表单。
+    // （hash 仍是 #/settings），自然落回设置页。
     state.authRequired = true;
-    renderTokenGate();
+    showLoginGate();
     return;
   }
 
@@ -1213,6 +1225,7 @@ async function viewSettings() {
     defs = st.defs || [];
     state.panelLink = st.panelLink || '';
   } catch (e) {
+    if (e.status === 401) return;
     loadErr = e.message;
   }
 
@@ -1223,11 +1236,11 @@ async function viewSettings() {
         <div style="font-size:12px;color:var(--fg-2)">${esc(loadErr)}</div>
         <div class="form-actions" style="margin-top:14px">
           <button class="btn" id="retryBtn">重新加载</button>
-          <button class="btn danger" id="clearTok">清除令牌</button>
+          <button class="btn danger" id="logoutBtn">退出登录</button>
         </div>
       </div>`;
     $('#retryBtn').onclick = viewSettings;
-    $('#clearTok').onclick = () => { lsDel(LS_TOKEN, LS_TOKEN_LEGACY); viewSettings(); };
+    $('#logoutBtn').onclick = doLogout;
     return;
   }
 
@@ -1237,19 +1250,32 @@ async function viewSettings() {
     pending: ['warn', '待投递'], failed: ['crit', '失败'],
     suppressed: ['mute', '已拦截'], sent: ['ok', '已送达'],
   };
+  const account = state.user || {};
+  const accountName = account.username || 'admin';
+  const accountEmail = account.email || '未设置邮箱';
+  const accountInitial = accountName.slice(0, 1).toUpperCase();
 
   $('#view').innerHTML = `
     <section class="section">
       <div class="section-head">
-        <h2 class="section-title">管理令牌</h2>
-        <span class="section-meta">已配置 · ${chans.length ? '通知通道：' + chans.join(' / ') : '未启用通知'}</span>
+        <h2 class="section-title">管理员账号</h2>
+        <span class="section-meta">密码仅以 PBKDF2 哈希保存在服务端</span>
       </div>
-      <div class="panel panel-pad">
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <span class="badge ok">已认证</span>
-          <button class="btn" id="chgTok">更换令牌</button>
+      <div class="panel panel-pad account-panel">
+        <span class="account-avatar" aria-hidden="true">${esc(accountInitial)}</span>
+        <div class="account-info">
+          <div class="account-name">${esc(accountName)}</div>
+          <div class="field-hint">${esc(accountEmail)} · 会话有效期 7 天</div>
+        </div>
+        <div class="account-actions">
+          <a class="btn" href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
+          <button class="btn danger" id="logoutBtn" type="button">退出登录</button>
         </div>
       </div>
+      <p class="field-hint" style="margin:8px 0 0">
+        账号、邮箱与密码由服务端数据目录的 <code>admin-user.json</code> 管理；
+        忘记密码时可用 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
+      </p>
     </section>
 
     <section class="section">
@@ -1437,7 +1463,7 @@ async function viewSettings() {
     </section>`;
 
   // 事件绑定
-  $('#chgTok').onclick = () => { lsDel(LS_TOKEN, LS_TOKEN_LEGACY); viewSettings(); };
+  $('#logoutBtn').onclick = doLogout;
 
   /* ---- 外观主题 ---- */
   const themeForm = $('#themeForm');
@@ -1493,7 +1519,7 @@ async function viewSettings() {
     };
   });
 
-  // CSV 导出：带令牌下载为文件
+  // CSV 导出：同源会话 Cookie 鉴权，下载为文件
   $$('[data-exp]').forEach((b) => {
     b.onclick = async () => {
       let url = '/api/export/' + b.dataset.exp + '.csv';
@@ -1505,7 +1531,7 @@ async function viewSettings() {
       }
       b.disabled = true;
       try {
-        const r = await fetch(url, { headers: { 'X-Admin-Token': adminToken() } });
+        const r = await fetch(url, { credentials: 'same-origin', headers: { Accept: 'text/csv' } });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const blob = await r.blob();
         const cd = r.headers.get('Content-Disposition') || '';
@@ -2207,17 +2233,18 @@ function closeLoginLayer() {
   if (layer) { layer.hidden = true; layer.innerHTML = ''; }
 }
 
-// renderTokenGate 渲染全屏登录页。
-// 学习 kokoro（独立登录页 + 「在 VPS 上执行这条命令找回」的恢复提示）与
-// CF-Server-Monitor（全屏遮罩、密码显隐、行内错误、提交加载态）：
-//  - 提交时先用 GET /api/admin/settings 验证令牌，无效就不进入仪表盘
-//    （旧行为是先存再进，首页 401 后又弹回来，像"登录失败但不知道为什么"）；
-//  - 401 与网络错误分开提示；
-//  - 找回提示直接给可复制的一条命令。
-function renderTokenGate() {
+// showLoginGate 渲染全屏账号密码登录页。
+// 会话 Cookie 由服务端签发（HttpOnly），前端不保存任何凭证。
+function showLoginGate() {
   state.authRequired = true;
-  const had = !!adminToken();
   const layer = document.getElementById('loginLayer');
+  if (!layer) return;
+  if (!layer.hidden && layer.querySelector('#gateForm')) {
+    // 已经显示时只聚焦，避免抹掉用户正在输入的账号密码。
+    const cur = layer.querySelector('#gateIdentifier');
+    if (cur) cur.focus();
+    return;
+  }
   document.body.classList.add('auth-gate');
   layer.hidden = false;
   layer.innerHTML = `
@@ -2231,18 +2258,25 @@ function renderTokenGate() {
           <div class="login-brand-sub">Fleet Monitor</div>
         </div>
       </div>
-      <h1 class="login-title">登录控制台</h1>
-      <p class="login-sub">仪表盘包含主机名、内核、服务商与价格等资产信息，需要管理令牌解锁。</p>
-      ${had ? '<div class="login-warn">当前保存的令牌无效或已被轮换，请重新输入。</div>' : ''}
+      <h1 class="login-title">登录管理控制台</h1>
+      <p class="login-sub">使用管理员账号或邮箱登录，管理节点、告警与状态页。</p>
       <div class="login-error" id="loginError" role="alert"></div>
-      <form id="gateForm" autocomplete="off">
+      <form id="gateForm" autocomplete="on">
         <label class="login-field">
-          <span class="login-label">管理令牌</span>
+          <span class="login-label">用户名或邮箱</span>
           <span class="login-input-wrap">
-            <input class="login-input" id="gateToken" name="token" type="password"
-                   placeholder="粘贴 admin.token 内容" required spellcheck="false"
-                   autocomplete="off" aria-describedby="loginError">
-            <button type="button" class="login-eye" id="gateEye" title="显示 / 隐藏令牌" aria-label="显示或隐藏令牌">
+            <input class="login-input" id="gateIdentifier" name="identifier" type="text"
+                   placeholder="admin 或 name@example.com" required spellcheck="false"
+                   autocomplete="username" autocapitalize="none" aria-describedby="loginError">
+          </span>
+        </label>
+        <label class="login-field">
+          <span class="login-label">密码</span>
+          <span class="login-input-wrap">
+            <input class="login-input" id="gatePassword" name="password" type="password"
+                   placeholder="请输入密码" required autocomplete="current-password"
+                   aria-describedby="loginError">
+            <button type="button" class="login-eye" id="gateEye" title="显示 / 隐藏密码" aria-label="显示或隐藏密码">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/></svg>
             </button>
           </span>
@@ -2250,14 +2284,8 @@ function renderTokenGate() {
         <button class="login-btn" id="gateSubmit" type="submit">登 录</button>
       </form>
       <div class="login-hint">
-        令牌在服务端数据目录（默认 <code>/opt/rollcall/data/admin.token</code>），到 VPS 上执行：
-        <div class="login-cmd">
-          <span class="cmd">cat /opt/rollcall/data/admin.token</span>
-          <button type="button" class="login-copy" id="gateCopy" title="复制命令" aria-label="复制找回命令">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-          </button>
-        </div>
-        也可用 <code>#admin=&lt;令牌&gt;</code> 直接打开；令牌只保存在浏览器本地。
+        账号、邮箱与密码由服务端统一管理；忘记密码时可用
+        <code>-reset-admin-password</code> 启动一次来重置。
       </div>
       <div class="login-foot">
         <a href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
@@ -2265,23 +2293,16 @@ function renderTokenGate() {
       </div>
     </div>`;
 
-  const inp = layer.querySelector('#gateToken');
+  const userInp = layer.querySelector('#gateIdentifier');
+  const passInp = layer.querySelector('#gatePassword');
   const err = layer.querySelector('#loginError');
   const card = layer.querySelector('#loginCard');
   const btn = layer.querySelector('#gateSubmit');
-  inp.focus();
+  userInp.focus();
 
   layer.querySelector('#gateEye').onclick = () => {
-    inp.type = inp.type === 'password' ? 'text' : 'password';
-    inp.focus();
-  };
-  layer.querySelector('#gateCopy').onclick = async () => {
-    try {
-      await navigator.clipboard.writeText('cat /opt/rollcall/data/admin.token');
-      toast('命令已复制');
-    } catch (e) {
-      toast('复制失败，请手动选择文本', 'err');
-    }
+    passInp.type = passInp.type === 'password' ? 'text' : 'password';
+    passInp.focus();
   };
   layer.querySelector('#loginTheme').onclick = () => $('#themeBtn').click();
 
@@ -2296,26 +2317,53 @@ function renderTokenGate() {
 
   $('#gateForm').onsubmit = async (e) => {
     e.preventDefault();
-    const tok = String(formData(e.target).token || '').trim();
-    if (!tok) return;
+    const d = formData(e.target);
+    const identifier = String(d.identifier || '').trim();
+    const password = String(d.password || '');
+    if (!identifier || !password) {
+      showErr('请输入用户名/邮箱和密码。');
+      return;
+    }
     btn.disabled = true;
-    btn.innerHTML = '<span class="spin" aria-hidden="true"></span>正在验证…';
+    btn.innerHTML = '<span class="spin" aria-hidden="true"></span>正在登录…';
     err.classList.remove('show');
     try {
-      // 先验证再进入：错误的令牌不该被保存，也不该闪进一个全是 401 的仪表盘。
-      const r = await fetch('/api/admin/settings', { headers: { Accept: 'application/json', 'X-Admin-Token': tok } });
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({ identifier, password }),
+      });
+      let data = null;
+      try { data = await r.json(); } catch (ex) { /* 错误页可能不是 JSON */ }
       if (r.status === 401) {
-        showErr('令牌无效或已被轮换，请核对后重试。');
+        showErr('用户名或密码错误，请核对后重试。');
+        passInp.value = '';
+        passInp.focus();
+        return;
+      }
+      if (r.status === 429) {
+        showErr('尝试次数过多，请稍后再试。');
+        return;
+      }
+      if (r.status === 503) {
+        showErr('面板登录未启用，请联系服务端管理员。');
         return;
       }
       if (!r.ok) {
-        showErr('服务端返回 HTTP ' + r.status + '，请稍后再试。');
+        showErr((data && data.error) || ('服务端返回 HTTP ' + r.status + '，请稍后再试。'));
         return;
       }
-      lsSet(LS_TOKEN, LS_TOKEN_LEGACY, tok);
+      state.authenticated = true;
       state.authRequired = false;
+      state.user = (data && data.user) || { username: identifier, email: '' };
       state.data = {};
       closeLoginLayer();
+      updateUserMenu();
       toast('已登录');
       render();
     } catch (ex) {
@@ -2326,16 +2374,33 @@ function renderTokenGate() {
     }
   };
 
-  $('#liveText').textContent = '需要令牌';
+  $('#liveText').textContent = '实时';
+}
+
+async function doLogout() {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    });
+  } catch (e) { /* 网络失败也要在本地退出 */ }
+  state.authenticated = false;
+  state.authRequired = true;
+  state.user = null;
+  state.data = {};
+  updateUserMenu();
+  closeUserPop();
+  toast('已退出登录');
+  render();
 }
 
 async function render() {
   if (state.authRequired) {
-    renderTokenGate();
+    showLoginGate();
     return;
   }
-  // 任何一次成功渲染都意味着鉴权已通过：确保登录层退场
-  // （令牌可能在设置页被更换/清除，或通过 #admin= 引导进入）。
+  // 任何一次成功渲染都意味着鉴权已通过：确保登录层退场。
   closeLoginLayer();
   const hash = location.hash.replace(/^#\/?/, '') || 'overview';
   const [route, param] = hash.split('/');
@@ -2363,7 +2428,7 @@ async function render() {
     $('#liveText').textContent = '实时';
   } catch (e) {
     if (e && e.status === 401) {
-      renderTokenGate();
+      showLoginGate();
       return;
     }
     $('#view').innerHTML = `<div class="panel panel-pad" style="text-align:center;padding:48px 20px">
@@ -2442,19 +2507,48 @@ function applyTheme(t, persist = true) {
 
 /* ---------------- 启动 ---------------- */
 
-function boot() {
-  const params = new URLSearchParams(location.search);
+function updateUserMenu() {
+  const u = state.user || {};
+  const name = u.username || 'admin';
+  const initial = (name.trim()[0] || 'A').toUpperCase();
+  const avatar = $('#userAvatar');
+  if (avatar) avatar.textContent = initial;
+  const label = $('#userName');
+  if (label) label.textContent = name;
+  const popName = $('#userPopName');
+  if (popName) popName.textContent = name;
+  const popEmail = $('#userPopEmail');
+  if (popEmail) popEmail.textContent = u.email || '未设置邮箱';
+}
 
-  // 首次访问引导：只接受 URL 片段 #admin=<令牌>。
-  // 片段不会发送给服务器，因此不会落入反向代理/网关的访问日志。
-  const hashParams = new URLSearchParams(location.hash.slice(1));
-  const bootTok = hashParams.get('admin');
-  if (bootTok) {
-    lsSet(LS_TOKEN, LS_TOKEN_LEGACY, bootTok);
-    hashParams.delete('admin');
-    const h = hashParams.toString();
-    history.replaceState(null, '', location.pathname + location.search + (h ? '#' + h : ''));
+function closeUserPop() {
+  const pop = $('#userPop');
+  if (pop) pop.classList.remove('open');
+  const btn = $('#userBtn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+// 首屏先查会话：未登录直接显示登录页，避免先渲染一屏 401 骨架。
+async function initSession() {
+  try {
+    const r = await fetch('/api/auth/session', {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    state.authenticated = !!d.authenticated;
+    state.user = d.user || null;
+  } catch (e) {
+    state.authenticated = false;
+    state.user = null;
   }
+  state.authRequired = !state.authenticated;
+  updateUserMenu();
+}
+
+async function boot() {
+  const params = new URLSearchParams(location.search);
 
   const qTheme = params.get('theme');
   const lsTheme = lsGet(LS_THEME, LS_THEME_LEGACY);
@@ -2476,6 +2570,23 @@ function boot() {
 
   $('#refreshBtn').onclick = () => { state.data = {}; render(); };
 
+  const userBtn = $('#userBtn');
+  if (userBtn) {
+    userBtn.onclick = (e) => {
+      e.stopPropagation();
+      const pop = $('#userPop');
+      const open = !pop.classList.contains('open');
+      pop.classList.toggle('open', open);
+      userBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    document.addEventListener('click', (e) => {
+      const menu = $('#userMenu');
+      if (menu && !menu.contains(e.target)) closeUserPop();
+    });
+  }
+  const topLogout = $('#userLogoutBtn');
+  if (topLogout) topLogout.onclick = doLogout;
+
   let st;
   $('#searchInput').addEventListener('input', (e) => {
     state.search = e.target.value.trim().toLowerCase();
@@ -2495,10 +2606,13 @@ function boot() {
   });
 
   window.addEventListener('hashchange', render);
+
+  await initSession();
+  document.body.classList.remove('auth-checking');
   render();
 
   // 每 20 秒静默刷新当前视图（节点详情页刷新频率更高以体现实时）
-  // 未认证时停止轮询，避免把一次令牌缺失放大成持续的 401 触发限速。
+  // 未登录时停止轮询，避免把无效会话放大成持续的 401。
   setInterval(() => {
     if (document.hidden || state.authRequired) return;
     if (state.route === 'nodes' && state.param) render();
@@ -2514,7 +2628,7 @@ boot();
 // showAgentWizard 一站式接入向导：填台账 → 创建节点 → 直接给出安装命令。
 // 以前要「设置页建节点 → 复制 JSON → 手拼 systemd」，现在三步并一步。
 function showAgentWizard() {
-  if (!adminToken()) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+  if (!state.authenticated) { showLoginGate(); return; }
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
   dlg.innerHTML = `<div class="modal" style="max-width:560px">

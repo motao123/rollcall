@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/alert"
+	"github.com/motao/rollcall/internal/auth"
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/outbox"
@@ -41,6 +42,8 @@ type Server struct {
 	adminToken string
 	authUser   string
 	authPass   string
+	user       *auth.User
+	sessions   *auth.Sessions
 	panelLink  string
 	cnyRate    float64
 	limiter    *authFailureLimiter
@@ -69,6 +72,8 @@ type Config struct {
 	AdminToken string // 管理 API 令牌（为空则不开放管理 API）
 	AuthUser   string // Basic Auth 用户名（为空则不启用）
 	AuthPass   string
+	User       *auth.User      // 面板管理员账号；nil 时仅管理令牌可用
+	Sessions   *auth.Sessions  // 面板会话签名器
 	PanelLink  string          // 面板对外地址，拼进通知正文
 	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
 	Outbox     *outbox.Manager // 通知投递队列；nil 时不外发通知
@@ -89,6 +94,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 	}
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
+		user: cfg.User, sessions: cfg.Sessions,
 		panelLink: cfg.PanelLink, cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
@@ -133,10 +139,10 @@ type authLevel int
 const (
 	authUnclassified authLevel = iota // 零值：故意非法，用于启动校验
 	authPublic                        // 完全公开（健康检查、公开状态页）
+	authLogin                         // 登录/会话端点本身；失败限速独立分桶
 	authNodeToken                     // handler 内校验 X-Node-Token（Agent 上报）
-	authPanel                         // 启用 -auth 时要求面板 Basic 凭据
-	authReadonly                      // 管理令牌，或已登录面板用户（只读仪表盘）
-	authAdmin                         // 仅 X-Admin-Token（管理写操作、CSV 导出）
+	authReadonly                      // 管理令牌、Basic 或面板会话（只读仪表盘）
+	authAdmin                         // 管理令牌，或面板会话 + 同源头（写操作、导出）
 	authMetrics                       // 管理令牌或面板凭据（Prometheus 抓取）
 )
 
@@ -146,10 +152,10 @@ func (l authLevel) String() string {
 	switch l {
 	case authPublic:
 		return "public"
+	case authLogin:
+		return "login"
 	case authNodeToken:
 		return "node-token"
-	case authPanel:
-		return "panel"
 	case authReadonly:
 		return "readonly"
 	case authAdmin:
@@ -167,8 +173,6 @@ func (l authLevel) protected(authConfigured bool) bool {
 	switch l {
 	case authReadonly, authAdmin, authMetrics:
 		return true
-	case authPanel:
-		return authConfigured
 	default:
 		return false
 	}
@@ -205,6 +209,11 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},
 		{"/api/theme", authPublic, http.HandlerFunc(s.handleTheme)},
 
+		// 面板登录：登录失败按独立 scope 限速，不会拖累公开页。
+		{"/api/auth/login", authLogin, http.HandlerFunc(s.handleAuthLogin)},
+		{"/api/auth/session", authLogin, http.HandlerFunc(s.handleAuthSession)},
+		{"/api/auth/logout", authLogin, http.HandlerFunc(s.handleAuthLogout)},
+
 		// Agent 上报：handler 内校验 X-Node-Token
 		{"/api/report", authNodeToken, http.HandlerFunc(s.handleReport)},
 
@@ -218,7 +227,7 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/rules", authReadonly, http.HandlerFunc(s.handleRules)},
 		{"/api/assets", authReadonly, http.HandlerFunc(s.handleAssets)},
 
-		// 管理写操作与运营数据导出：仅 X-Admin-Token
+		// 管理写操作与运营数据导出：管理令牌或面板会话
 		{"/api/admin/nodes", authAdmin, http.HandlerFunc(s.handleAdminNodes)},
 		{"/api/admin/nodes/batch", authAdmin, http.HandlerFunc(s.handleAdminNodesBatch)},
 		{"/api/admin/nodes/", authAdmin, http.HandlerFunc(s.handleAdminNodeByID)},
@@ -244,8 +253,9 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/export/", authAdmin, http.HandlerFunc(s.handleExport)},
 		{"/metrics", authMetrics, http.HandlerFunc(s.handleMetrics)},
 
-		// 面板静态资源
-		{"/", authPanel, static},
+		// 面板静态资源必须公开：登录页本身也要能加载。
+		// 数据接口由会话/令牌保护，静态资源不含敏感信息。
+		{"/", authPublic, static},
 	}
 }
 
@@ -320,14 +330,12 @@ func (s *Server) Handler() http.Handler {
 // guard 按路由表声明的级别包装 handler。
 func (s *Server) guard(level authLevel, h http.Handler) http.Handler {
 	switch level {
-	case authPublic, authNodeToken:
+	case authPublic, authLogin, authNodeToken:
 		return h
-	case authPanel:
-		return s.requirePanel(h)
 	case authReadonly:
 		return s.requireReadonly(h)
 	case authAdmin:
-		return s.requireAdminToken(h)
+		return s.requireAdmin(h)
 	case authMetrics:
 		return s.requireMetrics(h)
 	default:
@@ -336,28 +344,12 @@ func (s *Server) guard(level authLevel, h http.Handler) http.Handler {
 	}
 }
 
-// requirePanel 对面板静态资源启用 Basic Auth；未配置 -auth 时直接放行。
-func (s *Server) requirePanel(h http.Handler) http.Handler {
-	if s.authUser == "" {
-		return h
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.panelBasicOK(r) {
-			h.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Set("WWW-Authenticate", `Basic realm="Rollcall", charset="UTF-8"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	})
-}
-
 // requireReadonly 保护仪表盘只读接口。
 //
-// 管理令牌优先；启用 -auth 时也接受面板 Basic 凭据，避免已登录用户
-// 为了查看只读页面还要再粘贴一次令牌。写操作仍只认 X-Admin-Token。
+// 管理令牌用于自动化；面板会话用于浏览器；-auth 的 Basic 凭据保留兼容。
 func (s *Server) requireReadonly(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.adminTokenOK(r) || s.panelBasicOK(r) {
+		if s.adminTokenOK(r) || s.panelBasicOK(r) || s.sessionOK(r) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -365,15 +357,36 @@ func (s *Server) requireReadonly(h http.Handler) http.Handler {
 	})
 }
 
-// requireAdminToken 保护管理写操作与导出，只认 X-Admin-Token。
-func (s *Server) requireAdminToken(h http.Handler) http.Handler {
+// requireAdmin 保护管理写操作与导出。
+//
+// 管理令牌请求带自定义头，天然不受 CSRF 影响；会话请求必须额外带
+// X-Requested-With，配合 SameSite=Strict Cookie 阻断跨站表单提交。
+func (s *Server) requireAdmin(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.adminOK(r) {
 			h.ServeHTTP(w, r)
 			return
 		}
+		if s.sessionOK(r) {
+			if sessionMutationAllowed(r) {
+				h.ServeHTTP(w, r)
+				return
+			}
+			fail(w, http.StatusForbidden, "missing X-Requested-With")
+			return
+		}
 		fail(w, http.StatusUnauthorized, "invalid admin token")
 	})
+}
+
+// sessionMutationAllowed 要求会话写操作携带自定义头。
+// 跨站表单无法设置该头；跨站 fetch 会先触发 CORS 预检，而服务端不返回 CORS 头。
+func sessionMutationAllowed(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Requested-With")), "XMLHttpRequest")
 }
 
 // requireMetrics 保护 Prometheus 端点，401 时返回 Basic 挑战方便抓取端配置。

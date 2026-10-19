@@ -9,10 +9,13 @@ User=rollcall
 Group=rollcall
 WorkingDirectory=/opt/rollcall
 # 默认只监听回环：对外访问请经反向代理。
-# 若要直接改绑 0.0.0.0，必须同时启用 -auth 与内置 TLS（-tls-cert/-tls-key），
-# 否则服务会拒绝启动；未启用 Basic Auth 直接对外监听需显式加 -allow-public
-# （仪表盘数据仍要求管理令牌，对外公开的只有 /status），
-# 明文 HTTP 暴露需显式加 -allow-insecure。
+# 面板使用 data/admin-user.json 中的管理员账号登录（用户名/邮箱 + 密码，PBKDF2 哈希），
+# 无需 Basic Auth。若要直接改绑 0.0.0.0，必须启用内置 TLS（-tls-cert/-tls-key），
+# 否则服务会拒绝启动；明文 HTTP 暴露需显式加 -allow-insecure。
+# 首次启动可用环境变量 ROLLCALL_ADMIN_PASSWORD 指定初始密码（至少 12 位），
+# 或留空由服务端生成随机密码并打印到日志（仅一次）；
+# 建议通过 drop-in 的 EnvironmentFile=-/etc/rollcall/server.env（0600）注入；
+# 文件缺失时带 "-" 前缀仍可正常启动（账号创建后即可删除该文件）。
 # 探测与通知默认拒绝私网地址；只有确实需要探测本机服务（如 127.0.0.1:22）
 # 或向内网 webhook 推送时，才用 systemd drop-in 追加对应开关，例如：
 #   /etc/systemd/system/rollcall-server.service.d/private-targets.conf

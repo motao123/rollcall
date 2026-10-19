@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.7.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.8.0**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -14,7 +14,7 @@
                                                     │
                                             ┌────────────────┐
                                             │ Web UI（原生） │
-                                            │    5 个视图    │
+                                            │    7 个视图    │
                                             └────────────────┘
 ```
 
@@ -205,10 +205,12 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 需显式开启（「状态页 → 展示配置」）：地域、服务商、CPU/内存等明细、进程数、TCP 连接数、
 Swap、主机名、系统、内核、架构、CPU 型号、核心数、虚拟化。
 
-**与 Basic Auth 的关系**：启用 `-auth` 后，`/` 管理界面与仪表盘只读数据需要 Basic 登录；
-未启用时，仪表盘只读接口仍需管理令牌（浏览器首次打开会显示令牌输入页）。
+**与面板登录的关系**：`/` 管理后台采用**账号 + 密码**登录（支持用户名或邮箱），
+密码仅以 PBKDF2-HMAC-SHA256 哈希保存在服务端 `data/admin-user.json`（0600），
+登录态是 HMAC 签名的 HttpOnly 会话 Cookie（默认 7 天，`SameSite=Strict`）。
 `/status` 与 `/api/status` **始终可匿名访问**（这是公开页的设计意图）。
-管理写接口与 CSV 导出只认 `X-Admin-Token`，Agent 上报只认节点令牌。
+管理写接口与 CSV 导出接受会话 Cookie（写操作需带 `X-Requested-With`）或 `X-Admin-Token`；
+Agent 上报只认节点令牌。
 
 ---
 
@@ -270,7 +272,7 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 
 ```
 ┌──────────┬────────────────────────────────────────┐
-│          │  顶栏：标题 / 搜索 / 实时指示 / 刷新      │
+│          │  顶栏：标题 / 搜索 / 实时 / 刷新 / 账号菜单 │
 │  侧边栏   ├────────────────────────────────────────┤
 │  导航     │  KPI 行（6 项关键指标）                 │
 │  主题     │  正在告警（仅异常时出现）                │
@@ -279,7 +281,8 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 └──────────┴────────────────────────────────────────┘
 ```
 
-五个视图：**概览 / 节点 / 服务 / 告警 / 台账**，左侧导航切换，节点详情走 `#/nodes/{id}`。
+七个视图：**概览 / 节点 / 服务 / 告警 / 台账 / 状态页 / 设置**，左侧导航切换，节点详情走 `#/nodes/{id}`。
+未登录时整页切换为账号密码登录表单；登录后顶栏右上角提供账号菜单与退出登录。
 
 ### 视觉风格
 
@@ -336,7 +339,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.7.0`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.8.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -377,14 +380,40 @@ webhook 推送时，用 systemd drop-in 追加 `-allow-private-probes` / `-allow
 
 ### 4. 首次登录
 
+首次启动时会在 `data/admin-user.json` 创建唯一管理员账号。两种初始化方式任选：
+
 ```bash
-sudo cat /opt/rollcall/data/admin.token
+# 方式 A（推荐）：首次启动前通过环境变量指定用户名、邮箱和初始密码
+sudo install -d -m 0750 /etc/rollcall
+sudo sh -c 'umask 077; cat > /etc/rollcall/server.env' <<'EOF'
+ROLLCALL_ADMIN_USER=admin
+ROLLCALL_ADMIN_EMAIL=you@example.com
+ROLLCALL_ADMIN_PASSWORD=<至少 12 位的强密码>
+EOF
+sudo systemctl edit rollcall-server
+# 在打开的编辑器中写入：
+# [Service]
+# EnvironmentFile=-/etc/rollcall/server.env
+sudo systemctl restart rollcall-server
+
+# 方式 B：不提供密码，服务端随机生成 24 位初始密码并只打印一次
+sudo journalctl -u rollcall-server -n 50 | grep '初始管理员密码'
 ```
 
-打开 `http://127.0.0.1:19080`，两种方式任选：
+打开 `http://127.0.0.1:19080`（或反代域名），输入用户名/邮箱与密码登录。
+登录后可在「设置 → 管理员账号」查看当前账号并退出登录。
 
-- 访问 `http://127.0.0.1:19080/#admin=<令牌>`（令牌在 URL 片段中，不会发送给服务器）；
-- 或在「设置」页粘贴令牌并保存。
+> 环境变量只用于**首次创建**账号。建议登录后立即按下方重置流程换成自己的强密码，
+> 然后删除 `/etc/rollcall/server.env` 中的密码行（单元使用 `EnvironmentFile=-`，
+> 文件缺失不影响启动），避免明文密码长期留在磁盘。
+
+> 密码只在创建或显式重置时写入。正常重启不会用环境变量覆盖已保存的密码。
+> 忘记密码时执行一次（该命令只改密码后退出，不会启动第二个服务）：
+> ```bash
+> sudo -u rollcall env ROLLCALL_ADMIN_PASSWORD='<新密码>' \
+>   /opt/rollcall/rollcall-server -data /opt/rollcall/data -reset-admin-password
+> sudo systemctl restart rollcall-server
+> ```
 
 对外访问请用 SSH 隧道或反向代理，不要直接把 19080 暴露到公网。
 
@@ -504,14 +533,14 @@ curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板
 
 > **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
 >
-> **安全默认**：监听非回环地址时，未启用 Basic Auth 或未配置 TLS 会**直接拒绝启动**。
+> **安全默认**：监听非回环地址时，明文 HTTP 会**直接拒绝启动**（必须配置 TLS 或显式加 `-allow-insecure`）。
+> 面板始终要求账号密码登录，因此不再需要为启动额外配置 Basic Auth。
 > 三种对外方式：
 > 1. 反向代理到 `127.0.0.1:19080`（推荐，由反代终止 TLS）；
-> 2. 内置 TLS：`-addr 0.0.0.0:19080 -tls-cert fullchain.pem -tls-key privkey.pem -auth user:<强密码>`；
+> 2. 内置 TLS：`-addr 0.0.0.0:19080 -tls-cert fullchain.pem -tls-key privkey.pem`；
 > 3. 仅限可信内网：显式加 `-allow-insecure` 接受明文 HTTP（不推荐）。
 >
-> 未启用 Basic Auth 却要直接对外监听，必须显式加 `-allow-public`
-> （仪表盘只读数据仍需管理令牌，只有 `/status` 公开）；只加 `-addr 0.0.0.0` 已不会再"静默暴露"。
+> `-allow-public` 仅为兼容旧部署保留，已不再影响启动。
 
 完整参数：
 
@@ -521,8 +550,8 @@ curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板
 | `-demo` | false | 载入 15 台演示数据，使用临时数据目录，不发起真实探测 |
 | `-panel-link` | 空 | 面板对外地址（用于告警链接和 Agent 接入指引） |
 | `-tls-cert` / `-tls-key` | 空 | 同时提供则启用 HTTPS |
-| `-auth` | 空 | `user:password`，启用 Basic Auth（密码不可为空） |
-| `-allow-public` | false | 允许无 Basic Auth 时监听非回环（仪表盘数据仍需管理令牌，`/status` 公开） |
+| `-auth` | 空 | 兼容用 `user:password` Basic Auth（面板 UI 不使用；保留给旧集成） |
+| `-allow-public` | false | 已废弃，仅为兼容旧启动参数保留 |
 | `-allow-insecure` | false | 允许非回环地址使用明文 HTTP |
 | `-allow-private-probes` | false | 允许 HTTP/TCP 探测内网与回环目标 |
 | `-allow-private-notify` | false | 允许通知通道访问内网/回环目标（自建 Gotify/Bark/Webhook） |
@@ -536,8 +565,12 @@ curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板
 | `-history-5m-retention` | `720h` | 5 分钟聚合保留期（≥5m、为 300s 整数倍） |
 | `-history-1h-retention` | `8760h` | 1 小时聚合保留期（≥1h、为 3600s 整数倍） |
 | `-cny-rate` | `7.2` | CNY 折算 USD 的汇率（仅用于成本聚合展示） |
-| `-admin-token` | 自动生成 | 管理令牌，显式指定时至少 16 字符 |
-| `-data` | `./data` | 数据目录（state.json / history.json / admin.token，均为 0600） |
+| `-admin-user` | `admin` / `ROLLCALL_ADMIN_USER` | 面板管理员用户名（2–32 位字母/数字/点/下划线/连字符） |
+| `-admin-email` | 空 / `ROLLCALL_ADMIN_EMAIL` | 可选邮箱，设置后可用邮箱登录 |
+| `-admin-password` | 空 / `ROLLCALL_ADMIN_PASSWORD` | 初始密码（至少 12 位）；仅在首次创建或重置时生效，留空则随机生成并打印一次 |
+| `-reset-admin-password` | false | 用上面的密码重置管理员密码后退出；重启服务后旧会话失效 |
+| `-admin-token` | 自动生成 | 管理 API 令牌（供自动化/监控使用），显式指定时至少 16 字符 |
+| `-data` | `./data` | 数据目录（state.json / history.json / admin.token / admin-user.json / session.key） |
 | `-version` | false | 打印版本号后退出 |
 
 ### 管理 API
@@ -581,13 +614,22 @@ curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板
 | GET | `/status.js` | 公开状态页脚本 |
 | GET | `/healthz` | 健康检查 |
 
-管理接口与 CSV 导出要求请求头 `X-Admin-Token`（写操作不接受 Basic 密码）。
-令牌首次启动时自动生成到 `data/admin.token`（0600），也可用 `-admin-token` 显式指定。
+管理接口与 CSV 导出接受两种凭据：浏览器会话 Cookie（写操作需带
+`X-Requested-With: XMLHttpRequest`）或请求头 `X-Admin-Token`（供自动化使用）。
+管理令牌首次启动时自动生成到 `data/admin.token`（0600），也可用 `-admin-token` 显式指定。
 `/api/` 下的 JSON 与 CSV 响应在客户端支持时自动 gzip 压缩：365 天曲线从约 2.5MB 降到约 300KB，慢速链路下也能正常打开。
 
-所有路由的鉴权级别集中声明在服务端路由表中（`public` / `node-token` / `panel` /
+所有路由的鉴权级别集中声明在服务端路由表中（`public` / `login` / `node-token` /
 `readonly` / `admin` / `metrics`）；新增路由若漏填级别，服务端会在启动时直接失败，
-不再依赖易漏改的路径白名单。`/status.js` 单独登记为公开，因此启用 `-auth` 后公开状态页仍可正常加载。
+不再依赖易漏改的路径白名单。`/status.js` 单独登记为公开，因此公开状态页始终可正常加载。
+
+账号登录端点：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/auth/login` | `{"identifier":"用户名或邮箱","password":"..."}`；成功写入 HttpOnly 会话 Cookie |
+| GET | `/api/auth/session` | 返回 `{authenticated,user?,expiresAt?}`；未登录也是 200 |
+| POST | `/api/auth/logout` | 清除会话 Cookie（幂等） |
 
 仪表盘只读接口（包含主机名、内核、服务商、价格、到期日等资产信息，不再匿名开放）：
 
@@ -602,8 +644,8 @@ curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板
 | GET | `/api/rules` | 告警规则 |
 | GET | `/api/assets` | 资产台账视图 |
 
-鉴权：`X-Admin-Token`；启用 `-auth` 时也接受面板 Basic 凭据（已登录用户无需重复粘贴令牌）。
-未通过鉴权时，前端会显示令牌输入页，停止自动刷新，避免持续 401 触发限速。
+鉴权：登录后的会话 Cookie；自动化可继续使用 `X-Admin-Token`；启用 `-auth` 时也接受面板 Basic 凭据。
+会话失效时前端会显示账号密码登录页，并停止自动刷新，避免持续 401 触发限速。
 
 ### 对外暴露与面板集成
 
@@ -622,23 +664,22 @@ ssh -N -L 19080:127.0.0.1:19080 root@<控制端 IP>
 
 *1Panel*：网站 → 创建网站 → 反向代理类型 → 代理地址填 `http://127.0.0.1:19080`。
 
-**C. 内置 TLS + Basic Auth（无需面板）**
+**C. 内置 TLS（无需反代）**
 
 ```bash
 # 在 rollcall-server.service 的 ExecStart 追加：
--auth admin:<强密码> -addr 0.0.0.0:19080 \
+-addr 0.0.0.0:19080 \
   -tls-cert /etc/rollcall/fullchain.pem -tls-key /etc/rollcall/privkey.pem
 ```
 
-> 非回环绑定要求同时具备 `-auth` 与 TLS（任一缺失都会拒绝启动）。
-> 若确实要用明文 HTTP 暴露到可信内网，必须显式加 `-allow-insecure`；
-> 未启用 Basic Auth 却要直接对外监听，必须显式加 `-allow-public`
-> （仪表盘数据仍需管理令牌，只有 `/status` 公开）。
+> 非回环绑定必须配置 TLS；明文 HTTP 会被拒绝启动。
+> 若确实要用明文 HTTP 暴露到可信内网，必须显式加 `-allow-insecure`。
+> 面板始终要求账号密码登录，`-allow-public` 已不再影响启动。
 
-管理令牌与 Basic Auth 失败会按来源 IP 限速（5 分钟内 10 次失败封禁 10 分钟），
-并记录 `ip/method/path` 审计日志；`X-Admin-Token` 仅通过请求头传递，
-首次引导的令牌改走 URL 片段（`#admin=…`，不会发送给服务器或进入访问日志），
-`?admin=` 查询串已不再支持。
+登录失败、管理令牌失败与 Basic Auth 失败会按来源 IP 分别限速（5 分钟内 10 次失败封禁 10 分钟），
+并记录 `ip/method/path` 审计日志。会话 Cookie 带 `HttpOnly`、`SameSite=Strict`，
+TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密钥持久化在
+`data/session.key`（0600），重启不会让已登录用户掉线。
 
 针对面板环境的设计取舍：不依赖 Docker（避免与面板容器管理冲突）、文件不侵入 `/www/server` 或 `/opt/1panel`、端口避开 888/7870/8888、仅绑 localhost 天然适配反代。
 
@@ -659,6 +700,7 @@ rollcall/
 │   ├── netguard/            出站地址策略（SSRF 防护，探测/通知共用）
 │   ├── probe/               HTTP/TCP 探测
 │   ├── alert/               告警引擎
+│   ├── auth/                管理员账号（PBKDF2 哈希）与会话签名
 │   ├── notify/              通知通道 + 本地插件加载/执行
 │   ├── outbox/              持久化通知队列
 │   ├── selfupdate/          Ed25519 清单校验、下载、原子替换与回滚
@@ -666,6 +708,7 @@ rollcall/
 │   ├── version/             构建版本号（ldflags 注入）
 │   └── web/
 │       ├── web.go           API + 内嵌静态资源
+│       ├── auth.go          登录 / 会话 / 退出端点
 │       └── dist/            index.html / app.js / style.css
 ├── deploy/                  systemd 单元与配置样例
 ├── docs/operations.md       备份、升级、插件、自更新与故障排查
@@ -689,9 +732,10 @@ rollcall/
 | 请求体攻击 | `MaxBytesReader` 限制 64KB；`DisallowUnknownFields` |
 | XSS / 点击劫持 | 前端全量 `esc()` 转义；CSP `default-src 'self'` + `frame-ancestors 'none'`；`X-Frame-Options: DENY` |
 | 响应头 | `X-Content-Type-Options`、`Referrer-Policy`、HSTS（反代终止 TLS 时同样生效） |
-| 凭证外泄 | `Node.Token` 标记 `json:"-"`；管理令牌只走请求头；首次引导令牌走 URL 片段 |
-| 误暴露到公网 | 默认只绑回环；非回环必须显式满足 `-auth`/TLS/`-allow-*`，否则拒绝启动 |
-| 暴力破解 | 按 IP 统计 401，5 分钟内 10 次失败封禁 10 分钟；失败请求写审计日志 |
+| 凭证外泄 | `Node.Token` 标记 `json:"-"`；管理令牌只走请求头；会话凭证放 HttpOnly Cookie；密码只存 PBKDF2 哈希 |
+| 误暴露到公网 | 默认只绑回环；非回环必须配置 TLS 或显式确认明文风险，否则拒绝启动 |
+| 暴力破解 | 登录失败按 IP 独立分桶（5 分钟内 10 次失败封禁 10 分钟）；失败请求写审计日志 |
+| CSRF | 会话 Cookie `SameSite=Strict`；会话写操作额外要求 `X-Requested-With` 自定义头 |
 | SSRF（探测） | 拨号时校验解析后的 IP；默认拒绝回环/私网/链路本地/metadata/CGNAT；跳转逐跳复检 |
 | SSRF（通知） | 不跟随重定向；始终拒绝 metadata/链路本地；自托管允许私网；不回显远端响应体 |
 | 探测 TLS 降级 | 默认严格校验证书；跳过校验必须显式 `-insecure-probe-tls` |
@@ -712,7 +756,7 @@ rollcall/
 1. **未实现** ICMP 探测（需 raw socket 权限；HTTP/TCP 已覆盖绝大多数场景）
 2. 长历史依赖本地分层聚合（默认 1h 层 365 天）；更长期归档或多实例仍需外接 TSDB
 3. 单实例单进程，无水平扩展设计（40 台规模绰绰有余）
-4. 无多用户与权限体系（管理令牌为单一凭据，适合个人/小团队）
+4. 无多用户与权限体系（单一管理员账号，适合个人/小团队）
 5. Agent 自更新仅支持 Linux，且要求对二进制目录有写权限；服务端升级仍由运维执行
 6. 主题只有固定字段，通知插件是本机受信任扩展而非沙箱；两者都需要管理权限才能配置
 
@@ -734,7 +778,7 @@ rollcall/
 
 **P5 明细**：
 
-*CSV 导出*（需管理令牌，设置页有按钮，也可直接调 API）
+*CSV 导出*（需登录会话或管理令牌，设置页有按钮，也可直接调 API）
 
 | 端点 | 内容 |
 |---|---|
@@ -747,7 +791,8 @@ CSV 带 UTF-8 BOM，Excel 打开中文不乱码；文件名含时间戳。
 *Prometheus 端点* `GET /metrics`
 
 鉴权：`X-Admin-Token` 头，或 Basic Auth（用户名任意、**密码为管理令牌**）；
-启用 `-auth` 时也接受面板 Basic 凭据。`/metrics` 独立校验，不受 Basic 前置拦截影响。
+启用 `-auth` 时也接受面板 Basic 凭据。`/metrics` 不接受浏览器会话 Cookie
+（Prometheus 无法携带），抓取请使用管理令牌。`/metrics` 独立校验，不受 Basic 前置拦截影响。
 抓取配置：
 
 ```yaml
@@ -780,11 +825,14 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.7.0）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.8.0）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.7.0、active + enabled |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.8.0、active + enabled |
+| 面板登录 | 用户名与邮箱（大小写不敏感）均可登录；错误密码 401；会话跨刷新与服务重启保持；退出后 Cookie 立即失效 |
+| 鉴权边界 | 未登录读写接口 401；会话写请求缺 `X-Requested-With` 返回 403；管理令牌 API 与 `/metrics` 仍可用 |
+| 凭据存储 | `admin-user.json` 仅存 PBKDF2-SHA256 哈希（600,000 次迭代），无明文密码；`session.key` 0600 |
 | 上报频率 | 30 秒一报，在线/数据延迟/离线状态判定正确 |
 | 指标正确性 | CPU/内存/磁盘与 `df`/`free` 交叉核对无偏差 |
 | 数据持久化 | state.json 与 gzip history.json 重启后保留，历史快照升级 schema 2 |
@@ -793,6 +841,7 @@ certificate_days_remaining,uptime_percent_24h}`
 | 主题 | 公开读取默认主题，管理端校验、保存与重启后持久化均正常 |
 | Agent 自更新 | 独立实例验证签名安装、启动计数、自动/手动回滚与 7 天冷却 |
 | 安全约束 | Agent 依赖表无 `os/exec`、监听端口数 = 0；服务端 `net.Listen` 符号 > 0 |
+| 响应式界面 | 1440px 桌面端（侧栏 + 顶栏）与 390px 移动端（底部导航）登录、概览、设置页实测通过 |
 | 内存占用 | server 14.3 MB / agent 7.9 MB |
 
 完整操作步骤与升级/回滚方法见 `docs/operations.md`；初次部署的完整测试记录见

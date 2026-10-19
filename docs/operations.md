@@ -1,6 +1,6 @@
 # 运维手册
 
-面向已按 README 完成部署的 Rollcall 实例（v1.7+）。覆盖日常备份、升级回滚、签名自更新、令牌轮换、插件与故障排查。
+面向已按 README 完成部署的 Rollcall 实例（v1.8+）。覆盖日常备份、升级回滚、签名自更新、账号/令牌管理、插件与故障排查。
 
 ---
 
@@ -9,7 +9,7 @@
 | 项目 | 默认位置 | 说明 |
 |---|---|---|
 | 服务端二进制 | `/opt/rollcall/rollcall-server` | systemd 单元 `rollcall-server.service` |
-| 服务端数据 | `/opt/rollcall/data` | `state.json`（主快照）、`history.json`（分层历史）、`admin.token`，权限 0600 |
+| 服务端数据 | `/opt/rollcall/data` | `state.json`（主快照）、`history.json`（分层历史）、`admin.token`（自动化令牌）、`admin-user.json`（面板账号 PBKDF2 哈希）、`session.key`（会话签名密钥），权限 0600 |
 | 服务端单元 | `/etc/systemd/system/rollcall-server.service` | 以 `rollcall` 用户运行 |
 | Agent 二进制 | `/usr/local/bin/rollcall-agent` | systemd 单元 `rollcall-agent.service` |
 | Agent 配置 | `/etc/rollcall/agent.json` | `root:rollcall-agent 0640` |
@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.7.0
+make linux VERSION=v1.8.0
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -100,9 +100,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.7.0
-./rollsign sign -key /root/rollcall-update.key -version v1.7.0 \
-  -base-url https://updates.example.com/agent/v1.7.0 \
+make linux VERSION=v1.8.0
+./rollsign sign -key /root/rollcall-update.key -version v1.8.0 \
+  -base-url https://updates.example.com/agent/v1.8.0 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json
@@ -210,7 +210,7 @@ sudo cp /opt/rollcall/data/history.json \
         /var/backups/rollcall/history-$(date +%F-%H%M).json.gz
 ```
 
-需要连管理令牌一起备份时打包整个数据目录，并确保备份文件不进 Git：
+需要连管理令牌、账号哈希与会话密钥一起备份时打包整个数据目录，并确保备份文件不进 Git：
 
 ```bash
 sudo tar -C /opt/rollcall -czf /var/backups/rollcall/data-$(date +%F).tgz data
@@ -265,7 +265,53 @@ sudo systemctl start rollcall-server
 
 ---
 
-## 4. 令牌管理
+## 4. 账号、会话与令牌管理
+
+### 管理员账号
+
+面板登录只接受「用户名或邮箱 + 密码」。账号保存在 `data/admin-user.json`（0600，schema 1），
+文件内只有 PBKDF2-HMAC-SHA256 哈希（600,000 次迭代、16 字节随机盐），没有明文密码。
+用户名与邮箱均不区分大小写。
+
+初始化方式（三选一，仅在首次启动、账号文件不存在时生效）：
+
+```bash
+# 1) 环境变量（推荐，写进 systemd 的 EnvironmentFile）
+ROLLCALL_ADMIN_PASSWORD='至少 12 位的强密码'
+
+# 2) 启动参数
+-admin-user admin -admin-email ops@example.com -admin-password '至少 12 位的强密码'
+
+# 3) 都不提供：服务端生成 24 位随机密码，仅在首次启动的日志中打印一次
+journalctl -u rollcall-server | grep '面板管理员已创建'
+```
+
+重置密码（服务停止时执行；命令重置后立即退出，不会启动服务）：
+
+```bash
+read -rsp '新密码: ' PW && echo          # 从密码管理器粘贴，不进入 shell history
+sudo systemctl stop rollcall-server
+sudo runuser -u rollcall -- env ROLLCALL_ADMIN_PASSWORD="$PW" \
+  /opt/rollcall/rollcall-server -data /opt/rollcall/data -reset-admin-password
+unset PW
+sudo systemctl start rollcall-server
+```
+
+重置会更新会话版本，旧 Cookie 全部失效，需要用新密码重新登录。
+密码至少 12 位；也可用 `-admin-password` 传参，但会留在 shell history，不推荐。
+用环境变量完成首次初始化后，建议登录并改成自己的密码，然后清除
+`/etc/rollcall/server.env` 中的密码行——环境变量只在创建/重置时读取，
+正常启动不会覆盖已保存的哈希。
+
+### 会话
+
+- 登录成功后签发 `rollcall_session` Cookie：HMAC-SHA256 签名，`HttpOnly`、`SameSite=Strict`，
+  HTTPS（含 `X-Forwarded-Proto: https`）下自动带 `Secure`；有效期 7 天。
+- 签名密钥在 `data/session.key`（32 字节，0600），首次启动自动生成，因此**重启服务不会掉登录态**。
+  删除或替换该文件会让所有会话立即失效，可作为「强制全员重新登录」手段。
+- 连续 10 次登录失败后，来源 IP 封禁 10 分钟；成功登录清零计数。
+- 会话鉴权下的写操作必须带 `X-Requested-With: XMLHttpRequest`，用于阻断跨站表单提交；
+  `X-Admin-Token` 请求不受此限制（自定义头本身已阻止表单跨站）。
 
 ### 管理令牌
 
@@ -279,7 +325,7 @@ sudo chmod 0600 /opt/rollcall/data/admin.token
 sudo systemctl start rollcall-server
 ```
 
-轮换后需同步更新浏览器端令牌、Prometheus `basic_auth` 密码及所有脚本。**不要把令牌提交到仓库或贴进聊天记录。**
+轮换后需同步更新 Prometheus `basic_auth` 密码及所有脚本；面板登录不使用该令牌，无需改浏览器配置。**不要把令牌提交到仓库或贴进聊天记录。**
 
 ### 节点令牌
 
@@ -430,7 +476,7 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
 - 服务端只接受上述固定字段，未知字段或非法值直接返回 400；**不接受任何 CSS 文本**
 - 前端仅把主题值映射到白名单 CSS 变量，公开状态页同步应用，不新增数据暴露
 - 主题保存在 settings 中：`GET /api/theme` 公开读取（仅样式）；`GET/PUT /api/admin/theme`
-  需要 `X-Admin-Token`
+  需要管理令牌或已登录会话
 - 设置页的「重置」会恢复默认主题；强调色以可读性为准，避免与文字/背景对比不足
 
 ---
@@ -439,7 +485,11 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
 
 | 现象 | 排查方向 |
 |---|---|
-| 浏览器一直要求令牌 / 401 | 管理接口需 `X-Admin-Token`；节点上报需 `X-Node-Token`，两者不可混用 |
+| 浏览器反复跳回登录页 / 401 | 会话 Cookie 被清除，或 `data/session.key` 被删除/替换；管理 API 直连需 `X-Admin-Token`，节点上报需 `X-Node-Token`，三者不可混用 |
+| 登录提示「用户名或密码错误」 | 用户名或邮箱不区分大小写，但仍需完全匹配；忘记密码按 §4 重置 |
+| 登录后写操作返回 403 | 会话鉴权的写请求缺少 `X-Requested-With: XMLHttpRequest`（浏览器扩展/脚本常见）；管理令牌请求不受此限制 |
+| 重置密码后仍能旧会话访问 | `-reset-admin-password` 需在服务停止时执行，且随后重启服务才生效 |
+| 管理接口无令牌返回 401 | 未登录会话且未带管理令牌；先登录面板或按 §4 配置令牌 |
 | 节点显示离线 | 服务端超过 300 秒未收到上报；120–300 秒显示「数据延迟」，从未上报显示「待接入」。检查 Agent 日志、时间同步、`interval ≤ 60` |
 | Agent 拒绝启动（HTTP） | 非本机服务端默认必须 HTTPS；临时接受风险可加 `-allow-insecure` |
 | Agent 读取配置失败 | 确认 `/etc/rollcall` 属组 `rollcall-agent`(0750)、`agent.json` 为 `root:rollcall-agent 0640` |
@@ -470,9 +520,11 @@ curl -fsS http://127.0.0.1:19080/metrics \
 - [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`
 - [ ] `/healthz` 返回 `ok`，`/status` 可匿名访问且不含主机名/IP/价格
 - [ ] 目标节点在线，30–60 秒内有新采样
-- [ ] 管理接口无令牌返回 401，带令牌返回 200
+- [ ] 可用用户名与邮箱分别登录面板；错误密码被拒绝；刷新与重启服务后登录态保持；退出后回到登录页
+- [ ] 管理令牌 API 与 `/metrics` 抓取仍可用，`data/admin.token` 权限为 0600
 - [ ] 已配置备份任务，且实际恢复演练过一次
-- [ ] 管理令牌与节点令牌均未进入仓库、日志或截图
+- [ ] 管理员密码已存入密码管理器，非默认/弱口令；`admin-user.json` 中只有哈希
+- [ ] 管理令牌、节点令牌、`admin-user.json`、`session.key` 均未进入仓库、日志或截图
 - [ ] 如启用自更新：`update.manifestUrl` 为 HTTPS、公钥正确、二进制目录可写且 systemd 已放行
 - [ ] 如启用通知插件：目录与清单非全局可写，逐通道测试通过
 - [ ] 如修改主题：管理页与 `/status` 均按预期显示，重置后恢复默认

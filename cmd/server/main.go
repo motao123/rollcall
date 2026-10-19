@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/alert"
+	"github.com/motao/rollcall/internal/auth"
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/outbox"
@@ -37,11 +38,15 @@ func main() {
 	demo := flag.Bool("demo", false, "载入演示数据（仅用于预览 UI）")
 	probeEvery := flag.Duration("probe-interval", 10*time.Second, "探测调度粒度（每个服务仍按自身 interval 执行）")
 	adminToken := flag.String("admin-token", "", "管理 API 令牌（留空则读取/生成 data/admin.token）")
-	auth := flag.String("auth", "", "Basic Auth，格式 user:password（留空则不启用）")
+	adminUser := flag.String("admin-user", "", "面板管理员用户名（留空读 ROLLCALL_ADMIN_USER，默认 admin）")
+	adminEmail := flag.String("admin-email", "", "面板管理员邮箱（可选；留空读 ROLLCALL_ADMIN_EMAIL）")
+	adminPassword := flag.String("admin-password", "", "初始/重置密码，至少 12 位（建议用 ROLLCALL_ADMIN_PASSWORD；仅在首次创建或 -reset-admin-password 时生效）")
+	resetAdminPassword := flag.Bool("reset-admin-password", false, "用 -admin-password/ROLLCALL_ADMIN_PASSWORD 重置管理员密码，并使旧会话失效")
+	basicAuth := flag.String("auth", "", "兼容用 Basic Auth，格式 user:password（面板 UI 不再使用，留空则不启用）")
 	panelLink := flag.String("panel-link", "", "面板对外地址（拼进告警通知，可留空）")
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 HTTPS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
-	allowPublic := flag.Bool("allow-public", false, "允许未启用 Basic Auth 时监听非回环地址（仪表盘数据仍需管理令牌，/status 保持公开）")
+	allowPublic := flag.Bool("allow-public", false, "已废弃：面板账号登录默认启用，该开关不再影响启动")
 	allowInsecure := flag.Bool("allow-insecure", false, "允许在非回环地址上使用明文 HTTP（不建议）")
 	allowPrivateProbes := flag.Bool("allow-private-probes", false, "允许探测回环/私网/链路本地目标")
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
@@ -94,6 +99,43 @@ func main() {
 		log.Printf("演示模式：使用临时数据目录 %s（退出后自动删除）", dir)
 	}
 
+	// 面板管理员账号：用户名/邮箱来自配置，密码仅以 PBKDF2 哈希落盘。
+	// 放在存储加载之前：即使快照损坏，也仍能通过 -reset-admin-password 救回面板。
+	loginUser := *adminUser
+	if loginUser == "" {
+		loginUser = os.Getenv("ROLLCALL_ADMIN_USER")
+	}
+	loginEmail := *adminEmail
+	if loginEmail == "" {
+		loginEmail = os.Getenv("ROLLCALL_ADMIN_EMAIL")
+	}
+	loginPassword := *adminPassword
+	if loginPassword == "" {
+		loginPassword = os.Getenv("ROLLCALL_ADMIN_PASSWORD")
+	}
+	panelUser, userCreated, generatedPwd, err := auth.LoadOrCreateUser(
+		filepath.Join(*dataDir, "admin-user.json"),
+		loginUser, loginEmail, loginPassword, *resetAdminPassword)
+	if err != nil {
+		log.Fatalf("管理员账号配置失败: %v", err)
+	}
+	if *resetAdminPassword {
+		log.Printf("管理员密码已重置: %s（重启服务后生效，旧会话将全部失效）", panelUser.Username)
+		return
+	}
+	switch {
+	case userCreated:
+		if panelUser.Email != "" {
+			log.Printf("面板管理员已创建: %s（可用邮箱 %s 登录）", panelUser.Username, panelUser.Email)
+		} else {
+			log.Printf("面板管理员已创建: %s", panelUser.Username)
+		}
+	}
+	if generatedPwd != "" {
+		log.Printf("初始管理员密码: %s（仅本次启动打印一次，请立即保存；落盘仅保存哈希）", generatedPwd)
+	}
+	log.Printf("面板账号登录已启用（用户 %s，会话有效期 %s）", panelUser.Username, auth.DefaultSessionTTL)
+
 	st := store.New(*dataDir)
 	if err := st.LoadErr(); err != nil {
 		log.Fatalf("载入持久化状态失败: %v", err)
@@ -116,10 +158,19 @@ func main() {
 		log.Printf("管理 API 已启用（X-Admin-Token，令牌长度 %d）", len(adm))
 	}
 
+	sessionKey, err := auth.LoadOrCreateSessionKey(filepath.Join(*dataDir, "session.key"))
+	if err != nil {
+		log.Fatalf("会话密钥不可用: %v", err)
+	}
+	sessions, err := auth.NewSessions(sessionKey, auth.DefaultSessionTTL)
+	if err != nil {
+		log.Fatalf("会话管理器初始化失败: %v", err)
+	}
+
 	// Basic Auth
 	var authUser, authPass string
-	if *auth != "" {
-		parts := strings.SplitN(*auth, ":", 2)
+	if *basicAuth != "" {
+		parts := strings.SplitN(*basicAuth, ":", 2)
 		if len(parts) != 2 || parts[0] == "" {
 			log.Fatal("-auth 格式应为 user:password")
 		}
@@ -134,16 +185,18 @@ func main() {
 	}
 
 	// 安全默认：非回环绑定必须显式确认暴露面。
+	// 面板始终要求账号密码登录，因此不再要求额外配置 Basic Auth；
+	// 但明文 HTTP 会把密码暴露在链路上，非回环仍必须有 TLS 或显式确认。
 	loopback := isLoopbackListen(*addr)
 	if !loopback {
-		if authUser == "" && !*allowPublic {
-			log.Fatal("拒绝在未启用 Basic Auth 时监听非回环地址；请加 -auth，或显式加 -allow-public（仪表盘数据仍需管理令牌，/status 保持公开）")
-		}
 		if *tlsCert == "" && !*allowInsecure {
 			log.Fatal("拒绝在非回环地址上使用明文 HTTP；请配置 -tls-cert/-tls-key，或通过反向代理/隧道，或显式加 -allow-insecure")
 		}
 	} else if authUser == "" {
-		log.Printf("⚠ 未启用 Basic Auth；当前仅监听回环，请通过反向代理/隧道访问")
+		log.Printf("⚠ 当前仅监听回环，请通过反向代理/隧道访问")
+	}
+	if *allowPublic {
+		log.Printf("提示: -allow-public 已废弃；面板账号登录始终启用，该开关不再影响启动")
 	}
 
 	if *demo {
@@ -258,7 +311,8 @@ func main() {
 		log.Fatalf("-trusted-proxies 无效: %v", err)
 	}
 	ws := web.New(st, runner, engine, web.Config{
-		AdminToken: adm, AuthUser: authUser, AuthPass: authPass, PanelLink: *panelLink,
+		AdminToken: adm, AuthUser: authUser, AuthPass: authPass,
+		User: panelUser, Sessions: sessions, PanelLink: *panelLink,
 		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets, AgentDir: *agentDir,
 	})
 	if err := ws.NotifyErr(); err != nil {

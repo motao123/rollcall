@@ -69,6 +69,7 @@ h1{font-size:21px;font-weight:680;letter-spacing:-.02em;margin:0}
 .hdr-btn{
   border:1px solid var(--line);background:var(--panel);color:var(--fg2);
   border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;
+  text-decoration:none;display:inline-block;
 }
 .hdr-btn:hover{color:var(--fg);border-color:var(--fg3)}
 
@@ -232,6 +233,7 @@ html[data-density="compact"] .group{margin-top:18px}
     <h1 id="title">服务状态</h1>
     <span class="sub" id="stamp">加载中…</span>
     <span class="spacer"></span>
+    <a class="hdr-btn" href="/">管理登录</a>
     <button class="hdr-btn" id="themeBtn" type="button">切换外观</button>
   </header>
   <noscript><div class="banner bad"><span class="dot bad"></span>需要启用 JavaScript 才能显示实时状态。</div></noscript>

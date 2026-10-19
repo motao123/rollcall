@@ -511,8 +511,9 @@ func TestValidateRoutesFailsClosed(t *testing.T) {
 }
 
 // TestRouteAuthMatrix 对路由表逐项验证鉴权边界：
-// 公开端点不要求凭据；只读接口接受管理令牌或面板凭据；
-// 管理写操作只认管理令牌；/metrics 两种凭据都接受。
+// 公开端点不要求凭据；登录端点自身公开（handler 内校验）；
+// 只读接口接受管理令牌、Basic 或面板会话；管理写操作只认管理令牌或会话 + 同源头；
+// /metrics 接受管理令牌或面板凭据。
 func TestRouteAuthMatrix(t *testing.T) {
 	const adminTok = "test-admin-token-1234567890"
 	st := store.New(t.TempDir())
@@ -552,12 +553,11 @@ func TestRouteAuthMatrix(t *testing.T) {
 			if code := do(http.MethodPost, path, false, false, strings.NewReader("{}")); code != http.StatusUnauthorized {
 				t.Errorf("%s 无效节点令牌应 401，实际 %d", rt.pattern, code)
 			}
-		case authPanel:
-			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
-				t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
-			}
-			if code := do(http.MethodGet, path, false, true, nil); code != http.StatusOK {
-				t.Errorf("%s 面板凭据应 200，实际 %d", rt.pattern, code)
+		case authLogin:
+			// 登录/会话端点自身不套鉴权中间件，未登录探测也不能 401
+			// （否则正常的首屏会话检查会被计入爆破限速）。
+			if code := do(http.MethodGet, path, false, false, nil); code == http.StatusUnauthorized {
+				t.Errorf("%s 属于登录端点，不应由中间件返回 401，实际 %d", rt.pattern, code)
 			}
 		case authReadonly:
 			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
