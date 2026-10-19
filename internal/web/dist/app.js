@@ -276,9 +276,17 @@ function nodeCard(n) {
 
 /* ---------------- 视图 ---------------- */
 
+function setAlertBadge(n) {
+  const el = $('#navAlertCount');
+  if (!el) return;
+  el.hidden = !n;
+  el.textContent = n;
+}
+
 async function viewOverview() {
   const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
   state.data.nodes = nodes;
+  setAlertBadge(ov.activeAlert || 0);
 
   const expiring = ov.expiring || [];
   const lists = nodes.filter((n) => !state.search || n.name.toLowerCase().includes(state.search));
@@ -344,7 +352,7 @@ async function viewOverview() {
       <div class="section-head">
         <h2 class="section-title">节点状态</h2>
         <span class="section-meta">${lists.length} 台 · 按服务商分组</span>
-        <button class="btn primary" id="wizBtn" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
+        <button class="btn primary" id="wizBtn" style="padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
       </div>
       <div class="prov-strip">
         ${providerRows.map((r) => `
@@ -413,7 +421,7 @@ async function viewNodes() {
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
         <span class="section-meta">${list.length} 台</span>
-        <button class="btn" id="batchBtn" style="margin-left:auto;padding:6px 14px;font-size:12.5px">批量操作</button>
+        <button class="btn" id="batchBtn" style="padding:6px 14px;font-size:12.5px">批量操作</button>
         <button class="btn primary" id="wizBtn2" style="padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
       </div>
       <div id="batchBar" hidden class="batch-bar">
@@ -698,8 +706,7 @@ async function viewAlerts() {
     canManage ? adminApi('/api/admin/nodes').catch(() => []) : Promise.resolve([]),
   ]);
   const items = d.items || [];
-  $('#navAlertCount').hidden = d.active === 0;
-  $('#navAlertCount').textContent = d.active;
+  setAlertBadge(d.active || 0);
 
   const metricMap = {};
   (meta.metrics || []).forEach((m) => { metricMap[m.value] = m; });
@@ -1944,7 +1951,7 @@ async function viewStatusPage() {
       <div class="section-head">
         <h2 class="section-title">展示配置</h2>
         <span class="section-meta">公开页 /status</span>
-        <a class="btn" href="/status" target="_blank" rel="noopener" style="margin-left:auto;padding:6px 14px;font-size:12.5px">打开公开页 ↗</a>
+        <a class="btn" href="/status" target="_blank" rel="noopener" style="padding:6px 14px;font-size:12.5px">打开公开页 ↗</a>
       </div>
       <form id="spForm" class="panel panel-pad">
         <div class="grid-2">
@@ -1980,7 +1987,7 @@ async function viewStatusPage() {
       <div class="section-head">
         <h2 class="section-title">维护窗口</h2>
         <span class="section-meta">窗口内不产生新告警，公开页显示"维护中"</span>
-        <button class="btn primary" id="mtAdd" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 新建维护窗口</button>
+        <button class="btn primary" id="mtAdd" style="padding:6px 14px;font-size:12.5px">＋ 新建维护窗口</button>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>标题</th><th>范围</th><th>起止</th><th>状态</th><th class="num">操作</th></tr></thead>
@@ -1992,7 +1999,7 @@ async function viewStatusPage() {
       <div class="section-head">
         <h2 class="section-title">人工事件</h2>
         <span class="section-meta">与告警一起出现在公开页时间线</span>
-        <button class="btn primary" id="incAdd" style="margin-left:auto;padding:6px 14px;font-size:12.5px">＋ 登记事件</button>
+        <button class="btn primary" id="incAdd" style="padding:6px 14px;font-size:12.5px">＋ 登记事件</button>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>标题</th><th>级别</th><th>影响范围</th><th>时间</th><th class="num">操作</th></tr></thead>

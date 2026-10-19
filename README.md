@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.9.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.9.1**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -377,7 +377,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.0`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.1`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -869,17 +869,18 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.0）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.1）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.0、active + enabled |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.1、active + enabled |
 | 公开状态页 | `/status` 匿名可访问；13 个节点实测在线；1440px 三列 / 390px 单列均无横向溢出；浅色、深色、跟随系统切换正常 |
 | 公开 API | `/api/status`、`/api/status/node/<hid>`、`/api/theme` 匿名 200；用内部节点 ID 访问详情返回 404；匿名 `/api/nodes` 401；`/metrics` 凭管理令牌 200 |
 | 公开页脱敏 | 默认不下发地区、服务商、主机名、系统、内核、架构、CPU 型号、核心数、虚拟化、进程数、TCP、Swap；`/status` 与 `/api/status` 无内部 ID |
 | 详情趋势 | 24h / 7d / 30d 切换正常，服务端降采样上限 240 点；空载 `0.00` 负载仍会下发而不是被当作空字段 |
 | 增量刷新 | 15 秒轮询保持搜索输入焦点与筛选状态；页面隐藏时暂停；详情切换区间不再整页闪烁 |
 | 面板登录 | 用户名与邮箱（大小写不敏感）均可登录；错误密码 401；会话跨刷新与服务重启保持；退出后 Cookie 立即失效 |
+| 面板布局 | 640px 移动端概览：区块标题的元信息与按钮右对齐、奇数 KPI 卡片补满整行、告警角标无告警时隐藏且不挤占导航项高度 |
 | 鉴权边界 | 未登录读写接口 401；会话写请求缺 `X-Requested-With` 返回 403；管理令牌 API 与 `/metrics` 仍可用 |
 | 凭据存储 | `admin-user.json` 仅存 PBKDF2-SHA256 哈希（600,000 次迭代），无明文密码；`session.key` 0600 |
 | 上报频率 | 30 秒一报，在线/数据延迟/离线状态判定正确 |

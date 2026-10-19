@@ -165,6 +165,8 @@ body {
   color: var(--crit);
   font-weight: 600;
 }
+/* 移动端 .nav-item span 的 display:block 会盖掉 UA 的 [hidden]，需显式隐藏 */
+.nav-count[hidden] { display: none; }
 
 .sidebar-foot {
   margin-top: auto;
@@ -843,6 +845,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   }
   .brand, .sidebar-foot, .nav-label { display: none; }
   .nav-item {
+    position: relative;
     flex-direction: column;
     gap: 2px;
     font-size: 9.5px;
@@ -850,6 +853,18 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     flex: 1;
   }
   .nav-item span { display: block; }
+  .nav-count {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(2px);
+    margin: 0;
+    padding: 0 4px;
+    min-width: 13px;
+    font-size: 9px;
+    line-height: 1.45;
+    text-align: center;
+  }
   .view { padding: 16px 14px 84px; }
   .topbar { padding: 11px 14px; gap: 8px; flex-wrap: nowrap; }
   .topbar > div:first-child { min-width: 0; flex: 1; }
@@ -859,6 +874,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .user-name, .user-caret { display: none; }
   .user-btn { padding: 2px; }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .kpis > .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .kpi { padding: 11px 12px; }
   .kpi-value { font-size: 19px; }
   .node-grid { grid-template-columns: minmax(0, 1fr); }
