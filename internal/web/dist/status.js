@@ -352,7 +352,11 @@
     var hasData = state !== 'no_data';
     var up = n.uptime24;
 
-    var html = '<div class="row" tabindex="0" role="link" data-node="' + esc(n.id) + '" ' +
+    // hid 是服务端派生的不透明句柄（不是内部节点 ID）。
+    // 回退 n.id 只为兼容"旧缓存 JS + 新服务端"或反之的滚动升级窗口，
+    // 正常运行时 n.hid 一定存在。
+    var rowKey = n.hid || n.id || '';
+    var html = '<div class="row" tabindex="0" role="link" data-node="' + esc(rowKey) + '" ' +
       'aria-label="' + esc(n.name + '　' + label + '　24 小时可用率 ' + (up != null ? up.toFixed(1) : '—') + '%') + '">';
     html += '<div class="row-top">';
     html += '<span class="row-name"><span class="dot ' + dot + '" title="' + label + '"></span>' +

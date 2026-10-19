@@ -198,8 +198,12 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 告警引擎的 `offline` 规则仍以 120 秒为判定窗口，不受展示层 `stale` 影响。
 
 **脱敏原则**（公开页可被任何人访问）：
-不含 IP、服务商、价格、到期日、备注、主机名、内核、架构、节点 ID、上报令牌。
-仅保留：展示名、分组、在线状态、三项使用率、运行时长、24h 可用率色块。
+不含 IP、服务商、价格、到期日、备注、主机名、内核、架构、上报令牌。
+节点在公开页上只以**不透明句柄**（`hid`，由服务端盐值派生，不可逆推回内部 ID）标识，
+内部节点 ID 永不下发；`/api/status/node/<hid>` 也只接受句柄，用内部 ID 访问返回 404。
+默认公开：展示名、分组、在线状态、三项使用率、运行时长、24h 可用率色块。
+需显式开启（「状态页 → 展示配置」）：地域、服务商、CPU/内存等明细、进程数、TCP 连接数、
+Swap、主机名、系统、内核、架构、CPU 型号、核心数、虚拟化。
 
 **与 Basic Auth 的关系**：启用 `-auth` 后，`/` 管理界面与仪表盘只读数据需要 Basic 登录；
 未启用时，仪表盘只读接口仍需管理令牌（浏览器首次打开会显示令牌输入页）。
@@ -311,7 +315,8 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 ### 前置条件
 
 - 生产：Linux + systemd
-- 构建机：Go 1.22+、git、curl
+- 构建机：**Go 1.24+**（`go.mod` 声明 `go 1.24.0`；低版本会触发 `GOTOOLCHAIN` 自动下载工具链，
+  离线构建机会直接失败）、git、curl
 - 生产端口默认只监听回环，对外请用反向代理或内置 TLS
 
 ### 1. 获取源码并构建
@@ -335,6 +340,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
+>
+> 在 Windows 上跑 `go test ./...` 会**跳过**几个依赖 POSIX 权限位的用例
+> （插件可执行位、`0600` 文件权限、原子替换回滚），这是平台差异而非失败；
+> 对应的安全断言在 Linux/CI 上照常执行。
 
 ### 2. 预览 UI（可选）
 
@@ -467,6 +476,32 @@ runuser -u rollcall-agent -- \
 > `-rollback` 恢复 `.prev` 后自动重启；`.update-pending` 记录待验证版本与启动次数，
 > 首次成功上报后自动删除。签名与清单生成见 `docs/operations.md`。
 
+### 5.1 一条命令接入（可选，需 `-agent-dir`）
+
+手动步骤共 5 步、容易漏配。把 Agent 二进制放到服务端目录并加 `-agent-dir`，
+面板的「接入」弹窗就会给出一条可直接粘贴的命令：
+
+```bash
+# 控制端：准备分发目录（用 make linux 的产物）
+sudo install -d -o rollcall -g rollcall -m 0755 /opt/rollcall/agent
+sudo install -m 0755 dist/rollcall-agent-linux-amd64 dist/rollcall-agent-linux-arm64 /opt/rollcall/agent/
+# 在 rollcall-server.service 的 ExecStart 追加 -agent-dir /opt/rollcall/agent
+# （drop-in 写法见 docs/operations.md；改完 systemctl daemon-reload && systemctl restart rollcall-server）
+```
+
+```bash
+# 目标节点：一条命令
+curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板 <node-id> <token>
+```
+
+脚本会自动识别架构、创建 `rollcall-agent` 低权限用户（与 `deploy/rollcall-agent.service`
+姿态一致）、写入 0640 配置、生成 systemd 单元；没有 systemd 的容器里退回后台常驻。
+未配置 `-agent-dir` 时 `/agent/*` 返回 404，仍可按上面的手动步骤安装。
+
+> 脚本本身不含任何密钥（node id / token 由命令行参数传入），因此可以公开下载与审计。
+> 但它以 `curl | sh` 方式执行，**只在 HTTPS 或 SSH 隧道下使用**：明文 HTTP 下中间人
+> 可以替换脚本或二进制。同理，Agent 二进制目前只做 `-version` 可执行性校验，不校验签名。
+
 > **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
 >
 > **安全默认**：监听非回环地址时，未启用 Basic Auth 或未配置 TLS 会**直接拒绝启动**。
@@ -492,6 +527,8 @@ runuser -u rollcall-agent -- \
 | `-allow-private-probes` | false | 允许 HTTP/TCP 探测内网与回环目标 |
 | `-allow-private-notify` | false | 允许通知通道访问内网/回环目标（自建 Gotify/Bark/Webhook） |
 | `-notify-plugins` | 空 | 通知插件目录；显式指定后加载顶层 `*.json` 清单 |
+| `-agent-dir` | 空 | Agent 二进制分发目录（内含 `rollcall-agent-linux-{amd64,arm64}`），启用面板里的「一条命令接入」；未配置时 `/agent/*` 返回 404 |
+| `-trusted-proxies` | 空 | 可信反向代理 CIDR（逗号分隔，如 `127.0.0.1/32,10.0.0.0/8`）；留空只信任回环。放在反代后面时必须配置，否则日志与限速会把所有访客当成同一个 IP |
 | `-insecure-probe-tls` | false | 探测 HTTPS 时跳过证书校验（自签名目标） |
 | `-probe-interval` | `10s` | 探测调度粒度；每个服务按自身 `interval` 执行 |
 | `-save-interval` | `60s` | 自动保存快照间隔（10s–1h）；退出时还会强制保存一次 |
@@ -525,13 +562,21 @@ runuser -u rollcall-agent -- \
 | PUT/DELETE | `/api/admin/silences/{global\|ruleId}` | 设置（`{"minutes":60,"reason":"..."}`）/ 取消静默 |
 | GET | `/api/admin/notify/jobs` | 通知队列最近 100 条任务与累计统计 |
 | POST | `/api/admin/notify/jobs/{id}/retry` | 手动重试失败/被拦截任务（重置尝试次数） |
+| GET/PUT | `/api/admin/status-page` | 读取 / 保存公开页配置（标题、公告、展示天数、字段可见性、区块开关） |
+| GET/POST | `/api/admin/maintenance` | 列出 / 新建维护窗口（`{title,reason,nodeIds,startAt,endAt}`，省略时间为「现在起 60 分钟」） |
+| DELETE | `/api/admin/maintenance/{id}` | 删除维护窗口；窗口内该节点的告警自动抑制并在窗口结束后恢复评估 |
+| GET/POST | `/api/admin/incidents` | 列出 / 新建人工事件（`{title,body,level,nodeIds,startAt,endAt}`） |
+| DELETE | `/api/admin/incidents/{id}` | 删除人工事件 |
+| POST | `/api/admin/nodes/batch` | 批量改台账：`{ids,action,value}`，`action` ∈ `group\|provider\|region\|expire\|currency\|delete`。任一行 ID 不存在则整批拒绝，避免改一半 |
 
 公开接口（无需任何凭据）：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/status` | 公开状态页 HTML |
-| GET | `/api/status` | 公开状态页数据（严格脱敏） |
+| GET | `/api/status` | 公开状态页数据（严格脱敏，节点只带 `hid` 句柄） |
+| GET | `/api/status/node/<hid>` | 单节点详情（指标/曲线/逐日可用率），受展示配置裁剪；区块关闭或句柄无效均 404 |
+| GET | `/api/status/incidents` | 事件时间线（告警自动事件 + 人工登记事件合并后按时间倒序） |
 | GET | `/api/theme` | 公开外观主题（仅固定样式字段） |
 | GET | `/status.js` | 公开状态页脚本 |
 | GET | `/healthz` | 健康检查 |

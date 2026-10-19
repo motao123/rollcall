@@ -23,6 +23,13 @@ func statusTestEnv(t *testing.T) (*store.Store, http.Handler) {
 	return st, srv.Handler()
 }
 
+// detailURL 返回节点的公开详情地址。
+// ★ 公开接口只认「公开句柄」，不认内部节点 ID（见 store.PublicHandle）：
+// 测试必须走真实入口，否则测的是后门而不是线上行为。
+func detailURL(st *store.Store, nodeID string) string {
+	return "/api/status/node/" + st.PublicHandle(nodeID)
+}
+
 // report 把一份主机/指标快照灌进节点 n1。
 func statusReport(h http.Handler, host, metrics string) {
 	body := `{"nodeId":"n1","host":` + host + `,"metrics":` + metrics + `}`
@@ -59,7 +66,7 @@ func TestStatusDetailHidesDisabledFields(t *testing.T) {
 	cfg.Visibility.Swap = false
 	st.SetStatusPage(cfg)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/status/node/n1", nil)
+	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -109,7 +116,7 @@ func TestStatusDetailShowsEnabledFields(t *testing.T) {
 	cfg.Visibility.Procs = true
 	st.SetStatusPage(cfg)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/status/node/n1", nil)
+	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	var out struct {
@@ -141,7 +148,7 @@ func TestStatusNodeDetailDisabled404(t *testing.T) {
 	cfg := model.DefaultStatusPage()
 	cfg.Blocks.NodeDetail = false
 	st.SetStatusPage(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/api/status/node/n1", nil)
+	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
@@ -205,5 +212,86 @@ func TestNodeDailyUptimeDayBucketing(t *testing.T) {
 	// 起点必须落在 UTC 日界上
 	if days[0].TS%86400 != 0 {
 		t.Errorf("日柱起点 %d 未按 UTC 日对齐", days[0].TS)
+	}
+}
+
+// TestPublicNodeHandleIsOpaque 是「公开页不含节点 ID」承诺的回归。
+//
+// 背景：详情页上线时曾直接把内部节点 ID 下发到 /api/status，
+// README 的脱敏原则与 TestPublicStatusIsDesensitized 都明确禁止，
+// 而 CI 因此变红。这里把"列表只能给句柄、详情只认句柄"钉死：
+//  1. 列表里不出现内部 ID（连字符串形式都不能有）；
+//  2. 用内部 ID 访问详情必须 404（否则句柄只是装饰）；
+//  3. 句柄跨重启稳定（否则书签/分享链接会随机失效）。
+func TestPublicNodeHandleIsOpaque(t *testing.T) {
+	st, h := statusTestEnv(t)
+	statusReport(h, `{}`, `{"cpuPct":10}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	body := w.Body.String()
+	for _, leak := range []string{`"id"`, `"n1"`, `"n2"`} {
+		if strings.Contains(body, leak) {
+			t.Errorf("公开列表下发了内部标识 %s: %s", leak, body)
+		}
+	}
+
+	var list struct {
+		Nodes []struct {
+			HID  string `json:"hid"`
+			Name string `json:"name"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(list.Nodes) != 2 {
+		t.Fatalf("应下发 2 个节点，实际 %d", len(list.Nodes))
+	}
+	h1 := st.PublicHandle("n1")
+	found := false
+	for _, n := range list.Nodes {
+		if n.HID == "" {
+			t.Errorf("节点 %q 缺少公开句柄", n.Name)
+		}
+		if n.HID == h1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("列表里找不到 n1 的句柄 %s", h1)
+	}
+
+	// 内部 ID 必须被拒绝：否则拿到 ID 就能绕开句柄直接看详情。
+	req = httptest.NewRequest(http.MethodGet, "/api/status/node/n1", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("内部 ID 仍能访问详情（%d）：%s", w.Code, w.Body.String())
+	}
+
+	// 句柄必须真的能打开详情。
+	req = httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("句柄访问详情应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"n1"`) {
+		t.Errorf("详情仍下发内部 ID: %s", w.Body.String())
+	}
+
+	// 句柄跨重启稳定：盐值必须随快照落盘。
+	dir := t.TempDir()
+	a := store.New(dir)
+	a.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "tok"})
+	before := a.PublicHandle("n1")
+	if err := a.Save(); err != nil {
+		t.Fatalf("保存快照失败: %v", err)
+	}
+	b := store.New(dir)
+	if after := b.PublicHandle("n1"); after != before {
+		t.Errorf("重启后句柄变了（公开链接会全部失效）：%s → %s", before, after)
 	}
 }

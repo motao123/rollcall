@@ -71,7 +71,30 @@ if ! "$TMP" -version >/dev/null 2>&1; then
 fi
 mv -f "$TMP" "$BIN"
 
-install -d -m 0700 /etc/rollcall
+# 专用低权限用户：Agent 只需读 /proc，不需要 root。
+# ★ 必须与 deploy/rollcall-agent.service 保持一致：否则"一条命令接入"装出来的
+#   Agent 以 root 运行，而同仓库的模板是低权限 —— 两种接入方式的安全姿态不同，
+#   用户以为自己在跑最小权限，实际拿到的是 root 常驻进程。
+AGENT_USER=rollcall-agent
+AS_USER=""
+if id -u "$AGENT_USER" >/dev/null 2>&1; then
+    AS_USER=$AGENT_USER
+elif command -v useradd >/dev/null 2>&1; then
+    # useradd 在某些容器里存在但被限制；失败就退回 root 运行而不是中断安装。
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$AGENT_USER" 2>/dev/null || true
+    id -u "$AGENT_USER" >/dev/null 2>&1 && AS_USER=$AGENT_USER
+fi
+
+if [ -n "$AS_USER" ]; then
+    SVC_USER="User=$AS_USER
+Group=$AS_USER"
+    install -d -m 0750 -o root -g "$AS_USER" /etc/rollcall
+else
+    echo "⚠ 未能创建低权限用户 $AGENT_USER（可能缺少 useradd），Agent 将以 root 运行" >&2
+    SVC_USER=""
+    install -d -m 0700 /etc/rollcall
+fi
+
 umask 077
 cat > /etc/rollcall/agent.json <<JSON
 {
@@ -82,7 +105,12 @@ cat > /etc/rollcall/agent.json <<JSON
   "update": { "enabled": false }
 }
 JSON
-chmod 0600 /etc/rollcall/agent.json
+if [ -n "$AS_USER" ]; then
+    chown root:"$AS_USER" /etc/rollcall/agent.json
+    chmod 0640 /etc/rollcall/agent.json
+else
+    chmod 0600 /etc/rollcall/agent.json
+fi
 
 cat > /etc/systemd/system/rollcall-agent.service <<UNIT
 [Unit]
@@ -92,9 +120,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+$SVC_USER
 ExecStart=$BIN -config /etc/rollcall/agent.json$INSECURE
 Restart=always
 RestartSec=10s
+ReadOnlyPaths=/proc
 
 # 采集器只读：无特权、只读文件系统、禁写可执行内存
 NoNewPrivileges=true

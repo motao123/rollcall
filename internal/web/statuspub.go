@@ -38,7 +38,11 @@ type statusSummary struct {
 
 // statusNodePub 是公开列表里的一个节点行。
 type statusNodePub struct {
-	ID       string        `json:"id"`
+	// HID 是公开页专用的不透明句柄，不是内部节点 ID。
+	// README 承诺公开页「不含节点 ID」：内部 ID 会泄露资产台账规模与
+	// 内部命名，还会被拿去试探 /api/report 等需要令牌的接口。
+	// 句柄由 store.PublicHandle 用持久化盐值派生，可点击、不可逆推。
+	HID      string        `json:"hid"`
 	Name     string        `json:"name"`
 	Group    string        `json:"group"`
 	Online   bool          `json:"online"`
@@ -72,7 +76,8 @@ type dailyUptime struct {
 // statusIncident 是事件时间线里的一条。
 // 自动事件由告警历史生成，人工事件由管理员在后台登记。
 type statusIncident struct {
-	ID        string   `json:"id"`
+	// ID 只在服务端内部用于去重，绝不下发：公开页不暴露任何内部标识。
+	ID        string   `json:"-"`
 	Title     string   `json:"title"`
 	Body      string   `json:"body,omitempty"`
 	Level     string   `json:"level"`
@@ -383,19 +388,23 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/status/node/")
-	id := rest
-	if i := strings.IndexByte(id, '/'); i >= 0 {
-		id = id[:i]
+	handle := rest
+	if i := strings.IndexByte(handle, '/'); i >= 0 {
+		handle = handle[:i]
 	}
-	if id == "" {
-		fail(w, 400, "missing node id")
+	if handle == "" {
+		fail(w, 400, "missing node handle")
 		return
 	}
-	n, ok := s.st.Node(id)
+	// ★ 只接受公开句柄，不接受内部节点 ID。
+	// 若同时接受内部 ID，句柄就失去意义：拿到内部 ID 的人仍能直接访问详情，
+	// "公开页不含节点 ID" 的承诺会被这一条后门绕过。
+	n, ok := s.st.NodeByPublicHandle(handle)
 	if !ok {
 		fail(w, 404, "node not found")
 		return
 	}
+	id := n.ID
 
 	now := time.Now().Unix()
 	m, ts, _ := s.st.Latest(id)
@@ -528,7 +537,7 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	node := map[string]any{
-		"id":    n.ID,
+		"hid":   handle, // 不是内部 ID，见 statusNodePub.HID 的说明
 		"name":  n.Name,
 		"group": store.VisibleGroup(n.Group),
 	}

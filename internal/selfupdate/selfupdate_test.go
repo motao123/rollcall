@@ -247,6 +247,11 @@ func TestUpdaterURLPolicy(t *testing.T) {
 }
 
 func TestApplyStartupRollback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows 没有 POSIX 权限位：chmod 设置的可执行位/0600 读回来仍是 666，
+		// 这里断言的是 Linux 上的安全语义，跳过而不是让整个仓库在 Windows 上红灯。
+		t.Skip("Windows 无 POSIX 权限位，跳过文件权限断言")
+	}
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "rollcall-agent")
 	oldBody := fakeELF("old")

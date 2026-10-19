@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,11 @@ func pluginManifestJSON(t *testing.T, dir, name string, v any) string {
 }
 
 func TestPluginLoadAndSend(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows 没有 POSIX 权限位：chmod 设置的可执行位/0600 读回来仍是 666，
+		// 这里断言的是 Linux 上的安全语义，跳过而不是让整个仓库在 Windows 上红灯。
+		t.Skip("Windows 无 POSIX 权限位，跳过文件权限断言")
+	}
 	dir := t.TempDir()
 	outFile := filepath.Join(t.TempDir(), "request.json")
 	envFile := filepath.Join(t.TempDir(), "env.txt")
@@ -120,6 +126,11 @@ func TestPluginLoadAndSend(t *testing.T) {
 }
 
 func TestPluginFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows 没有 POSIX 权限位：chmod 设置的可执行位/0600 读回来仍是 666，
+		// 这里断言的是 Linux 上的安全语义，跳过而不是让整个仓库在 Windows 上红灯。
+		t.Skip("Windows 无 POSIX 权限位，跳过文件权限断言")
+	}
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "fail.sh"), "#!/bin/sh\necho 'boom on stderr' >&2\nexit 3\n", 0o755)
 	writePluginFile(t, filepath.Join(dir, "slow.sh"), "#!/bin/sh\nsleep 5\n", 0o755)
@@ -150,6 +161,11 @@ func TestPluginFailures(t *testing.T) {
 }
 
 func TestPluginRejectsUnsafeManifests(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows 没有 POSIX 权限位：chmod 设置的可执行位/0600 读回来仍是 666，
+		// 这里断言的是 Linux 上的安全语义，跳过而不是让整个仓库在 Windows 上红灯。
+		t.Skip("Windows 无 POSIX 权限位，跳过文件权限断言")
+	}
 	cases := []struct {
 		name    string
 		setup   func(t *testing.T, dir string)

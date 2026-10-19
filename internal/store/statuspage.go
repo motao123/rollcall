@@ -1,8 +1,12 @@
 package store
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -317,4 +321,66 @@ func VisibleGroup(g string) string {
 		return "节点"
 	}
 	return g
+}
+
+// ---------- 公开页节点句柄 ----------
+
+// keyPublicSalt 是派生公开句柄的盐值键。
+const keyPublicSalt = "status_salt"
+
+// publicSalt 返回（必要时生成并持久化）公开句柄盐值。
+//
+// 为什么需要盐：README 的脱敏原则明确承诺公开页「不含节点 ID」，
+// 但节点详情页又需要一个可点击的稳定标识。直接下发内部 ID 会让
+// 「资产台账内部 ID」与「公开页面」产生可关联性；用盐值派生的一次性
+// 句柄既可点击、又推不回内部 ID。
+//
+// 盐值必须持久化：否则每次重启句柄都变，书签与分享链接全部失效。
+func (s *Store) publicSalt() string {
+	if v := s.GetSetting(keyPublicSalt); v != "" {
+		return v
+	}
+	s.mu.Lock()
+	// 双重检查：不加这一步，并发首请求会各生成一个盐值，
+	// 后写入的覆盖前者，已发出的句柄立刻失效（详情页 404）。
+	if v := s.settings[keyPublicSalt]; v != "" {
+		s.mu.Unlock()
+		return v
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand 失败极罕见（fd 耗尽等）。此时仍要保证进程内稳定，
+		// 否则同一节点每次请求都换句柄，前端详情页会一直 404。
+		b = []byte(strconv.FormatInt(time.Now().UnixNano(), 10))
+	}
+	v := hex.EncodeToString(b)
+	if s.settings == nil {
+		s.settings = map[string]string{}
+	}
+	s.settings[keyPublicSalt] = v
+	s.mu.Unlock()
+	// 立即请求落盘：盐值丢失等于所有公开链接失效。
+	s.RequestSave()
+	return v
+}
+
+// PublicHandle 返回节点在公开页上的不透明句柄（h 前缀 + 12 位十六进制）。
+func (s *Store) PublicHandle(nodeID string) string {
+	sum := sha256.Sum256([]byte(s.publicSalt() + "|" + nodeID))
+	return "h" + hex.EncodeToString(sum[:])[:12]
+}
+
+// NodeByPublicHandle 按公开句柄反查节点。
+// 节点规模在百台量级，线性扫描比维护反向索引更不容易出错，
+// 也不会因为漏更新索引而在改节点后出现"句柄失效"的隐蔽 bug。
+func (s *Store) NodeByPublicHandle(handle string) (*model.Node, bool) {
+	if handle == "" {
+		return nil, false
+	}
+	for _, n := range s.Nodes() {
+		if s.PublicHandle(n.ID) == handle {
+			return n, true
+		}
+	}
+	return nil, false
 }

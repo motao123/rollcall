@@ -939,7 +939,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		up, bars := uptime24(series, now, v.Online)
 
 		p := statusNodePub{
-			ID: v.ID, Name: v.Name, Group: store.VisibleGroup(v.Group),
+			HID: s.st.PublicHandle(v.ID), Name: v.Name, Group: store.VisibleGroup(v.Group),
 			Online: v.Online, State: v.State,
 			CPU:      round1(v.Latest.CPUPct),
 			Mem:      round1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),

@@ -249,7 +249,10 @@ func DefaultStatusPage() StatusPage {
 			Traffic: true, Procs: false, TCPConn: false, Swap: false,
 			Hostname: false, OS: false, Kernel: false, Arch: false,
 			CPUModel: false, Cores: false, Virt: false,
-			Region: true, Provider: false,
+			// ★ 地域默认不公开：它属于资产台账范畴（机群分布在哪些地区），
+			// README 的脱敏原则只承诺展示名/分组/状态/指标/可用率。
+			// 需要展示时由管理员在「状态页 → 展示配置」里显式开启。
+			Region: false, Provider: false,
 		},
 		Blocks: StatusBlocks{
 			Summary: true, Services: true, Incidents: true,
