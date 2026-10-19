@@ -127,7 +127,9 @@ func (s *Server) handleAdminAccount(w http.ResponseWriter, r *http.Request) {
 		updated, err := auth.UpdateProfile(s.userPath, cur, username, email)
 		if err != nil {
 			log.Printf("保存管理员账号失败: %v", err)
-			fail(w, http.StatusInternalServerError, "保存账号失败: "+err.Error())
+			// 不把内部错误回显给客户端：saveUser 的错误是 *os.PathError，
+			// 会把 admin-user.json 的绝对路径与文件系统细节泄露出去。
+			fail(w, http.StatusInternalServerError, "保存账号失败")
 			return
 		}
 		s.setUser(updated)
@@ -170,7 +172,7 @@ func (s *Server) handleAdminAccountPassword(w http.ResponseWriter, r *http.Reque
 			return
 		case err != nil:
 			log.Printf("保存管理员密码失败: %v", err)
-			fail(w, http.StatusInternalServerError, "保存密码失败: "+err.Error())
+			fail(w, http.StatusInternalServerError, "保存密码失败")
 			return
 		}
 		s.setUser(updated)
@@ -261,6 +263,10 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 			fail(w, http.StatusForbidden, "当前密码不正确")
 			return
 		}
+		// ★ 必须在启用/停用（会递增会话版本）之前判断来源：
+		// 版本一涨，请求里携带的旧 Cookie 立刻失配，事后再调用 sessionOK
+		// 会得到 false，于是浏览器用户虽然成功启用 2FA 却被登出。
+		viaSession := s.sessionOK(r)
 		switch in.Action {
 		case "setup":
 			if current.TOTPEnabled {
@@ -269,12 +275,14 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 			}
 			secret, err := auth.NewTOTPSecret()
 			if err != nil {
-				fail(w, http.StatusInternalServerError, err.Error())
+				log.Printf("生成 TOTP 密钥失败: %v", err)
+				fail(w, http.StatusInternalServerError, "生成 TOTP 密钥失败")
 				return
 			}
 			updated, err := auth.UpdateTOTP(s.userPath, current, secret, false)
 			if err != nil {
-				fail(w, http.StatusInternalServerError, "保存 TOTP 密钥失败: "+err.Error())
+				log.Printf("保存 TOTP 密钥失败: %v", err)
+				fail(w, http.StatusInternalServerError, "保存 TOTP 密钥失败")
 				return
 			}
 			s.setUser(updated)
@@ -301,12 +309,14 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 			}
 			updated, err := auth.UpdateTOTP(s.userPath, current, current.TOTPSecret, true)
 			if err != nil {
-				fail(w, http.StatusInternalServerError, "启用 TOTP 失败: "+err.Error())
+				log.Printf("启用 TOTP 失败: %v", err)
+				fail(w, http.StatusInternalServerError, "启用 TOTP 失败")
 				return
 			}
 			s.setUser(updated)
 			log.Printf("管理员已启用 TOTP user=%s ip=%s", updated.Username, clientIP(r, s.trustedProxies))
-			s.accountResponse(w, r, updated, true)
+			// 只有浏览器会话需要换发 Cookie；用 API 令牌调用时不该收到 Set-Cookie。
+			s.accountResponse(w, r, updated, viaSession)
 		case "disable":
 			// 停用同样消费一次性动态码：否则同一个码可以被反复用来试停用。
 			cur, err := s.consumeTOTPLocked(current, in.Code)
@@ -316,12 +326,13 @@ func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) 
 			}
 			updated, err := auth.UpdateTOTP(s.userPath, cur, "", false)
 			if err != nil {
-				fail(w, http.StatusInternalServerError, "停用 TOTP 失败: "+err.Error())
+				log.Printf("停用 TOTP 失败: %v", err)
+				fail(w, http.StatusInternalServerError, "停用 TOTP 失败")
 				return
 			}
 			s.setUser(updated)
 			log.Printf("管理员已停用 TOTP user=%s ip=%s", updated.Username, clientIP(r, s.trustedProxies))
-			s.accountResponse(w, r, updated, true)
+			s.accountResponse(w, r, updated, viaSession)
 		default:
 			fail(w, http.StatusBadRequest, "action 必须是 setup / enable / disable")
 		}

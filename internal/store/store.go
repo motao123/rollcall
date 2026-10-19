@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/motao/rollcall/internal/agentwire"
 	"sort"
@@ -1452,6 +1453,35 @@ func (s *Store) GetSetting(key string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.settings[key]
+}
+
+// SettingKeys 返回指定前缀的设置键（副本）。
+// 供运行期标记（如报告去重键）做定期清理，避免状态文件无界增长。
+func (s *Store) SettingKeys(prefix string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, 8)
+	for k := range s.settings {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// DeleteSetting 删除一个设置键，返回是否确实删除。
+// 与 SetSetting 一样主动请求落盘，避免清理结果在下一次重启后"复活"。
+func (s *Store) DeleteSetting(key string) bool {
+	s.mu.Lock()
+	_, ok := s.settings[key]
+	if ok {
+		delete(s.settings, key)
+	}
+	s.mu.Unlock()
+	if ok {
+		s.RequestSave()
+	}
+	return ok
 }
 
 // DeleteRule 删除告警规则，并关闭其所有未恢复的告警。

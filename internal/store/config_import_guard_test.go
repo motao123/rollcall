@@ -122,3 +122,32 @@ func TestImportRejectsDuplicateAndDanglingRefs(t *testing.T) {
 		})
 	}
 }
+
+// TestExportSkipsOrphanRenewals 回归：
+// 节点删除后续费记录仍留在 s.renewals 里，导出时一并写出、导入时又被跳过，
+// 于是"导出→导入"会静默丢数据。导出侧跳过孤立记录，两边保持一致。
+func TestExportSkipsOrphanRenewals(t *testing.T) {
+	st := New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一"})
+	st.AddRenewal(&model.Renewal{ID: "rn1", NodeID: "n1", At: "2026-11-01", Amount: 10, Currency: "USD"})
+	st.AddRenewal(&model.Renewal{ID: "rn2", NodeID: "ghost", At: "2026-12-01", Amount: 20, Currency: "USD"})
+
+	raw, err := st.ExportConfig()
+	if err != nil {
+		t.Fatalf("导出失败: %v", err)
+	}
+	if strings.Contains(string(raw), "ghost") {
+		t.Fatal("孤立续费记录（节点已删除）不应出现在备份里")
+	}
+	if !strings.Contains(string(raw), "rn1") {
+		t.Fatal("正常续费记录丢失")
+	}
+
+	dst := New(t.TempDir())
+	if err := dst.ImportConfig(raw); err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+	if rows := dst.Renewals("n1"); len(rows) != 1 || rows[0].ID != "rn1" {
+		t.Fatalf("往返后续费记录不正确: %+v", rows)
+	}
+}

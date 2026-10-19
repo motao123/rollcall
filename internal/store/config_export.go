@@ -67,6 +67,11 @@ func (s *Store) ExportConfig() ([]byte, error) {
 		out.Silences = append(out.Silences, &cp)
 	}
 	for _, rn := range s.renewals {
+		// 节点已删除的续费记录不再导出：导入侧同样会跳过这类记录
+		// （见 ImportConfig），两边保持一致，避免"导出→导入"静默丢数据。
+		if _, ok := s.nodes[rn.NodeID]; !ok {
+			continue
+		}
 		cp := *rn
 		out.Renewals = append(out.Renewals, &cp)
 	}

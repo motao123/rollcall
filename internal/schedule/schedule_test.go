@@ -169,3 +169,56 @@ func TestReportCatchUpAfterScheduledHour(t *testing.T) {
 		t.Error("错过报告时刻后当月 1 日内应补发月报")
 	}
 }
+
+// TestPruneReportMarkers 回归：
+// 去重键每期一个且永不过期，长期运行会让 settings 无界增长。
+// 清理只应删除过期的 report.* 键，不能碰其它设置，也不能误删格式异常的键。
+func TestPruneReportMarkers(t *testing.T) {
+	st := store.New(t.TempDir())
+	now := time.Date(2026, 10, 19, 10, 0, 0, 0, time.Local)
+
+	stale := []string{
+		"report.daily.2025-01-01",
+		"report.weekly.2023-W05",
+		"report.monthly.2023-01",
+	}
+	fresh := []string{
+		"report.daily." + now.Format("2006-01-02"),
+		"report.weekly.2026-W42",
+		"report.monthly.2026-10",
+	}
+	for _, k := range append(append([]string{}, stale...), fresh...) {
+		st.SetSetting(k, "1")
+	}
+	st.SetSetting("theme", `{"mode":"dark"}`)
+	st.SetSetting("report.weekly.garbage", "1") // 格式异常：保持原样，不误删
+
+	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+	r.pruneReportMarkers(now)
+
+	for _, k := range stale {
+		if st.GetSetting(k) != "" {
+			t.Errorf("过期标记未清理: %s", k)
+		}
+	}
+	for _, k := range fresh {
+		if st.GetSetting(k) == "" {
+			t.Errorf("当期标记被误删: %s", k)
+		}
+	}
+	if st.GetSetting("theme") == "" {
+		t.Error("非 report 前缀的设置被误删")
+	}
+	if st.GetSetting("report.weekly.garbage") == "" {
+		t.Error("格式异常的键应原样保留")
+	}
+
+	// 接线验证：expiryTick 必须真的调用清理（否则清理永远不会发生）
+	wired := store.New(t.TempDir())
+	wired.SetSetting("report.daily.2000-01-01", "1")
+	wired.SetSetting("notify", `{"enabled":false}`)
+	New(wired, outbox.New(wired, outbox.DefaultConfig()), Config{}).expiryTick()
+	if wired.GetSetting("report.daily.2000-01-01") != "" {
+		t.Error("expiryTick 未触发报告标记清理")
+	}
+}

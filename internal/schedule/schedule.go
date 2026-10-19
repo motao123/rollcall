@@ -5,6 +5,7 @@ package schedule
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,7 +85,56 @@ func (r *Runner) notifyCfg() *notify.Config {
 	return cfg
 }
 
+// pruneReportMarkers 清理过期的报告去重键。
+//
+// 去重键是 report.daily.YYYY-MM-DD / report.weekly.YYYY-Www / report.monthly.YYYY-MM，
+// 每期一个且永不过期，长期运行会让 settings 无界增长（也拖慢快照序列化）。
+// 去重只需要当期键，因此保留近两年、更早的删除。
+func (r *Runner) pruneReportMarkers(now time.Time) {
+	const dailyPrefix = "report.daily."
+	dailyCut := now.AddDate(0, 0, -120).Format("2006-01-02")
+	for _, k := range r.st.SettingKeys(dailyPrefix) {
+		if v := strings.TrimPrefix(k, dailyPrefix); v != k && v < dailyCut {
+			r.st.DeleteSetting(k)
+		}
+	}
+
+	const monthPrefix = "report.monthly."
+	monthCut := now.AddDate(-2, 0, 0).Format("2006-01")
+	for _, k := range r.st.SettingKeys(monthPrefix) {
+		if v := strings.TrimPrefix(k, monthPrefix); v != k && v < monthCut {
+			r.st.DeleteSetting(k)
+		}
+	}
+
+	const weekPrefix = "report.weekly."
+	cy, cw := now.AddDate(-2, 0, 0).ISOWeek()
+	cut := cy*100 + cw
+	for _, k := range r.st.SettingKeys(weekPrefix) {
+		y, w, ok := parseISOWeekKey(strings.TrimPrefix(k, weekPrefix))
+		if ok && y*100+w < cut {
+			r.st.DeleteSetting(k)
+		}
+	}
+}
+
+// parseISOWeekKey 解析 "2025-W01"；格式不符时 ok=false（保持原样，不误删）。
+func parseISOWeekKey(v string) (year, week int, ok bool) {
+	if len(v) != 8 || v[4] != '-' || v[5] != 'W' {
+		return 0, 0, false
+	}
+	y, err1 := strconv.Atoi(v[:4])
+	w, err2 := strconv.Atoi(v[6:])
+	if err1 != nil || err2 != nil || y < 2000 || w < 1 || w > 53 {
+		return 0, 0, false
+	}
+	return y, w, true
+}
+
 func (r *Runner) expiryTick() {
+	// 顺带清理报告去重键（每小时一次即可，这里按 10 分钟节流调用，成本极低）
+	r.pruneReportMarkers(time.Now())
+
 	cfg := r.notifyCfg()
 	if cfg == nil || !cfg.Enabled || cfg.ExpiryDays < 0 {
 		return
