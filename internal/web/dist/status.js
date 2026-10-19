@@ -210,13 +210,20 @@
       'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>';
   }
 
-  // 详情页面积图，带网格、纵轴刻度和最后一个点。
+  // 纵轴刻度用 HTML 渲染：SVG 会随容器横向拉伸，文字放在 SVG 里会跟着变形。
+  function plotHTML(axis, wide, svg) {
+    return '<div class="plot' + (wide ? ' wide' : '') + '">' +
+      '<div class="y-axis">' + axis + '</div>' +
+      '<div class="plot-area">' + svg + '</div></div>';
+  }
+
+  // 详情页面积图，带网格和纵轴刻度。
   function areaSVG(points, color, opt) {
     opt = opt || {};
-    var w = 640, h = 150, padL = 44, padR = 8, padT = 10, padB = 20;
+    var w = 640, h = 150, padR = 8, padT = 10, padB = 20;
     var vals = validValues(points);
     if (vals.length < 2) return '<div class="empty" style="padding:16px 0">暂无数据</div>';
-    var iw = w - padL - padR, ih = h - padT - padB;
+    var iw = w - padR, ih = h - padT - padB;
     var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
     var span = max - min;
     if (span < 0.0001) span = 1;
@@ -225,7 +232,7 @@
     if (min === max) max = min + 1;
     var y = function (v) { return padT + ih - ((v - min) / (max - min)) * ih; };
     var step = iw / (vals.length - 1);
-    var pts = vals.map(function (v, i) { return { x: padL + i * step, y: y(v) }; });
+    var pts = vals.map(function (v, i) { return { x: i * step, y: y(v) }; });
     var d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
     for (var i = 1; i < pts.length; i++) {
       var prev = pts[i - 1], cur = pts[i];
@@ -233,19 +240,18 @@
       d += ' C' + mx.toFixed(1) + ',' + prev.y.toFixed(1) + ' ' + mx.toFixed(1) + ',' +
         cur.y.toFixed(1) + ' ' + cur.x.toFixed(1) + ',' + cur.y.toFixed(1);
     }
-    var area = d + ' L' + (padL + iw).toFixed(1) + ',' + (padT + ih) + ' L' + padL + ',' + (padT + ih) + ' Z';
+    var area = d + ' L' + iw.toFixed(1) + ',' + (padT + ih) + ' L0,' + (padT + ih) + ' Z';
     var gid = 'ag' + Math.random().toString(36).slice(2, 9);
-    var grid = '';
+    var grid = '', axis = '';
     for (var g = 0; g <= 3; g++) {
       var gv = min + ((max - min) / 3) * g;
       var gy = y(gv);
-      grid += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (w - padR) +
-        '" y2="' + gy.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>' +
-        '<text x="' + (padL - 7) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="9" ' +
-        'fill="var(--fg3)" font-family="ui-monospace,monospace">' +
-        esc(opt.fmt ? opt.fmt(gv) : gv.toFixed(0)) + '</text>';
+      grid += '<line x1="0" y1="' + gy.toFixed(1) + '" x2="' + (w - padR) +
+        '" y2="' + gy.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>';
+      axis += '<span style="top:' + (gy / h * 100).toFixed(2) + '%">' +
+        esc(opt.fmt ? opt.fmt(gv) : gv.toFixed(0)) + '</span>';
     }
-    return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
       '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">' +
       '<stop offset="0%" stop-color="' + color + '" stop-opacity=".22"/>' +
       '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/></linearGradient></defs>' +
@@ -253,12 +259,13 @@
       '<path d="' + area + '" fill="url(#' + gid + ')"/>' +
       '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.8" ' +
       'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>';
+    return plotHTML(axis, false, svg);
   }
 
   // 双曲线图：网络下行/上行共用一个 Y 轴。
   function multiAreaSVG(seriesList, colors, opt) {
     opt = opt || {};
-    var w = 640, h = 150, padL = 58, padR = 8, padT = 10, padB = 20;
+    var w = 640, h = 150, padR = 8, padT = 10, padB = 20;
     var all = [];
     var prepared = (seriesList || []).map(function (points) {
       var vals = validValues(points);
@@ -270,25 +277,23 @@
     var min = 0;
     if (max <= 0) max = 1;
     max = max * 1.15;
-    var iw = w - padL - padR, ih = h - padT - padB;
+    var iw = w - padR, ih = h - padT - padB;
     var y = function (v) { return padT + ih - ((v - min) / (max - min)) * ih; };
-    var gid0 = 'mg' + Math.random().toString(36).slice(2, 9);
-    var grid = '';
+    var grid = '', axis = '';
     for (var g = 0; g <= 3; g++) {
       var gv = min + ((max - min) / 3) * g;
       var gy = y(gv);
-      grid += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (w - padR) +
-        '" y2="' + gy.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>' +
-        '<text x="' + (padL - 7) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="9" ' +
-        'fill="var(--fg3)" font-family="ui-monospace,monospace">' +
-        esc(opt.fmt ? opt.fmt(gv) : gv.toFixed(0)) + '</text>';
+      grid += '<line x1="0" y1="' + gy.toFixed(1) + '" x2="' + (w - padR) +
+        '" y2="' + gy.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>';
+      axis += '<span style="top:' + (gy / h * 100).toFixed(2) + '%">' +
+        esc(opt.fmt ? opt.fmt(gv) : gv.toFixed(0)) + '</span>';
     }
     var defs = '<defs>';
     var paths = '';
     prepared.forEach(function (vals, idx) {
       if (vals.length < 2) return;
       var step = iw / (vals.length - 1);
-      var pts = vals.map(function (v, i) { return { x: padL + i * step, y: y(v) }; });
+      var pts = vals.map(function (v, i) { return { x: i * step, y: y(v) }; });
       var d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
       for (var i = 1; i < pts.length; i++) {
         var prev = pts[i - 1], cur = pts[i];
@@ -300,14 +305,15 @@
       defs += '<linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">' +
         '<stop offset="0%" stop-color="' + colors[idx] + '" stop-opacity=".18"/>' +
         '<stop offset="100%" stop-color="' + colors[idx] + '" stop-opacity="0"/></linearGradient>';
-      paths += '<path d="' + d + ' L' + (padL + iw).toFixed(1) + ',' + (padT + ih) + ' L' + padL + ',' +
+      paths += '<path d="' + d + ' L' + iw.toFixed(1) + ',' + (padT + ih) + ' L0,' +
         (padT + ih) + ' Z" fill="url(#' + gid + ')"/>' +
         '<path d="' + d + '" fill="none" stroke="' + colors[idx] + '" stroke-width="1.8" ' +
         'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
     });
     defs += '</defs>';
-    return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
       defs + grid + paths + '</svg>';
+    return plotHTML(axis, true, svg);
   }
 
   function ringSVG(pct, color) {
@@ -1288,24 +1294,33 @@ function detailTitle(n) {
     if (n.group) meta.push('分组 ' + esc(n.group));
     if (n.region) meta.push('地区 ' + esc(n.region));
     if (n.provider) meta.push('服务商 ' + esc(n.provider));
-    if (dt.lastSeen) meta.push('最后上报 ' + esc(timeAgo(dt.lastSeen)));
+    var rings = ringsHTML(dt);
+    var infoHTML = infoCells(dt);
+    var body = '';
+    if (rings || infoHTML) {
+      body = '<div class="dhead-body' + (rings && infoHTML ? '' : ' solo') + '">' +
+        rings +
+        (infoHTML ? '<div class="dhead-info"><div class="dhead-info-h">当前状态' +
+          '<span>最近一次上报</span></div>' + infoHTML + '</div>' : '') +
+      '</div>';
+    }
     return '<section class="card detail-card">' +
       '<div class="dhead">' +
         '<div class="dhead-main">' +
           '<div class="kicker">节点详情</div>' +
-          '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+          '<div class="dhead-title">' +
             '<span class="nc-dot ' + (info.dot === 'ok' ? 'ok' : info.dot) + '"></span>' +
             '<h2>' + esc(n.name || '节点') + '</h2>' +
             '<span class="state-badge ' + badge + '">' + esc(stateLabel) + '</span>' +
           '</div>' +
-          '<div class="dmeta">' + meta.join('　') + '</div>' +
+          (meta.length ? '<div class="dmeta">' + meta.join('　') + '</div>' : '') +
         '</div>' +
         '<div class="dhead-side">' +
           '<span class="big ' + upcls + '">' + (up != null ? fixed(up, 1) + '%' : '—') + '</span>' +
           '<span class="lbl">24 小时可用率</span>' +
         '</div>' +
       '</div>' +
-      ringsHTML(dt) +
+      body +
     '</section>';
   }
 
@@ -1373,7 +1388,7 @@ function detailTitle(n) {
   function pctAxisFmt(points) {
     var vals = validValues(points);
     var span = vals.length ? Math.max.apply(null, vals) - Math.min.apply(null, vals) : 0;
-    var d = span < 3 ? 1 : 0;
+    var d = span < 0.3 ? 2 : span < 3 ? 1 : 0;
     return function (x) { return fixed(x, d) + '%'; };
   }
 
@@ -1404,11 +1419,15 @@ function detailTitle(n) {
         '<div class="legend"><span><i style="background:var(--accent-2)"></i>下行</span>' +
         '<span><i style="background:var(--violet)"></i>上行</span></div></div>');
     }
-    if (!charts.length) charts.push('<div class="empty">当前展示配置下没有可公开的趋势数据</div>');
-    return '<section class="card"><div class="card-h"><h2>性能趋势</h2>' +
-      '<div class="range-tabs" role="group" aria-label="趋势区间">' +
-        rangeBtn('24h', '24 小时') + rangeBtn('7d', '7 天') + rangeBtn('30d', '30 天') +
-      '</div></div>' + charts.join('') + '</section>';
+    var tabs = '<div class="range-tabs" role="group" aria-label="趋势区间">' +
+      rangeBtn('24h', '24 小时') + rangeBtn('7d', '7 天') + rangeBtn('30d', '30 天') +
+    '</div>';
+    if (!charts.length) {
+      return '<section class="card"><div class="card-h"><h2>性能趋势</h2>' + tabs + '</div>' +
+        '<div class="empty">当前展示配置下没有可公开的趋势数据</div></section>';
+    }
+    return '<section class="card"><div class="card-h"><h2>性能趋势</h2>' + tabs + '</div>' +
+      '<div class="chart-grid">' + charts.join('') + '</div></section>';
   }
 
   function rangeBtn(key, label) {
@@ -1460,17 +1479,11 @@ function detailTitle(n) {
   }
 
   function detailHTML(dt) {
-    var info = infoCells(dt);
-    var host = hostHTML(dt);
-    var right = (info ? '<section class="card"><div class="card-h"><h2>当前状态</h2>' +
-      '<span class="hint">最近一次上报</span></div>' + info + '</section>' : '') +
-      host + servicesHTML(dt);
+    var bottom = availabilityHTML(dt) + servicesHTML(dt) + hostHTML(dt);
     return '<a class="back" href="#/">← 返回总览</a>' +
       detailHeaderHTML(dt) +
-      '<div class="detail-grid">' +
-        '<div class="detail-col">' + trendsHTML(dt) + availabilityHTML(dt) + '</div>' +
-        '<div class="detail-col">' + right + '</div>' +
-      '</div>';
+      trendsHTML(dt) +
+      (bottom ? '<div class="detail-bottom">' + bottom + '</div>' : '');
   }
 
   // 只在从列表进入详情页时显示加载骨架；切换 7d/30d 时保留旧图，
