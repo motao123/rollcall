@@ -42,23 +42,40 @@ type statusNodePub struct {
 	// README 承诺公开页「不含节点 ID」：内部 ID 会泄露资产台账规模与
 	// 内部命名，还会被拿去试探 /api/report 等需要令牌的接口。
 	// 句柄由 store.PublicHandle 用持久化盐值派生，可点击、不可逆推。
-	HID      string        `json:"hid"`
-	Name     string        `json:"name"`
-	Group    string        `json:"group"`
-	Online   bool          `json:"online"`
-	State    string        `json:"state"`
-	CPU      float64       `json:"cpu"`
-	Mem      float64       `json:"mem"`
-	Disk     float64       `json:"disk"`
-	Up       uint64        `json:"uptime"`
-	Uptime24 float64       `json:"uptime24"`
-	Bars     []statusBar   `json:"bars"`
-	Spark    []model.Point `json:"spark,omitempty"` // 24h CPU 迷你曲线（降采样）
-	Load1    float64       `json:"load1,omitempty"`
-	NetRx    uint64        `json:"netRx,omitempty"` // B/s
-	NetTx    uint64        `json:"netTx,omitempty"` // B/s
-	Region   string        `json:"region,omitempty"`
-	Provider string        `json:"provider,omitempty"`
+	HID       string        `json:"hid"`
+	Name      string        `json:"name"`
+	Group     string        `json:"group"`
+	Online    bool          `json:"online"`
+	State     string        `json:"state"`
+	CPU       float64       `json:"cpu"`
+	Mem       float64       `json:"mem"`
+	Disk      float64       `json:"disk"`
+	Up        uint64        `json:"uptime"`
+	Uptime24  float64       `json:"uptime24"`
+	Bars      []statusBar   `json:"bars"`
+	Spark     []model.Point `json:"spark,omitempty"` // 24h CPU 迷你曲线（降采样）
+	LastSeen  int64         `json:"lastSeen"`        // 最后上报时间；离线卡片的"最后在线"提示
+	Load1     *float64      `json:"load1,omitempty"` // 以下可选字段全部受 Visibility 控制
+	Load5     *float64      `json:"load5,omitempty"` // 用指针区分「未开启」与「真实 0.00」
+	Load15    *float64      `json:"load15,omitempty"`
+	NetRx     uint64        `json:"netRx,omitempty"` // B/s
+	NetTx     uint64        `json:"netTx,omitempty"` // B/s
+	TotRx     uint64        `json:"totalRx,omitempty"`
+	TotTx     uint64        `json:"totalTx,omitempty"`
+	MemUsed   uint64        `json:"memUsed,omitempty"`
+	MemTotal  uint64        `json:"memTotal,omitempty"`
+	DiskUsed  uint64        `json:"diskUsed,omitempty"`
+	DiskTotal uint64        `json:"diskTotal,omitempty"`
+	SwapUsed  uint64        `json:"swapUsed,omitempty"`
+	SwapTotal uint64        `json:"swapTotal,omitempty"`
+	Procs     int           `json:"procs,omitempty"`
+	TCPConn   int           `json:"tcpConn,omitempty"`
+	Cores     int           `json:"cores,omitempty"`
+	OS        string        `json:"os,omitempty"`
+	Arch      string        `json:"arch,omitempty"`
+	Virt      string        `json:"virt,omitempty"`
+	Region    string        `json:"region,omitempty"`
+	Provider  string        `json:"provider,omitempty"`
 	// MaintenanceTitle 非空表示该节点正在计划维护中。
 	// 前端据此把状态点换成"维护中"并抑制"离线"措辞。
 	MaintenanceTitle string `json:"maintenanceTitle,omitempty"`
@@ -376,6 +393,57 @@ func netRates(series []model.Metrics) (rx, tx uint64) {
 	return drx / uint64(dt), dtx / uint64(dt)
 }
 
+// ---------- 图表区间与服务延迟 ----------
+
+// parseStatusRange 把公开详情页的 range 参数映射到数据源。
+// 24h 用原始点，7d/30d 用聚合层：聚合层点数可控，也避免把
+// 86400 个原始点直接塞进响应体。
+func parseStatusRange(raw string, now int64) (key, resolution string, since, bucket int64) {
+	switch raw {
+	case "7d":
+		return "7d", store.HistoryResolution5m, now - 7*86400, 300
+	case "30d":
+		return "30d", store.HistoryResolution1h, now - 30*86400, 3600
+	default:
+		return "24h", "", now - 86400, 0
+	}
+}
+
+// downsamplePoints 按等间距抽点，保留首尾。图表宽度只有几百像素，
+// 超过上限的点画不出更多信息，只会增加传输与 SVG 节点开销。
+func downsamplePoints(in []model.Point, max int) []model.Point {
+	if max < 2 || len(in) <= max {
+		return in
+	}
+	out := make([]model.Point, 0, max)
+	step := float64(len(in)-1) / float64(max-1)
+	for i := 0; i < max; i++ {
+		out = append(out, in[int(math.Round(float64(i)*step))])
+	}
+	return out
+}
+
+// serviceLatencyPoints 从探测历史中提取成功样本的延迟曲线。
+// 失败探测的延迟为 0，混进曲线会把"请求失败"画成"延迟极低"，
+// 失败率单独由 uptime 推导。
+func serviceLatencyPoints(hist [][3]int64, now int64, max int) ([]model.Point, float64, int) {
+	since := now - 86400
+	pts := make([]model.Point, 0, 64)
+	sum := float64(0)
+	for _, h := range hist {
+		if h[0] < since || h[2] != 1 {
+			continue
+		}
+		pts = append(pts, model.Point{T: h[0], V: float64(h[1])})
+		sum += float64(h[1])
+	}
+	if len(pts) == 0 {
+		return nil, 0, 0
+	}
+	avg := sum / float64(len(pts))
+	return downsamplePoints(pts, max), avg, len(pts)
+}
+
 // ---------- 节点详情（公开） ----------
 
 // handleStatusNode 返回单个节点在公开页上的详情。
@@ -407,32 +475,37 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	id := n.ID
 
 	now := time.Now().Unix()
+	rangeKey, rangeResolution, rangeSince, rangeBucket := parseStatusRange(r.URL.Query().Get("range"), now)
 	m, ts, _ := s.st.Latest(id)
 	state := store.NodeState(ts, now)
 	_, maintNodes := s.st.MaintenanceAt(now)
 	vis := cfg.Visibility
 
+	// 使用率/负载/运行时间/流量即使在恰好为 0 时也要下发：
+	// 对公开页来说"0%"是一个有意义的读数，不能和"未开启"混为一谈。
+	// 负载用指针 + omitempty：关闭时不出现，开启时即使为 0.00 也保留。
+	// 进程数、TCP、Swap、核心数属于指纹类信息，保持关闭时彻底省略。
 	type latestOut struct {
-		CPU       float64 `json:"cpu,omitempty"`
-		MemPct    float64 `json:"memPct,omitempty"`
-		DiskPct   float64 `json:"diskPct,omitempty"`
-		Load1     float64 `json:"load1,omitempty"`
-		Load5     float64 `json:"load5,omitempty"`
-		Load15    float64 `json:"load15,omitempty"`
-		Uptime    uint64  `json:"uptime,omitempty"`
-		Procs     int     `json:"procs,omitempty"`
-		TCPConn   int     `json:"tcpConn,omitempty"`
-		NetRx     uint64  `json:"netRx,omitempty"` // B/s
-		NetTx     uint64  `json:"netTx,omitempty"` // B/s
-		TotRx     uint64  `json:"totRx,omitempty"`
-		TotTx     uint64  `json:"totTx,omitempty"`
-		MemUsed   uint64  `json:"memUsed,omitempty"`
-		MemTotal  uint64  `json:"memTotal,omitempty"`
-		DiskUsed  uint64  `json:"diskUsed,omitempty"`
-		DiskTotal uint64  `json:"diskTotal,omitempty"`
-		SwapUsed  uint64  `json:"swapUsed,omitempty"`
-		SwapTotal uint64  `json:"swapTotal,omitempty"`
-		Cores     int     `json:"cores,omitempty"`
+		CPU       float64  `json:"cpu"`
+		MemPct    float64  `json:"memPct"`
+		DiskPct   float64  `json:"diskPct"`
+		Load1     *float64 `json:"load1,omitempty"`
+		Load5     *float64 `json:"load5,omitempty"`
+		Load15    *float64 `json:"load15,omitempty"`
+		Uptime    uint64   `json:"uptime"`
+		Procs     int      `json:"procs,omitempty"`
+		TCPConn   int      `json:"tcpConn,omitempty"`
+		NetRx     uint64   `json:"netRx"` // B/s
+		NetTx     uint64   `json:"netTx"` // B/s
+		TotRx     uint64   `json:"totRx"`
+		TotTx     uint64   `json:"totTx"`
+		MemUsed   uint64   `json:"memUsed"`
+		MemTotal  uint64   `json:"memTotal"`
+		DiskUsed  uint64   `json:"diskUsed"`
+		DiskTotal uint64   `json:"diskTotal"`
+		SwapUsed  uint64   `json:"swapUsed,omitempty"`
+		SwapTotal uint64   `json:"swapTotal,omitempty"`
+		Cores     int      `json:"cores,omitempty"`
 	}
 	var lo latestOut
 	if vis.Metrics {
@@ -443,7 +516,7 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		lo.DiskUsed, lo.DiskTotal = m.DiskUsed, m.DiskTotal
 	}
 	if vis.Load {
-		lo.Load1, lo.Load5, lo.Load15 = round2(m.Load1), round2(m.Load5), round2(m.Load15)
+		lo.Load1, lo.Load5, lo.Load15 = floatPtr(round2(m.Load1)), floatPtr(round2(m.Load5)), floatPtr(round2(m.Load15))
 	}
 	if vis.Uptime {
 		lo.Uptime = m.Uptime
@@ -493,47 +566,79 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		host["virt"] = h.Virt
 	}
 
-	// 24h 曲线：从原始序列取，最多降采样到 ~120 点，
-	// 再多前端也画不出来，只会拖慢首屏。
-	series := s.st.Series(id, now-86400)
-	step := 1
-	if len(series) > 120 {
-		step = len(series) / 120
-	}
-	cpu, mem, disk, nrx, ntx := make([]model.Point, 0, 128), make([]model.Point, 0, 128), make([]model.Point, 0, 128), make([]model.Point, 0, 128), make([]model.Point, 0, 128)
-	for i := 0; i < len(series); i += step {
-		p := series[i]
-		if vis.Metrics {
-			cpu = append(cpu, model.Point{T: p.TS, V: round1(p.CPUPct)})
-			mem = append(mem, model.Point{T: p.TS, V: round1(pctF(p.MemUsed, p.MemTotal))})
-			disk = append(disk, model.Point{T: p.TS, V: round1(pctF(p.DiskUsed, p.DiskTotal))})
-		}
-		if vis.Traffic && i > 0 {
-			prev := series[i-1]
-			dt := p.TS - prev.TS
-			if dt > 0 && p.NetRx >= prev.NetRx {
-				nrx = append(nrx, model.Point{T: p.TS, V: float64((p.NetRx - prev.NetRx) / uint64(dt))})
+	// 24h 原始序列既用于可用率色块，也是 24h 图表的来源。
+	// 7d/30d 改用聚合层，避免一次详情请求传输数万个原始点。
+	raw24 := s.st.Series(id, now-86400)
+	cpu := make([]model.Point, 0, 256)
+	mem := make([]model.Point, 0, 256)
+	disk := make([]model.Point, 0, 256)
+	nrx := make([]model.Point, 0, 256)
+	ntx := make([]model.Point, 0, 256)
+	if rangeKey == "24h" {
+		for i := 0; i < len(raw24); i++ {
+			p := raw24[i]
+			if vis.Metrics {
+				cpu = append(cpu, model.Point{T: p.TS, V: round1(p.CPUPct)})
+				mem = append(mem, model.Point{T: p.TS, V: round1(pctF(p.MemUsed, p.MemTotal))})
+				disk = append(disk, model.Point{T: p.TS, V: round1(pctF(p.DiskUsed, p.DiskTotal))})
 			}
-			if dt > 0 && p.NetTx >= prev.NetTx {
-				ntx = append(ntx, model.Point{T: p.TS, V: float64((p.NetTx - prev.NetTx) / uint64(dt))})
+			if vis.Traffic && i > 0 {
+				prev := raw24[i-1]
+				dt := p.TS - prev.TS
+				if dt > 0 && p.NetRx >= prev.NetRx {
+					nrx = append(nrx, model.Point{T: p.TS, V: float64((p.NetRx - prev.NetRx) / uint64(dt))})
+				}
+				if dt > 0 && p.NetTx >= prev.NetTx {
+					ntx = append(ntx, model.Point{T: p.TS, V: float64((p.NetTx - prev.NetTx) / uint64(dt))})
+				}
+			}
+		}
+	} else {
+		for _, p := range s.st.HistorySeries(id, rangeResolution, rangeSince) {
+			if p.Count == 0 {
+				continue
+			}
+			if vis.Metrics {
+				cpu = append(cpu, model.Point{T: p.TS, V: round1(p.CPUPct)})
+				mem = append(mem, model.Point{T: p.TS, V: round1(p.MemPct)})
+				disk = append(disk, model.Point{T: p.TS, V: round1(p.DiskPct)})
+			}
+			if vis.Traffic {
+				nrx = append(nrx, model.Point{T: p.TS, V: float64(p.NetRxDelta / uint64(rangeBucket))})
+				ntx = append(ntx, model.Point{T: p.TS, V: float64(p.NetTxDelta / uint64(rangeBucket))})
 			}
 		}
 	}
+	cpu, mem, disk = downsamplePoints(cpu, 240), downsamplePoints(mem, 240), downsamplePoints(disk, 240)
+	nrx, ntx = downsamplePoints(nrx, 240), downsamplePoints(ntx, 240)
 
-	// 该节点名下的服务探测
+	// 该节点名下的服务探测。
+	// 延迟曲线只保留成功样本；失败率由 24h 可用率反推，
+	// 与"把失败请求的 0ms 画进延迟曲线"严格区分。
 	svcs := make([]map[string]any, 0)
-	for _, sv := range s.st.Services() {
-		if sv.NodeID != id {
-			continue
+	if cfg.Blocks.Services {
+		for _, sv := range s.st.Services() {
+			if sv.NodeID != id {
+				continue
+			}
+			hist := s.st.ServiceSeries(sv.ID)
+			_, lat, ok, has := s.st.ServiceLast(sv.ID)
+			rate, rateHas := serviceUptime24(hist, now)
+			item := map[string]any{"name": sv.Name, "has": has, "uptime": round1(rate)}
+			if has {
+				item["ok"] = ok
+				item["latencyMs"] = lat
+			}
+			if rateHas {
+				item["failRate"] = round1(100 - rate)
+			}
+			if pts, avg, samples := serviceLatencyPoints(hist, now, 60); len(pts) > 0 {
+				item["latency"] = pts
+				item["avgLatency"] = round1(avg)
+				item["samples"] = samples
+			}
+			svcs = append(svcs, item)
 		}
-		_, lat, ok, has := s.st.ServiceLast(sv.ID)
-		rate, _ := serviceUptime24(s.st.ServiceSeries(sv.ID), now)
-		item := map[string]any{"name": sv.Name, "has": has, "uptime": round1(rate)}
-		if has {
-			item["ok"] = ok
-			item["latencyMs"] = lat
-		}
-		svcs = append(svcs, item)
 	}
 
 	node := map[string]any{
@@ -548,13 +653,13 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		node["provider"] = n.Provider
 	}
 
-	uptime24, bars := uptime24(series, now, state == model.NodeStateOnline)
+	uptime24, bars := uptime24(raw24, now, state == model.NodeStateOnline)
 	mTitle := ""
 	if m, ok := maintNodes[id]; ok && m != nil {
 		mTitle = m.Title
 	}
 
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"node":        node,
 		"host":        host,
 		"latest":      lo,
@@ -564,15 +669,23 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		"uptime24":    round1(uptime24),
 		"bars":        bars,
 		"maintenance": mTitle,
+		"range":       rangeKey,
 		"series":      map[string]any{"cpu": cpu, "mem": mem, "disk": disk, "netRx": nrx, "netTx": ntx},
-		"daily":       s.nodeDailyUptime(id, cfg.HistoryDays, now),
-		"services":    svcs,
 		"generatedAt": now,
 		"visibility":  vis,
-	})
+	}
+	if cfg.Blocks.History {
+		resp["daily"] = s.nodeDailyUptime(id, cfg.HistoryDays, now)
+	}
+	if cfg.Blocks.Services {
+		resp["services"] = svcs
+	}
+	writeJSON(w, 200, resp)
 }
 
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }
+
+func floatPtr(v float64) *float64 { return &v }
 
 // handleStatusIncidents 单独暴露事件时间线，便于详情页/前端按需加载。
 func (s *Server) handleStatusIncidents(w http.ResponseWriter, r *http.Request) {

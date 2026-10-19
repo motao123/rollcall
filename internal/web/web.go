@@ -934,11 +934,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// 服务公开视图：仅名称 + 最近状态 + 24h 可用率
 	type svcPub struct {
-		Name    string  `json:"name"`
-		OK      bool    `json:"ok"`
-		Has     bool    `json:"has"` // 是否已有探测数据
-		Uptime  float64 `json:"uptime"`
-		Latency int     `json:"latencyMs"`
+		Name         string        `json:"name"`
+		OK           bool          `json:"ok"`
+		Has          bool          `json:"has"` // 是否已有探测数据
+		Uptime       float64       `json:"uptime"`
+		FailRate     float64       `json:"failRate,omitempty"`
+		Latency      int           `json:"latencyMs"`
+		LatencySpark []model.Point `json:"latencySpark,omitempty"` // 24h 成功探测延迟
 	}
 
 	now := time.Now().Unix()
@@ -960,8 +962,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			Up:       v.Latest.Uptime,
 			Uptime24: round1(up),
 			Bars:     bars,
+			LastSeen: v.LastSeen,
 		}
-		if !vis.Metrics {
+		if vis.Metrics {
+			p.MemUsed, p.MemTotal = v.Latest.MemUsed, v.Latest.MemTotal
+			p.DiskUsed, p.DiskTotal = v.Latest.DiskUsed, v.Latest.DiskTotal
+		} else {
 			// 未开启指标公开时列表也不应带出数值：
 			// 前端拿不到就什么都不画，比下发 0 让人误以为"负载为零"更诚实。
 			p.CPU, p.Mem, p.Disk = 0, 0, 0
@@ -970,10 +976,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			p.Up = 0
 		}
 		if vis.Load {
-			p.Load1 = round2(v.Latest.Load1)
+			p.Load1 = floatPtr(round2(v.Latest.Load1))
+			p.Load5 = floatPtr(round2(v.Latest.Load5))
+			p.Load15 = floatPtr(round2(v.Latest.Load15))
 		}
 		if vis.Traffic {
 			p.NetRx, p.NetTx = netRates(series)
+			p.TotRx, p.TotTx = v.Latest.NetRx, v.Latest.NetTx
+		}
+		if vis.Swap {
+			p.SwapUsed, p.SwapTotal = v.Latest.SwapUsed, v.Latest.SwapTotal
+		}
+		if vis.Procs {
+			p.Procs = v.Latest.Procs
+		}
+		if vis.TCPConn {
+			p.TCPConn = v.Latest.TCPConn
+		}
+		if vis.Cores {
+			p.Cores = v.Host.Cores
+		}
+		if vis.OS {
+			p.OS = v.Host.OS
+		}
+		if vis.Arch {
+			p.Arch = v.Host.Arch
+		}
+		if vis.Virt {
+			p.Virt = v.Host.Virt
 		}
 		if vis.Region {
 			p.Region = v.Region
@@ -1003,12 +1033,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	svcOut := make([]svcPub, 0, len(svcs))
 	for _, sv := range svcs {
+		hist := s.st.ServiceSeries(sv.ID)
 		_, lat, ok, has := s.st.ServiceLast(sv.ID)
-		rate, _ := serviceUptime24(s.st.ServiceSeries(sv.ID), now)
+		rate, rateHas := serviceUptime24(hist, now)
 		sp := svcPub{Name: sv.Name, Uptime: round1(rate), Has: has}
 		if has {
 			sp.OK = ok
 			sp.Latency = lat
+		}
+		if rateHas {
+			sp.FailRate = round1(100 - rate)
+		}
+		if pts, _, _ := serviceLatencyPoints(hist, now, 24); len(pts) > 0 {
+			sp.LatencySpark = pts
 		}
 		svcOut = append(svcOut, sp)
 	}
@@ -1069,6 +1106,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["announcement"] = cfg.Announcement
 	}
 	resp["maintenance"] = maintenanceBanner(maintAll, maintNodes, s.st.Maintenances())
+	resp["visibility"] = vis
+	resp["blocks"] = cfg.Blocks
 	resp["generatedAt"] = now
 	writeJSON(w, 200, resp)
 }

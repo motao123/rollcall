@@ -64,6 +64,7 @@ func TestStatusDetailHidesDisabledFields(t *testing.T) {
 	cfg.Visibility.Procs = false
 	cfg.Visibility.TCPConn = false
 	cfg.Visibility.Swap = false
+	cfg.Visibility.Load = false
 	st.SetStatusPage(cfg)
 
 	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
@@ -89,7 +90,7 @@ func TestStatusDetailHidesDisabledFields(t *testing.T) {
 	if latest == nil {
 		t.Fatalf("latest 应为对象: %s", w.Body.String())
 	}
-	for _, k := range []string{"procs", "tcpConn", "swapUsed", "swapTotal", "cores"} {
+	for _, k := range []string{"procs", "tcpConn", "swapUsed", "swapTotal", "cores", "load1", "load5", "load15"} {
 		if _, ok := latest[k]; ok {
 			t.Errorf("可见性关闭后 latest.%s 仍被下发", k)
 		}
@@ -139,6 +140,221 @@ func TestStatusDetailShowsEnabledFields(t *testing.T) {
 		t.Error("kernel 未开启却仍被下发")
 	}
 	_ = st
+}
+
+// TestStatusDetailRangeTiers 确认 7d/30d 走聚合层、24h 走原始层。
+// 图表换区间不能悄悄退回 24h，否则用户以为在看一周数据，实际只有一天。
+func TestStatusDetailRangeTiers(t *testing.T) {
+	st, h := statusTestEnv(t)
+	now := time.Now().Unix()
+	for i := 0; i < 4; i++ {
+		ts := now - int64(6-2*i)*86400
+		st.AddMetrics("n1", model.HostInfo{}, model.Metrics{
+			TS: ts, CPUPct: float64(10 + i),
+			MemUsed: 100, MemTotal: 400, DiskUsed: 200, DiskTotal: 400,
+			NetRx: uint64(i) * 1024, NetTx: uint64(i) * 2048,
+		})
+	}
+
+	type seriesOut struct {
+		CPU []model.Point `json:"cpu"`
+	}
+	type detail struct {
+		Range  string    `json:"range"`
+		Series seriesOut `json:"series"`
+	}
+	get := func(q string) detail {
+		req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1")+q, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s 应 200，实际 %d: %s", q, w.Code, w.Body.String())
+		}
+		var out detail
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%s 响应不是合法 JSON: %v", q, err)
+		}
+		return out
+	}
+
+	for _, tc := range []struct {
+		query string
+		key   string
+		want  int
+	}{
+		{"", "24h", 1}, // 只有最后 24h 内的原始点
+		{"?range=7d", "7d", 4},
+		{"?range=30d", "30d", 4},
+		{"?range=bogus", "24h", 1},
+	} {
+		out := get(tc.query)
+		if out.Range != tc.key {
+			t.Errorf("%s 的 range=%q，期望 %q", tc.query, out.Range, tc.key)
+		}
+		if len(out.Series.CPU) != tc.want {
+			t.Errorf("%s 的 CPU 点数=%d，期望 %d", tc.query, len(out.Series.CPU), tc.want)
+		}
+	}
+}
+
+// TestServiceLatencyOnlyCountsSuccess 是延迟曲线的语义回归：
+// 失败探测的 latency 是 0，绝不能混入曲线（会显示成"延迟极低"）。
+func TestServiceLatencyOnlyCountsSuccess(t *testing.T) {
+	st, h := statusTestEnv(t)
+	now := time.Now().Unix()
+	st.UpsertService(&model.Service{
+		ID: "svc1", NodeID: "n1", Name: "站点", Type: "http",
+		Target: "http://127.0.0.1/healthz", Enabled: true,
+	})
+	st.AddServiceResult(model.ServiceResult{ServiceID: "svc1", TS: now - 120, OK: true, LatencyMs: 40})
+	st.AddServiceResult(model.ServiceResult{ServiceID: "svc1", TS: now - 60, OK: false, LatencyMs: 0})
+
+	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var detail struct {
+		Services []struct {
+			Name       string        `json:"name"`
+			Has        bool          `json:"has"`
+			OK         bool          `json:"ok"`
+			FailRate   float64       `json:"failRate"`
+			Latency    []model.Point `json:"latency"`
+			AvgLatency float64       `json:"avgLatency"`
+			Samples    int           `json:"samples"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(detail.Services) != 1 {
+		t.Fatalf("应返回 1 个服务，实际 %d", len(detail.Services))
+	}
+	sv := detail.Services[0]
+	if !sv.Has || sv.OK {
+		t.Errorf("最近一次探测应标记为失败: has=%v ok=%v", sv.Has, sv.OK)
+	}
+	if sv.FailRate != 50 {
+		t.Errorf("失败率应为 50，实际 %v", sv.FailRate)
+	}
+	if len(sv.Latency) != 1 || sv.Latency[0].V != 40 {
+		t.Errorf("延迟曲线应只含成功样本 40ms，实际 %#v", sv.Latency)
+	}
+	if sv.AvgLatency != 40 || sv.Samples != 1 {
+		t.Errorf("平均延迟/样本数错误: avg=%v samples=%d", sv.AvgLatency, sv.Samples)
+	}
+
+	// 列表接口的迷你曲线遵循同一规则。
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var list struct {
+		Services []struct {
+			FailRate     float64       `json:"failRate"`
+			LatencySpark []model.Point `json:"latencySpark"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(list.Services) != 1 || len(list.Services[0].LatencySpark) != 1 ||
+		list.Services[0].LatencySpark[0].V != 40 || list.Services[0].FailRate != 50 {
+		t.Errorf("列表服务的延迟/失败率不正确: %#v", list.Services)
+	}
+}
+
+// TestStatusDetailRespectsBlockSwitches 区块关闭后详情接口不再下发对应数据。
+func TestStatusDetailRespectsBlockSwitches(t *testing.T) {
+	st, h := statusTestEnv(t)
+	cfg := model.DefaultStatusPage()
+	cfg.Blocks.Services = false
+	cfg.Blocks.History = false
+	st.SetStatusPage(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("详情应 200，实际 %d", w.Code)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	for _, k := range []string{"services", "daily"} {
+		if _, ok := out[k]; ok {
+			t.Errorf("区块关闭后 %s 仍被下发", k)
+		}
+	}
+}
+
+// TestStatusListVisibilityGatesMetadata 确认列表里的新增字段也逐项受开关控制。
+func TestStatusListVisibilityGatesMetadata(t *testing.T) {
+	st, h := statusTestEnv(t)
+	now := time.Now().Unix()
+	st.AddMetrics("n1", model.HostInfo{
+		Hostname: "web-01", OS: "Debian 12", Kernel: "6.1", Arch: "x86_64",
+		CPUModel: "X", Cores: 8, Virt: "KVM",
+	}, model.Metrics{
+		TS: now, CPUPct: 12, MemUsed: 512, MemTotal: 1024, DiskUsed: 256, DiskTotal: 1024,
+		NetRx: 4096, NetTx: 2048, Load1: 0.004, Uptime: 3600, Procs: 9, TCPConn: 3,
+		SwapUsed: 1, SwapTotal: 2,
+	})
+
+	findNode := func(body []byte) map[string]any {
+		var out struct {
+			Nodes      []map[string]any `json:"nodes"`
+			Visibility map[string]bool  `json:"visibility"`
+			Blocks     map[string]bool  `json:"blocks"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		if out.Visibility == nil || out.Blocks == nil {
+			t.Fatalf("响应应包含 visibility/blocks: %s", body)
+		}
+		for _, n := range out.Nodes {
+			if n["name"] == "节点一" {
+				return n
+			}
+		}
+		t.Fatalf("响应中缺少节点一: %s", body)
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	n := findNode(w.Body.Bytes())
+	for _, k := range []string{"os", "arch", "cores", "virt", "region", "provider", "hostname", "procs", "tcpConn", "swapUsed"} {
+		if _, ok := n[k]; ok {
+			t.Errorf("默认配置下列表泄露 %s", k)
+		}
+	}
+	// 负载可见时，真实读数恰好为 0.00 也必须下发（不能用"零值省略"）。
+	if v, ok := n["load1"]; !ok || v != float64(0) {
+		t.Errorf("负载为 0 时应下发 load1=0，实际 %v（存在=%v）", v, ok)
+	}
+
+	cfg := model.DefaultStatusPage()
+	cfg.Visibility.OS = true
+	cfg.Visibility.Arch = true
+	cfg.Visibility.Cores = true
+	cfg.Visibility.Virt = true
+	cfg.Visibility.Region = true
+	cfg.Visibility.Provider = true
+	cfg.Visibility.Procs = true
+	cfg.Visibility.TCPConn = true
+	cfg.Visibility.Swap = true
+	st.SetStatusPage(cfg)
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	n = findNode(w.Body.Bytes())
+	for _, k := range []string{"os", "arch", "cores", "virt", "region", "provider", "procs", "tcpConn", "swapUsed"} {
+		if _, ok := n[k]; !ok {
+			t.Errorf("开启后列表缺少 %s", k)
+		}
+	}
 }
 
 // TestStatusNodeDetailDisabled404 关闭"节点详情"区块后，
