@@ -15,10 +15,25 @@ type Node struct {
 	Price    float64 `json:"price"`    // 年付续费价格（月成本按 /12 估算）
 	Currency string  `json:"currency"` // USD / CNY
 	Weight   int     `json:"weight"`   // 排序权重，越小越靠前
+	// Country 是 ISO 3166-1 alpha-2 国家代码，用于公开页分布图。
+	// 留空表示不在地图上展示。
+	Country  string `json:"country,omitempty"`
+	Favorite bool   `json:"favorite,omitempty"`
+	// TrafficQuotaGB 是每个流量周期的配额（GB，0 表示不限制）。
+	// TrafficResetDay 是周期起始日（1–28，0 按 1 处理）。
+	TrafficQuotaGB  float64 `json:"trafficQuotaGb,omitempty"`
+	TrafficResetDay int     `json:"trafficResetDay,omitempty"`
 	// AgentVersion 是 Agent 最近一次上报的版本，由上报请求头写入，
 	// 台账 API 不能修改；用于面板提示落后的 Agent。
 	AgentVersion string `json:"agentVersion,omitempty"`
 	Token        string `json:"-"` // 上报凭证，永不下发给前端
+}
+
+// MountInfo 是一个文件系统的用量快照。
+type MountInfo struct {
+	Path  string `json:"path"`
+	Used  uint64 `json:"used"`
+	Total uint64 `json:"total"`
 }
 
 // HostInfo 是节点硬件与系统静态信息，由 Agent 首次上报后缓存。
@@ -50,6 +65,38 @@ type Metrics struct {
 	TCPConn   int     `json:"tcpConn"`
 	Uptime    uint64  `json:"uptime"` // 秒
 	Procs     int     `json:"procs"`
+	// DiskReadBytes / DiskWriteBytes 是累计磁盘 I/O 字节数。
+	DiskReadBytes  uint64      `json:"diskReadBytes,omitempty"`
+	DiskWriteBytes uint64      `json:"diskWriteBytes,omitempty"`
+	Mounts         []MountInfo `json:"mounts,omitempty"`
+	NICs           []NICInfo   `json:"nics,omitempty"`
+}
+
+// NICInfo 是单块网卡的累计流量。
+type NICInfo struct {
+	Name string `json:"name"`
+	Rx   uint64 `json:"rx"`
+	Tx   uint64 `json:"tx"`
+}
+
+// TrafficCycle 是一个流量周期的累计用量。
+// Agent 上报的 NetRx/NetTx 是自开机以来的累计值，重启会归零；
+// 这里保存上一次观察值与周期内累计增量，计数器归零时从零重新累加。
+type TrafficCycle struct {
+	Start  int64  `json:"start"` // 当前周期起点（Unix 秒）
+	LastRx uint64 `json:"lastRx"`
+	LastTx uint64 `json:"lastTx"`
+	UsedRx uint64 `json:"usedRx"`
+	UsedTx uint64 `json:"usedTx"`
+}
+
+// TrafficUsage 是节点当前流量周期的展示数据。
+type TrafficUsage struct {
+	UsedRx     uint64  `json:"usedRx"`
+	UsedTx     uint64  `json:"usedTx"`
+	QuotaGB    float64 `json:"quotaGb,omitempty"`
+	ResetDay   int     `json:"resetDay,omitempty"`
+	CycleStart int64   `json:"cycleStart,omitempty"`
 }
 
 // Report 是 Agent → Server 的单向上报载荷。
@@ -95,20 +142,73 @@ type AlertRule struct {
 	// NodeIDs / Groups 为空表示对全部节点生效；非空时按「节点 ID 或分组」匹配。
 	NodeIDs []string `json:"nodeIds,omitempty"`
 	Groups  []string `json:"groups,omitempty"`
+	// ServiceIDs 只对服务类指标（service_down / latency / loss / jitter /
+	// cert_days）生效；为空表示全部服务。
+	ServiceIDs []string `json:"serviceIds,omitempty"`
 }
 
 // Alert 是一条告警实例。
 type Alert struct {
-	ID         string  `json:"id"`
-	RuleID     string  `json:"ruleId"`
-	RuleName   string  `json:"ruleName"`
-	NodeID     string  `json:"nodeId"`
-	NodeName   string  `json:"nodeName"`
-	Severity   string  `json:"severity"`
-	Message    string  `json:"message"`
-	Value      float64 `json:"value"`
-	StartedAt  int64   `json:"startedAt"`
-	ResolvedAt int64   `json:"resolvedAt"` // 0 表示仍在持续
+	ID          string  `json:"id"`
+	RuleID      string  `json:"ruleId"`
+	RuleName    string  `json:"ruleName"`
+	NodeID      string  `json:"nodeId"`
+	NodeName    string  `json:"nodeName"`
+	ServiceID   string  `json:"serviceId,omitempty"`
+	ServiceName string  `json:"serviceName,omitempty"`
+	Severity    string  `json:"severity"`
+	Message     string  `json:"message"`
+	Value       float64 `json:"value"`
+	StartedAt   int64   `json:"startedAt"`
+	ResolvedAt  int64   `json:"resolvedAt"` // 0 表示仍在持续
+}
+
+// Renewal 是一条人工登记的续费记录，用于续费日历与成本回溯。
+type Renewal struct {
+	ID        string  `json:"id"`
+	NodeID    string  `json:"nodeId"`
+	At        string  `json:"at"` // YYYY-MM-DD，实际续费日期
+	Amount    float64 `json:"amount"`
+	Currency  string  `json:"currency"`
+	Note      string  `json:"note,omitempty"`
+	CreatedAt int64   `json:"createdAt"`
+}
+
+// APIToken 是范围化的自动化令牌。只保存 SHA-256 摘要，
+// 明文仅在创建响应中出现一次。
+type APIToken struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Prefix     string   `json:"prefix"`
+	Hash       string   `json:"-"`
+	Scopes     []string `json:"scopes"`
+	CreatedAt  int64    `json:"createdAt"`
+	LastUsedAt int64    `json:"lastUsedAt,omitempty"`
+	ExpiresAt  int64    `json:"expiresAt,omitempty"`
+}
+
+// HasScope 判断令牌是否包含指定权限。
+func (t *APIToken) HasScope(scope string) bool {
+	for _, s := range t.Scopes {
+		if s == "admin" {
+			return true
+		}
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// Event 是公开活动流中的一条事件（不含敏感字段）。
+type Event struct {
+	ID       string `json:"id"`
+	TS       int64  `json:"ts"`
+	Kind     string `json:"kind"` // alert_opened | alert_resolved | node_online | node_offline
+	Level    string `json:"level"`
+	NodeID   string `json:"nodeId,omitempty"`
+	NodeName string `json:"nodeName,omitempty"`
+	Text     string `json:"text"`
 }
 
 // 通知投递任务状态。
@@ -219,6 +319,7 @@ type StatusVisibility struct {
 	Virt     bool `json:"virt"`     // 虚拟化类型
 	Region   bool `json:"region"`   // 地区
 	Provider bool `json:"provider"` // 服务商
+	Country  bool `json:"country"`  // 国家（用于公开页分布图）
 }
 
 // StatusBlocks 控制公开页显示哪些区块。
@@ -228,6 +329,8 @@ type StatusBlocks struct {
 	Incidents  bool `json:"incidents"`  // 事件时间线
 	History    bool `json:"history"`    // N 天可用率日柱
 	NodeDetail bool `json:"nodeDetail"` // 允许点进节点详情页
+	Map        bool `json:"map"`        // 国家/地区分布图
+	Activity   bool `json:"activity"`   // 最近活动流
 }
 
 // StatusPage 是公开状态页的展示配置。
@@ -255,11 +358,11 @@ func DefaultStatusPage() StatusPage {
 			// ★ 地域默认不公开：它属于资产台账范畴（机群分布在哪些地区），
 			// README 的脱敏原则只承诺展示名/分组/状态/指标/可用率。
 			// 需要展示时由管理员在「状态页 → 展示配置」里显式开启。
-			Region: false, Provider: false,
+			Region: false, Provider: false, Country: false,
 		},
 		Blocks: StatusBlocks{
 			Summary: true, Services: true, Incidents: true,
-			History: true, NodeDetail: true,
+			History: true, NodeDetail: true, Map: true, Activity: true,
 		},
 		HistoryDays: 90,
 	}
@@ -363,16 +466,19 @@ const (
 // %+v 调试输出或未来的 msgpack/protobuf 编码路径，上报令牌就会随视图外泄。
 // 结构性隔离比标签约束可靠。
 type NodeView struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Provider string  `json:"provider"`
-	Region   string  `json:"region"`
-	Group    string  `json:"group"`
-	Note     string  `json:"note"`
-	ExpireAt string  `json:"expireAt"`
-	Price    float64 `json:"price"`
-	Currency string  `json:"currency"`
-	Weight   int     `json:"weight"`
+	ID       string       `json:"id"`
+	Name     string       `json:"name"`
+	Provider string       `json:"provider"`
+	Region   string       `json:"region"`
+	Group    string       `json:"group"`
+	Note     string       `json:"note"`
+	ExpireAt string       `json:"expireAt"`
+	Price    float64      `json:"price"`
+	Currency string       `json:"currency"`
+	Weight   int          `json:"weight"`
+	Country  string       `json:"country,omitempty"`
+	Favorite bool         `json:"favorite,omitempty"`
+	Traffic  TrafficUsage `json:"traffic"`
 
 	Host     HostInfo `json:"host"`
 	Latest   Metrics  `json:"latest"`
@@ -395,6 +501,7 @@ func NodeMeta(n *Node) NodeView {
 		ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
 		Group: n.Group, Note: n.Note, ExpireAt: n.ExpireAt,
 		Price: n.Price, Currency: n.Currency, Weight: n.Weight,
+		Country: n.Country, Favorite: n.Favorite,
 	}
 }
 

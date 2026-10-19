@@ -91,6 +91,12 @@ function clock(ts) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// 本地日期（YYYY-MM-DD）。toISOString 是 UTC，东八区凌晨会落到前一天。
+function localDate(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function tone(v, warnAt, critAt) {
   if (v >= critAt) return 'crit';
   if (v >= warnAt) return 'warn';
@@ -569,6 +575,12 @@ async function viewNodeDetail(id) {
   }
   const loadVals = pts.map((p) => p.load1);
   const last = detail.latest || {};
+  const traffic = detail.traffic || {};
+  const trafficUsed = (traffic.usedRx || 0) + (traffic.usedTx || 0);
+  const quotaBytes = (traffic.quotaGb || 0) * 1024 * 1024 * 1024;
+  const quotaPctVal = quotaBytes > 0 ? (trafficUsed / quotaBytes) * 100 : 0;
+  const mounts = last.mounts || [];
+  const nics = last.nics || [];
 
   const memUsed = last.memUsed || 0, memTotal = last.memTotal || 1;
   const diskUsed = last.diskUsed || 0, diskTotal = last.diskTotal || 1;
@@ -654,6 +666,37 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">年付价</span><span class="info-v mono">${n.price ? (n.currency === 'CNY' ? '¥' : '$') + n.price : '—'}</span></div>
           </div>
         </div>
+
+        <div class="panel panel-pad" style="margin-top:12px">
+          <div class="section-title" style="margin-bottom:8px">流量配额</div>
+          ${quotaBytes > 0 ? `
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
+              <span class="mono">${bytes(trafficUsed)}</span>
+              <span class="field-hint">配额 ${traffic.quotaGb} GB · 每月 ${traffic.resetDay || 1} 日重置</span>
+            </div>
+            <div class="meter"><i style="width:${Math.min(100, quotaPctVal).toFixed(1)}%;background:${quotaPctVal >= 100 ? 'var(--crit)' : quotaPctVal >= 90 ? 'var(--warn)' : 'var(--ok)'}"></i></div>
+            <div class="field-hint" style="margin-top:6px">已用 ${quotaPctVal.toFixed(1)}%${traffic.cycleStart ? ' · 周期起点 ' + clock(traffic.cycleStart) : ''}</div>
+          ` : `
+            <div class="field-hint">未设置月度配额。可在 <a href="#/settings">设置 → 节点管理 → 编辑</a> 中填写，超过阈值时由「流量配额使用率」规则告警。</div>
+          `}
+        </div>
+
+        <div class="panel panel-pad" style="margin-top:12px">
+          <div class="section-title" style="margin-bottom:8px">采集明细</div>
+          <div class="info-list">
+            <div class="info-row"><span class="info-k">磁盘 I/O（累计）</span><span class="info-v mono" style="font-size:11.5px">读 ${bytes(last.diskReadBytes || 0)}<br>写 ${bytes(last.diskWriteBytes || 0)}</span></div>
+          </div>
+          <div class="sub-title" style="margin:12px 0 6px">挂载点</div>
+          ${mounts.length ? mounts.map((m) => `
+            <div class="mount-row">
+              <span class="mount-path mono" title="${esc(m.path)}">${esc(m.path)}</span>
+              <div class="meter" style="flex:1"><i style="width:${Math.min(100, pct(m.used, m.total)).toFixed(1)}%;background:${pct(m.used, m.total) >= 90 ? 'var(--crit)' : pct(m.used, m.total) >= 80 ? 'var(--warn)' : 'var(--ok)'}"></i></div>
+              <span class="mount-val mono">${pct(m.used, m.total).toFixed(0)}%</span>
+            </div>`).join('') : '<div class="field-hint">Agent 尚未上报挂载点（需 v1.10+）</div>'}
+          <div class="sub-title" style="margin:12px 0 6px">网卡</div>
+          ${nics.length ? nics.map((x) => `
+            <div class="info-row"><span class="info-k mono">${esc(x.name)}</span><span class="info-v mono" style="font-size:11.5px">↓ ${bytes(x.rx)} / ↑ ${bytes(x.tx)}</span></div>`).join('') : '<div class="field-hint">Agent 尚未上报网卡明细</div>'}
+        </div>
       </div>
     </div>`;
 
@@ -673,7 +716,7 @@ async function viewServices() {
       </div>
       <div class="table-wrap"><table class="services-table">
         <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th>
-          <th class="num">延迟</th><th class="num">证书</th><th class="num">24h 可用率</th><th>最近 2 小时</th></tr></thead>
+          <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24h 可用率</th><th>最近 2 小时</th></tr></thead>
         <tbody>${svcs.map((s) => {
           const spark = (s.spark || []).slice(-120).map((p) => p[1]);
           const up = s.uptime || 0;
@@ -683,19 +726,22 @@ async function viewServices() {
             : cd > 0
               ? `<span class="badge ${cd <= 14 ? 'crit' : cd <= 30 ? 'warn' : 'mute'}">${cd} 天</span>`
               : '—';
+          const loss = Number(s.lossPct || 0);
+          const jitter = Number(s.jitterMs || 0);
           return `<tr>
             <td><span class="dot ${s.ok ? 'ok' : 'crit'}"></span></td>
             <td class="strong">${esc(s.name)}</td>
             <td><span class="badge mute">${esc(s.type.toUpperCase())}</span></td>
             <td class="mono" style="font-size:11.5px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.target)}</td>
             <td class="num mono">${s.latencyMs ? s.latencyMs + 'ms' : '—'}</td>
+            <td class="num mono" style="font-size:11.5px">${loss > 0 ? `<span style="color:${loss >= 10 ? 'var(--crit)' : 'var(--warn)'}">${loss.toFixed(1)}%</span>` : '0%'} / ${jitter ? jitter.toFixed(0) + 'ms' : '—'}</td>
             <td class="num">${certCell}</td>
             <td class="num"><span class="badge ${up >= 99 ? 'ok' : up >= 95 ? 'warn' : 'crit'}">${up.toFixed(1)}%</span></td>
             <td style="width:150px;padding:6px 14px">
               <div style="height:22px">${sparkline(spark, s.ok ? 'var(--ok)' : 'var(--crit)', 22)}</div>
             </td>
           </tr>`;
-        }).join('') || `<tr><td colspan="8"><div class="empty">尚未配置服务探测目标</div></td></tr>`}</tbody>
+        }).join('') || `<tr><td colspan="9"><div class="empty">尚未配置服务探测目标</div></td></tr>`}</tbody>
       </table></div>
     </section>`;
 }
@@ -759,7 +805,7 @@ async function viewAlerts() {
           const cond = r.metric === 'offline'
             ? `超过 ${r.duration > 0 ? durText(r.duration) : '即刻'} 未上报`
             : `${esc(m ? m.label : r.metric)} ${r.op === 'lt' ? '低于' : '高于'} ${r.threshold}${unit}`;
-          const scope = ruleScopeText(r, nodes);
+          const scope = ruleScopeText(r, nodes, meta.services);
           const sil = silenceMap[r.id];
           return `<tr>
             <td class="strong">${esc(r.name)}${sil ? ` <span class="badge warn" title="${esc(silLabel(sil))}">通知静默中</span>` : ''}</td>
@@ -938,14 +984,22 @@ function openSilenceDialog(scope, label, current) {
 }
 
 // ruleScopeText 把规则的定向范围转成可读文案。
-function ruleScopeText(r, nodes) {
-  const ids = r.nodeIds || [], groups = r.groups || [];
-  if (!ids.length && !groups.length) return '';
-  const nameOf = {};
-  (nodes || []).forEach((n) => { nameOf[n.id] = n.name; });
+function ruleScopeText(r, nodes, services) {
+  const ids = r.nodeIds || [], groups = r.groups || [], svcIDs = r.serviceIds || [];
   const parts = [];
-  if (ids.length) parts.push('节点：' + ids.map((id) => nameOf[id] || id).join('、'));
-  if (groups.length) parts.push('分组：' + groups.join('、'));
+  if (ids.length || groups.length) {
+    const nameOf = {};
+    (nodes || []).forEach((n) => { nameOf[n.id] = n.name; });
+    const sub = [];
+    if (ids.length) sub.push('节点：' + ids.map((id) => nameOf[id] || id).join('、'));
+    if (groups.length) sub.push('分组：' + groups.join('、'));
+    parts.push(sub.join('；'));
+  }
+  if (svcIDs.length) {
+    const svcName = {};
+    (services || []).forEach((s) => { svcName[s.id] = s.name; });
+    parts.push('服务：' + svcIDs.map((id) => svcName[id] || id).join('、'));
+  }
   return parts.join('；');
 }
 
@@ -961,13 +1015,17 @@ function openRuleDialog(rule, meta, nodes) {
   const editing = !!rule;
   const metrics = meta.metrics || [];
   const severities = meta.severities || [];
-  const r = rule || { name: '', metric: 'cpu', op: 'gt', threshold: 90, duration: 300, severity: 'warn', enabled: true, nodeIds: [], groups: [] };
+  const r = rule || { name: '', metric: 'cpu', op: 'gt', threshold: 90, duration: 300, severity: 'warn', enabled: true, nodeIds: [], groups: [], serviceIds: [] };
   const scopedIDs = r.nodeIds || [];
   const knownIDs = new Set((nodes || []).map((n) => n.id));
   const nodeOptions = (nodes || []).map((n) =>
     `<option value="${esc(n.id)}"${scopedIDs.includes(n.id) ? ' selected' : ''}>${esc(n.name)}</option>`)
     .concat(scopedIDs.filter((id) => !knownIDs.has(id)).map((id) =>
       `<option value="${esc(id)}" selected>${esc(id)}（节点已不存在）</option>`)).join('');
+  const services = meta.services || [];
+  const scopedSvc = r.serviceIds || [];
+  const svcOptions = services.map((s) =>
+    `<option value="${esc(s.id)}"${scopedSvc.includes(s.id) ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
 
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
@@ -991,15 +1049,20 @@ function openRuleDialog(rule, meta, nodes) {
       </label>
       ${selectField('持续时间', 'duration', String(r.duration), (meta.durations || []).map((x) => ({ v: String(x.value), t: x.label })))}
       ${selectField('告警级别', 'severity', r.severity, severities.map((x) => ({ v: x.value, t: x.label })))}
-      <label class="field">
+      <label class="field" id="nodeScope">
         <span class="field-label">定向节点（可多选，留空=全部）</span>
         <select name="nodeIds" multiple size="4" style="min-height:86px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">${nodeOptions}</select>
         <span class="field-hint">按住 Ctrl / Cmd 多选</span>
       </label>
-      <label class="field">
+      <label class="field" id="groupScope">
         <span class="field-label">定向分组（逗号分隔，留空=全部）</span>
         <input name="groups" value="${esc((r.groups || []).join(', '))}" placeholder="prod, test">
         <span class="field-hint">节点与分组建「或」关系；两者都留空表示全部节点</span>
+      </label>
+      <label class="field" id="svcScope" style="display:none">
+        <span class="field-label">定向服务（可多选，留空=全部服务）</span>
+        <select name="serviceIds" multiple size="4" style="min-height:86px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">${svcOptions}</select>
+        <span class="field-hint">仅服务类指标生效；服务未配置时保持为空</span>
       </label>
       ${checkbox('启用该规则', 'enabled', r.enabled)}
       <div class="form-actions">
@@ -1015,26 +1078,39 @@ function openRuleDialog(rule, meta, nodes) {
   $('#ruleCancel', dlg).onclick = close;
 
   const metricSel = dlg.querySelector('[name=metric]');
+  const opSel = dlg.querySelector('[name=op]');
   const thWrap = $('#thWrap', dlg);
   const opWrap = $('#opWrap', dlg);
   const thUnit = $('#thUnit', dlg);
   const thHint = $('#thHint', dlg);
   const thInput = dlg.querySelector('[name=threshold]');
+  const svcWrap = $('#svcScope', dlg);
+  const nodeWrap = $('#nodeScope', dlg);
+  const groupWrap = $('#groupScope', dlg);
+  const serviceMetrics = new Set(['service_down', 'latency', 'loss', 'jitter', 'cert_days']);
 
-  // offline 规则没有阈值与比较符，需隐藏
+  // offline / service_down 规则没有阈值与比较符，需隐藏；
+  // 服务类指标只显示服务定向，节点/分组定向只对节点指标有意义。
+  let firstSync = true;
   function syncMetricFields() {
     const m = (meta.metrics || []).find((x) => x.value === metricSel.value);
     const noVal = !!(m && m.noVal);
+    const isSvc = serviceMetrics.has(metricSel.value);
     thWrap.style.display = noVal ? 'none' : '';
     opWrap.style.display = noVal ? 'none' : '';
+    svcWrap.style.display = isSvc ? '' : 'none';
+    nodeWrap.style.display = isSvc ? 'none' : '';
+    groupWrap.style.display = isSvc ? 'none' : '';
     if (m) {
       thUnit.textContent = m.unit ? '(' + m.unit + ')' : '';
       thHint.textContent = m.hint || '';
       if (m.min !== undefined) thInput.min = m.min;
       if (m.max !== undefined) thInput.max = m.max;
       if (m.step !== undefined) thInput.step = m.step;
+      if (!firstSync && !noVal && m.op) opSel.value = m.op;
     }
     thInput.disabled = noVal;
+    firstSync = false;
   }
   metricSel.onchange = syncMetricFields;
   syncMetricFields();
@@ -1043,7 +1119,10 @@ function openRuleDialog(rule, meta, nodes) {
     e.preventDefault();
     const d = formData(e.target);
     const isOffline = d.metric === 'offline';
+    const isSvcDown = d.metric === 'service_down';
+    const noVal = isOffline || isSvcDown;
     const nodeSel = e.target.querySelector('[name=nodeIds]');
+    const svcSel = e.target.querySelector('[name=serviceIds]');
     const payload = {
       name: d.name,
       metric: d.metric,
@@ -1053,8 +1132,9 @@ function openRuleDialog(rule, meta, nodes) {
       enabled: d.enabled,
       nodeIds: nodeSel ? Array.from(nodeSel.selectedOptions).map((o) => o.value) : [],
       groups: String(d.groups || '').split(',').map((s) => s.trim()).filter(Boolean),
+      serviceIds: svcSel ? Array.from(svcSel.selectedOptions).map((o) => o.value) : [],
     };
-    if (!isOffline) payload.threshold = Number(d.threshold) || 0;
+    if (!noVal) payload.threshold = Number(d.threshold) || 0;
 
     const btn = e.target.querySelector('button[type=submit]');
     btn.disabled = true;
@@ -1076,17 +1156,75 @@ function openRuleDialog(rule, meta, nodes) {
 }
 
 async function viewAssets() {
-  const d = await api('/api/assets');
+  const [d, renewals] = await Promise.all([
+    api('/api/assets'),
+    api('/api/renewals').catch(() => []),
+  ]);
   const rows = d.rows || [];
+  const renewRows = Array.isArray(renewals) ? renewals : [];
   const total = d.monthlyTotal || 0;
+
+  // 续费日历：资产到期日与人工登记的续费记录合并到同一条时间线。
+  const events = [];
+  rows.forEach((r) => {
+    if (r.expireAt) events.push({ date: r.expireAt, node: r.name, kind: 'expire' });
+  });
+  renewRows.forEach((x) => {
+    events.push({
+      date: x.at, node: x.nodeName || x.nodeId, kind: 'renew',
+      id: x.id, amount: x.amount, currency: x.currency, note: x.note,
+    });
+  });
+  events.sort((a, b) => a.date.localeCompare(b.date));
+
+  const now = new Date();
+  const months = [];
+  for (let i = 0; i < 12; i++) {
+    const dt = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    const key = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0');
+    months.push({
+      key,
+      label: dt.getFullYear() + ' 年 ' + (dt.getMonth() + 1) + ' 月',
+      items: events.filter((e) => e.date.slice(0, 7) === key),
+    });
+  }
+  const upcoming = events.filter((e) => {
+    const days = Math.ceil((new Date(e.date + 'T00:00:00') - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+    return days >= 0 && days <= 90;
+  });
+
+  const monthHTML = months.map((m) => `
+    <div class="renew-month">
+      <div class="renew-month-h">${esc(m.label)}<span>${m.items.length || ''}</span></div>
+      <div class="renew-items">
+        ${m.items.map((e) => e.kind === 'renew'
+          ? `<div class="renew-item renew-paid">
+              <span class="renew-date mono">${esc(e.date.slice(8))}</span>
+              <span class="renew-name">${esc(e.node)}<span class="renew-note">续费 ${e.currency === 'CNY' ? '¥' : '$'}${e.amount}</span></span>
+              <button class="icon-btn renew-del" data-del-renew="${esc(e.id)}" title="删除续费记录">×</button>
+            </div>`
+          : `<div class="renew-item">
+              <span class="renew-date mono">${esc(e.date.slice(8))}</span>
+              <span class="renew-name">${esc(e.node)}<span class="renew-note">到期</span></span>
+            </div>`).join('') || '<div class="renew-empty">—</div>'}
+      </div>
+    </div>`).join('');
 
   $('#view').innerHTML = `
     <div class="kpis" style="margin-bottom:20px">
       ${kpi('资产总数', rows.length, '台', '含监控与未监控')}
       ${kpi('月度成本', '$' + total.toFixed(1), '', '按年付折算')}
       ${kpi('30 天内到期', rows.filter((r) => r.days > 0 && r.days <= 30).length, '台', '需续费')}
-      ${kpi('已过期/无日期', rows.filter((r) => !r.days || r.days <= 0).length, '台', '需补录')}
+      ${kpi('未来 90 天事项', upcoming.length, '条', '到期与续费')}
     </div>
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">续费日历</h2>
+        <span class="section-meta">未来 12 个月 · 到期日与续费记录</span>
+        <button class="btn primary" id="addRenewBtn" style="padding:6px 14px;font-size:12.5px">＋ 登记续费</button>
+      </div>
+      <div class="renew-grid">${monthHTML}</div>
+    </section>
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">资产台账</h2>
@@ -1111,8 +1249,175 @@ async function viewAssets() {
         }).join('') || `<tr><td colspan="8"><div class="empty">台账为空</div></td></tr>`}</tbody>
       </table></div>
     </section>`;
+
+  $('#addRenewBtn').onclick = () => {
+    const opts = rows.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('');
+    const dlg = openDialog('登记续费', `
+      <p class="modal-sub">续费记录只用于日历与成本回溯，不会自动修改节点的到期日。</p>
+      <form id="renewForm" class="form-grid">
+        <label class="field"><span class="field-label">节点 *</span>
+          <select name="nodeId" required>${opts}</select></label>
+        ${field('续费日期', 'at', localDate(), { type: 'date', required: true })}
+        ${field('金额', 'amount', '', { type: 'number', placeholder: '11.00' })}
+        ${selectField('币种', 'currency', 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
+        ${field('备注', 'note', '', { placeholder: '例如：年付续费、优惠码' })}
+        <div class="form-actions">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn primary" type="submit">保存</button>
+        </div>
+      </form>`);
+    const f = dlg.querySelector('#renewForm');
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = formData(f);
+      try {
+        await adminApi('/api/admin/renewals', { method: 'POST', body: JSON.stringify({
+          nodeId: v.nodeId, at: v.at, amount: Number(v.amount) || 0,
+          currency: v.currency, note: v.note,
+        }) });
+        dlg.close();
+        toast('续费记录已登记');
+        viewAssets();
+      } catch (err) { toast('登记失败：' + err.message, 'err'); }
+    };
+  };
+
+  $$('[data-del-renew]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm('删除这条续费记录？')) return;
+      try {
+        await adminApi('/api/admin/renewals/' + encodeURIComponent(b.dataset.delRenew), { method: 'DELETE' });
+        toast('续费记录已删除');
+        viewAssets();
+      } catch (err) { toast('删除失败：' + err.message, 'err'); }
+    };
+  });
 }
 
+
+/* ---------------- 节点对比 ---------------- */
+
+async function viewCompare() {
+  if (state.compareGroup == null) state.compareGroup = '';
+  if (state.compareFav == null) state.compareFav = false;
+  const qs = new URLSearchParams();
+  if (state.compareGroup) qs.set('group', state.compareGroup);
+  if (state.compareFav) qs.set('favorite', '1');
+  const [d, nodes] = await Promise.all([
+    api('/api/compare' + (qs.toString() ? '?' + qs.toString() : '')),
+    api('/api/nodes'),
+  ]);
+  const rows = d.nodes || [];
+  const sum = d.summary || {};
+  const groups = [...new Set(nodes.map((n) => n.group).filter(Boolean))].sort();
+
+  const groupRows = (sum.groups || []).map((g) => `<tr>
+    <td class="strong">${esc(g.group)}</td>
+    <td class="num mono">${g.online}/${g.nodes}</td>
+    <td class="num">${g.avgCpu.toFixed(1)}%</td>
+    <td class="num">${g.avgMem.toFixed(1)}%</td>
+    <td class="num mono">$${g.cost.toFixed(1)}</td>
+    <td class="num mono">${rate(g.trafficIn)}/s</td>
+  </tr>`).join('') || `<tr><td colspan="6"><div class="empty">没有可聚合的节点</div></td></tr>`;
+
+  const nodeRows = rows.map((n) => {
+    const quota = n.traffic ? n.traffic.quotaGb || 0 : 0;
+    const used = n.traffic ? (n.traffic.usedRx || 0) + (n.traffic.usedTx || 0) : 0;
+    const qp = quota > 0 ? (used / (quota * 1024 * 1024 * 1024)) * 100 : 0;
+    const st = nodeState({ state: n.state, online: n.state === 'online', alerts: 0 });
+    const days = n.expireAt ? Math.ceil((new Date(n.expireAt + 'T00:00:00') - Date.now()) / 86400000) : null;
+    return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
+      <td><button class="fav-btn ${n.favorite ? 'on' : ''}" data-fav-node="${esc(n.id)}" data-fav="${n.favorite ? '1' : '0'}" title="${n.favorite ? '取消收藏' : '收藏'}">${n.favorite ? '★' : '☆'}</button></td>
+      <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days <= 7 ? 'crit' : 'warn'}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}</td>
+      <td><span class="dot ${st.tone}"></span> ${esc(st.text)}</td>
+      <td>${esc(n.group || '—')}</td>
+      <td class="num">${n.state === 'no_data' ? '—' : tbar(n.cpuPct, 80, 90)}</td>
+      <td class="num">${n.state === 'no_data' ? '—' : tbar(n.memPct, 80, 92)}</td>
+      <td class="num">${n.state === 'no_data' ? '—' : tbar(n.diskPct, 80, 90)}</td>
+      <td class="num mono">${n.state === 'no_data' ? '—' : n.load1.toFixed(2)}</td>
+      <td class="num mono" style="font-size:11.5px">${n.state === 'no_data' ? '—' : '↓' + rate(n.netRx) + ' ↑' + rate(n.netTx)}</td>
+      <td class="num mono" style="font-size:11.5px">${bytes(used)}${quota > 0 ? `<div class="field-hint">${qp.toFixed(0)}% / ${quota} GB</div>` : ''}</td>
+      <td class="num mono">${n.price ? (n.currency === 'CNY' ? '¥' : '$') + n.price : '—'}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="11"><div class="empty">没有匹配的节点</div></td></tr>`;
+
+  $('#view').innerHTML = `
+    <div class="kpis" style="margin-bottom:20px">
+      ${kpi('参与对比', sum.nodes || 0, '台', `在线 ${sum.online || 0} · 不可用 ${sum.unavailable || 0}`)}
+      ${kpi('平均 CPU', (sum.avgCpu || 0).toFixed(1), '%', `峰值 ${(sum.maxCpu || 0).toFixed(1)}%`)}
+      ${kpi('平均内存', (sum.avgMem || 0).toFixed(1), '%', `峰值 ${(sum.maxMem || 0).toFixed(1)}%`)}
+      ${kpi('收藏节点', sum.favorites || 0, '台', '收藏优先展示')}
+      ${kpi('月度成本', '$' + (sum.cost || 0).toFixed(1), '', '在线节点合计')}
+    </div>
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">对比范围</h2>
+        <span class="section-meta">${rows.length} 台节点</span>
+      </div>
+      <div class="panel panel-pad compare-filter">
+        <label class="field" style="margin:0">
+          <span class="field-label">分组</span>
+          <select id="compareGroup">
+            <option value="">全部分组</option>
+            ${groups.map((g) => `<option value="${esc(g)}"${state.compareGroup === g ? ' selected' : ''}>${esc(g)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="check inline"><input type="checkbox" id="compareFav"${state.compareFav ? ' checked' : ''}><span>只看收藏</span></label>
+      </div>
+    </section>
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">分组聚合</h2>
+        <span class="section-meta">仅在线节点参与均值</span>
+      </div>
+      <div class="table-wrap"><table class="assets-table">
+        <thead><tr><th>分组</th><th class="num">在线 / 总数</th><th class="num">平均 CPU</th><th class="num">平均内存</th><th class="num">月度成本</th><th class="num">实时下行</th></tr></thead>
+        <tbody>${groupRows}</tbody>
+      </table></div>
+    </section>
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">节点对比</h2>
+        <span class="section-meta">点击星标收藏，点击行查看详情</span>
+      </div>
+      <div class="table-wrap"><table class="node-table">
+        <thead><tr><th></th><th>节点</th><th>状态</th><th>分组</th>
+          <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th><th class="num">负载</th>
+          <th class="num">实时流量</th><th class="num">周期用量</th><th class="num">年付价</th></tr></thead>
+        <tbody>${nodeRows}</tbody>
+      </table></div>
+    </section>`;
+
+  $('#compareGroup').onchange = (e) => { state.compareGroup = e.target.value; viewCompare(); };
+  $('#compareFav').onchange = (e) => { state.compareFav = e.target.checked; viewCompare(); };
+
+  $$('[data-fav-node]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const id = b.dataset.favNode;
+      const next = b.dataset.fav !== '1';
+      try {
+        const n = await adminApi('/api/admin/nodes/' + encodeURIComponent(id));
+        await adminApi('/api/admin/nodes/' + encodeURIComponent(id), {
+          method: 'PUT',
+          body: JSON.stringify({
+            name: n.name, provider: n.provider, region: n.region, group: n.group,
+            country: n.country || '', expireAt: n.expireAt, price: n.price, currency: n.currency,
+            note: n.note, weight: n.weight, favorite: next,
+            trafficQuotaGb: n.trafficQuotaGb || 0, trafficResetDay: n.trafficResetDay || 0,
+          }),
+        });
+        toast(next ? '已收藏' : '已取消收藏');
+        viewCompare();
+      } catch (err) { toast('操作失败：' + err.message, 'err'); }
+    };
+  });
+
+  $$('[data-node]').forEach((tr) => {
+    tr.onclick = () => { location.hash = '#/nodes/' + tr.dataset.node; };
+  });
+}
 
 /* ---------------- 设置 / 管理 ---------------- */
 
@@ -1326,6 +1631,145 @@ function showPasswordDialog() {
   form.querySelector('input[name=currentPassword]').focus();
 }
 
+/* ---------------- 两步验证 ---------------- */
+
+function showTOTPSetupDialog() {
+  const dlg = openDialog('启用两步验证', `
+    <p class="modal-sub">使用 Google Authenticator、1Password、Microsoft Authenticator 等扫描或手动录入密钥。启用后登录需要额外输入 6 位动态码。</p>
+    <form id="totpSetupForm" class="form-grid">
+      <label class="field">
+        <span class="field-label">当前密码 *</span>
+        <input type="password" name="password" required autocomplete="current-password">
+        <span class="field-hint">生成密钥前需要验证身份</span>
+      </label>
+      <div class="form-actions">
+        <button class="btn primary" type="button" id="totpGen">生成密钥</button>
+        <button class="btn" type="button" data-close>取消</button>
+      </div>
+    </form>
+    <div id="totpStep2" hidden>
+      <div class="panel panel-pad" style="margin-top:12px">
+        <div class="field-label">手动录入密钥</div>
+        <pre class="code" id="totpSecret" style="word-break:break-all"></pre>
+        <p class="field-hint" style="margin:6px 0 0">在身份验证器中选择「手动输入」，类型选 TOTP，粘贴上面的密钥。</p>
+        <details style="margin-top:8px">
+          <summary class="field-hint" style="cursor:pointer">显示 otpauth 链接</summary>
+          <pre class="code" id="totpURL" style="word-break:break-all"></pre>
+        </details>
+      </div>
+      <form id="totpEnableForm" class="form-grid" style="margin-top:10px">
+        <label class="field">
+          <span class="field-label">动态验证码 *</span>
+          <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 位数字" required autocomplete="one-time-code">
+          <span class="field-hint">输入身份验证器中当前显示的 6 位数字</span>
+        </label>
+        <div class="form-actions">
+          <button class="btn primary" type="submit">验证并启用</button>
+        </div>
+      </form>
+    </div>`);
+  const form = dlg.querySelector('#totpSetupForm');
+  let password = '';
+  dlg.querySelector('#totpGen').onclick = async (e) => {
+    const pwd = form.password.value;
+    if (!pwd) { toast('请输入当前密码', 'err'); return; }
+    e.target.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/account/totp', {
+        method: 'POST', body: JSON.stringify({ action: 'setup', currentPassword: pwd }),
+      });
+      password = pwd;
+      dlg.querySelector('#totpSecret').textContent = r.secret || '';
+      dlg.querySelector('#totpURL').textContent = r.otpauth || '';
+      dlg.querySelector('#totpStep2').hidden = false;
+      form.hidden = true;
+      dlg.querySelector('#totpEnableForm [name=code]').focus();
+    } catch (err) {
+      toast('生成失败：' + err.message, 'err');
+      e.target.disabled = false;
+    }
+  };
+  dlg.querySelector('#totpEnableForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const code = e.target.code.value.trim();
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/account/totp', {
+        method: 'POST', body: JSON.stringify({ action: 'enable', currentPassword: password, code }),
+      });
+      applyAccountResponse(r);
+      dlg.close();
+      toast('两步验证已启用，下次登录需输入动态码');
+      viewSettings();
+    } catch (err) {
+      toast('启用失败：' + err.message, 'err');
+      btn.disabled = false;
+    }
+  };
+}
+
+function showTOTPDisableDialog() {
+  const dlg = openDialog('停用两步验证', `
+    <p class="modal-sub" style="color:var(--warn)">停用后仅凭密码即可登录，安全性会下降。请输入当前密码与动态验证码确认。</p>
+    <form id="totpDisableForm" class="form-grid">
+      <label class="field">
+        <span class="field-label">当前密码 *</span>
+        <input type="password" name="password" required autocomplete="current-password">
+      </label>
+      <label class="field">
+        <span class="field-label">动态验证码 *</span>
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
+      </label>
+      <div class="form-actions">
+        <button class="btn danger" type="submit">确认停用</button>
+        <button class="btn" type="button" data-close>取消</button>
+      </div>
+    </form>`);
+  const form = dlg.querySelector('#totpDisableForm');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const v = formData(form);
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/account/totp', {
+        method: 'POST', body: JSON.stringify({ action: 'disable', currentPassword: v.password, code: v.code }),
+      });
+      applyAccountResponse(r);
+      dlg.close();
+      toast('两步验证已停用');
+      viewSettings();
+    } catch (err) {
+      toast('停用失败：' + err.message, 'err');
+      btn.disabled = false;
+    }
+  };
+}
+
+function showRawToken(token, meta) {
+  const dlg = openDialog('API 令牌已创建', `
+    <p class="modal-sub">明文只显示这一次，关闭后无法再次查看。请立即复制并保存到密钥管理系统。</p>
+    <pre class="code" id="rawTokenText" style="word-break:break-all"></pre>
+    <p class="field-hint">名称：${esc((meta && meta.name) || '')} · 范围：${esc(((meta && meta.scopes) || []).join(', '))}</p>
+    <div class="form-actions">
+      <button class="btn primary" id="copyTokenBtn" type="button">复制令牌</button>
+      <button class="btn" type="button" data-close>关闭</button>
+    </div>`);
+  dlg.querySelector('#rawTokenText').textContent = token;
+  dlg.querySelector('#copyTokenBtn').onclick = async (e) => {
+    try {
+      await navigator.clipboard.writeText(token);
+      e.target.textContent = '已复制 ✓';
+    } catch (err) {
+      const range = document.createRange();
+      range.selectNodeContents(dlg.querySelector('#rawTokenText'));
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      toast('已选中令牌文本，请 Ctrl+C 复制');
+    }
+  };
+}
+
 async function viewSettings() {
   if (!state.authenticated) {
     // 与首屏登录共用同一个全屏登录层：验证通过后 render() 会回到当前路由
@@ -1338,15 +1782,17 @@ async function viewSettings() {
   let nodes = [], services = [], cfg = null, chans = [], defs = [];
   let themeCfg = null;
   let queue = { stats: {}, jobs: [] };
+  let tokens = [];
   let loadErr = '';
   try {
-    const [n, svc, q, th] = await Promise.all([
+    const [n, svc, q, th, tk] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
       adminApi('/api/admin/notify/jobs'),
       adminApi('/api/admin/theme'),
+      adminApi('/api/admin/tokens').catch(() => []),
     ]);
-    nodes = n; services = svc; queue = q || queue;
+    nodes = n; services = svc; queue = q || queue; tokens = Array.isArray(tk) ? tk : [];
     themeCfg = th || {};
     const st = await adminApi('/api/admin/settings');
     cfg = st.notify || {};
@@ -1375,6 +1821,9 @@ async function viewSettings() {
   }
 
   const t = cfg.telegram || {}, w = cfg.webhook || {}, m = cfg.email || {};
+  const hourOpts = Array.from({ length: 24 }, (_, i) => ({ v: String(i), t: String(i).padStart(2, '0') + ':00' }));
+  const quietStart = cfg.quietStart == null ? -1 : Number(cfg.quietStart);
+  const quietEnd = cfg.quietEnd == null ? 7 : Number(cfg.quietEnd);
   const qJobs = queue.jobs || [], qStats = queue.stats || {};
   const qBadge = {
     pending: ['warn', '待投递'], failed: ['crit', '失败'],
@@ -1386,6 +1835,15 @@ async function viewSettings() {
   const accountInitial = accountName.slice(0, 1).toUpperCase();
   const serverVersion = state.serverVersion || '';
   const panelBase = (state.panelLink || location.origin).replace(/\/+$/, '');
+  const totpOn = String(account.totpEnabled) === 'true';
+  const tokenRows = tokens.map((tk) => `<tr>
+    <td class="strong">${esc(tk.name)}</td>
+    <td class="mono" style="font-size:11.5px">${esc(tk.prefix)}…</td>
+    <td>${(tk.scopes || []).map((x) => `<span class="badge ${x === 'admin' ? 'warn' : 'mute'}">${esc(x)}</span>`).join(' ')}</td>
+    <td class="mono" style="font-size:11.5px">${clock(tk.createdAt)}</td>
+    <td class="mono" style="font-size:11.5px">${tk.expiresAt ? clock(tk.expiresAt) : '永不过期'}</td>
+    <td class="num"><button class="btn tiny danger" data-del-token="${esc(tk.id)}">删除</button></td>
+  </tr>`).join('') || `<tr><td colspan="6"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
 
   $('#view').innerHTML = `
     <section class="section">
@@ -1410,6 +1868,75 @@ async function viewSettings() {
         账号资料与密码可在此直接修改，保存时需验证当前密码；修改后当前浏览器自动续签，其他设备需重新登录。
         忘记密码时可在服务端执行 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
       </p>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">安全与自动化</h2>
+        <span class="section-meta">两步验证与范围化 API 令牌</span>
+      </div>
+      <div class="panel panel-pad" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+        <span class="badge ${totpOn ? 'ok' : 'mute'}">${totpOn ? '两步验证已启用' : '两步验证未启用'}</span>
+        <span class="section-meta">登录时在密码之外额外校验身份验证器动态码（TOTP，30 秒轮换）。</span>
+        <button class="btn ${totpOn ? 'danger' : 'primary'}" id="totpBtn" type="button" style="margin-left:auto">${totpOn ? '停用两步验证' : '启用两步验证'}</button>
+      </div>
+      <div class="panel panel-pad">
+        <div class="ch-add">
+          <input id="tokenName" type="text" maxlength="64" placeholder="令牌名称，例如 CI 只读" style="flex:0 0 220px">
+          <select id="tokenScope">
+            <option value="read">只读（read）</option>
+            <option value="admin">管理（admin）</option>
+          </select>
+          <input id="tokenDays" type="number" min="0" max="3650" placeholder="有效天数（0=永久）" style="flex:0 0 170px">
+          <button class="btn primary" id="createTokenBtn" type="button">创建令牌</button>
+        </div>
+        <p class="field-hint" style="margin:8px 0 10px">
+          使用 <code>Authorization: Bearer rct_…</code> 调用 API；令牌只保存 SHA-256 摘要，明文仅在创建时显示一次。
+          管理范围可执行写操作，请仅授予可信自动化。
+        </p>
+        <div class="table-wrap"><table class="queue-table">
+          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
+          <tbody>${tokenRows}</tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">加密备份与恢复</h2>
+        <span class="section-meta">AES-256-GCM · 仅配置文件，不含监控历史</span>
+      </div>
+      <div class="panel panel-pad">
+        <div class="grid-2">
+          <div>
+            <div class="sub-title" style="margin-bottom:8px">导出备份</div>
+            <div class="form-grid">
+              ${field('备份密码', 'backupPwd', '', { type: 'password', hint: '至少 8 个字符；恢复时需要同一密码' })}
+            </div>
+            <div class="form-actions" style="justify-content:flex-start">
+              <button class="btn primary" id="backupBtn" type="button">下载加密备份</button>
+            </div>
+          </div>
+          <div>
+            <div class="sub-title" style="margin-bottom:8px">导入备份</div>
+            <div class="form-grid">
+              ${field('备份密码', 'restorePwd', '', { type: 'password' })}
+              <label class="field">
+                <span class="field-label">备份文件（.rcbk）</span>
+                <input type="file" id="restoreFile" accept=".rcbk,text/plain">
+              </label>
+              ${checkbox('我确认导入会替换当前全部配置', 'restoreConfirm', false)}
+            </div>
+            <div class="form-actions" style="justify-content:flex-start">
+              <button class="btn danger" id="restoreBtn" type="button">导入并覆盖配置</button>
+            </div>
+          </div>
+        </div>
+        <p class="field-hint" style="margin:10px 0 0">
+          备份包含节点、探测、规则、静默、续费与设置（含节点令牌）；导入不会修改监控历史与告警记录。
+          导入后通知配置与节点令牌立即生效，请妥善保管备份文件与密码。
+        </p>
+      </div>
     </section>
 
     <section class="section">
@@ -1478,12 +2005,16 @@ async function viewSettings() {
           ${field('名称', 'name', '', { required: true, placeholder: '例如 prod-01', hint: '会显示在公开状态页，勿填主机名/IP' })}
           ${field('服务商', 'provider', '', { placeholder: 'racknerd / 腾讯云 …' })}
           ${field('位置', 'region', '', { placeholder: '美国 / 香港 …' })}
+          ${field('国家代码', 'country', '', { placeholder: 'US / JP / DE', hint: '两位 ISO 代码，用于公开页分布图' })}
           ${field('分组', 'group', '', { placeholder: 'prod / test' })}
           ${field('到期日', 'expireAt', '', { placeholder: '2027-06-01' })}
           ${field('年付价', 'price', '', { type: 'number', placeholder: '11.00' })}
           ${selectField('币种', 'currency', 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
+          ${field('月度流量配额（GB）', 'trafficQuotaGb', '', { type: 'number', placeholder: '0 = 不限制' })}
+          ${field('流量重置日', 'trafficResetDay', '1', { type: 'number', hint: '每月 1–28 日' })}
           ${field('备注', 'note', '', { placeholder: '可选' })}
           ${field('排序权重', 'weight', '', { type: 'number', placeholder: '0' })}
+          ${checkbox('收藏（对比页优先展示）', 'favorite', false)}
           <div class="form-actions"><button class="btn primary" type="submit">创建并获取令牌</button></div>
         </form>
       </details>
@@ -1508,9 +2039,9 @@ async function viewSettings() {
         <summary class="sum">＋ 新增探测目标</summary>
         <form id="svcForm" class="form-grid">
           ${field('名称', 'name', '', { required: true, placeholder: '例如 imotao.com' })}
-          ${selectField('类型', 'type', 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }])}
-          ${field('目标', 'target', '', { required: true, placeholder: 'https://example.com 或 1.2.3.4:3306' })}
-          ${field('间隔（秒）', 'interval', '60', { type: 'number' })}
+          ${selectField('类型', 'type', 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }, { v: 'dns', t: 'DNS' }])}
+          ${field('目标', 'target', '', { required: true, placeholder: 'https://example.com / 1.2.3.4:3306 / example.com@1.1.1.1' })}
+          ${field('间隔（秒）', 'interval', '60', { type: 'number', hint: 'DNS 目标可写 name 或 name@server' })}
           ${selectField('归属节点', 'nodeId', '', [{ v: '', t: '不关联' }].concat(nodes.map((n) => ({ v: n.id, t: n.name }))))}
           <div class="form-actions"><button class="btn primary" type="submit">添加</button></div>
         </form>
@@ -1524,6 +2055,7 @@ async function viewSettings() {
       </div>
 
       <div class="panel panel-pad" style="margin-bottom:12px">
+        <div class="sub-title" style="margin-bottom:10px">基础</div>
         <div class="form-grid">
           ${checkbox('启用通知', 'nEnabled', !!cfg.enabled)}
           ${selectField('最低严重度', 'nMinSeverity', cfg.minSeverity || 'warn',
@@ -1531,6 +2063,40 @@ async function viewSettings() {
           ${field('重复提醒间隔（秒）', 'nRepeat', cfg.repeatInterval || 0,
             { type: 'number', hint: '0 = 只通知一次，不重复' })}
         </div>
+        <div class="sub-title" style="margin:16px 0 10px">降噪、摘要与到期提醒</div>
+        <div class="form-grid">
+          ${selectField('免打扰开始', 'quietStart', String(quietStart),
+            [{ v: '-1', t: '关闭免打扰' }].concat(hourOpts))}
+          ${selectField('免打扰结束', 'quietEnd', String(quietEnd), hourOpts)}
+          ${field('摘要聚合窗口（分钟）', 'digestMins', cfg.digestMins || 0,
+            { type: 'number', hint: '0 = 逐条发送；5–1440 内的告警合并为一条摘要' })}
+          ${field('到期提醒提前天数', 'expiryDays', cfg.expiryDays == null ? 7 : cfg.expiryDays,
+            { type: 'number', hint: '-1 关闭；0 表示仅到期当天提醒' })}
+        </div>
+        <p class="field-hint" style="margin:6px 0 0">
+          免打扰期间严重告警与恢复通知仍会发送；普通告警延后到窗口结束。窗口跨午夜时（例如 22 → 7）自动按次日计算。
+        </p>
+        <div class="sub-title" style="margin:16px 0 10px">消息模板</div>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">标题模板</span>
+            <input name="titleFormat" value="${esc(cfg.titleFormat || '')}" maxlength="500" placeholder="留空使用默认标题">
+            <span class="field-hint">可用变量：{status} {node} {title} {rule} {value} {severity} {time}</span>
+          </label>
+          <label class="field">
+            <span class="field-label">正文模板</span>
+            <input name="bodyFormat" value="${esc(cfg.bodyFormat || '')}" maxlength="2000" placeholder="留空使用默认正文">
+            <span class="field-hint">可用变量：{status} {node} {title} {rule} {value} {detail} {time} {link}</span>
+          </label>
+        </div>
+        <div class="sub-title" style="margin:16px 0 10px">运行报告</div>
+        <div class="form-grid">
+          ${checkbox('每日运行报告', 'reportDaily', !!cfg.reportDaily)}
+          ${checkbox('每周运行报告（周一）', 'reportWeekly', !!cfg.reportWeekly)}
+          ${checkbox('每月运行报告（1 日）', 'reportMonthly', !!cfg.reportMonthly)}
+          ${selectField('报告发送时间', 'reportHour', String(cfg.reportHour == null ? 9 : cfg.reportHour), hourOpts)}
+        </div>
+        <p class="field-hint" style="margin:6px 0 0">报告经由通知通道发送，包含节点状态、均值、活跃告警、流量、成本与 30 天内到期资产。</p>
       </div>
 
       <div id="chList"></div>
@@ -1608,6 +2174,96 @@ async function viewSettings() {
   $('#logoutBtn').onclick = doLogout;
   $('#editAccountBtn').onclick = showAccountDialog;
   $('#changePasswordBtn').onclick = showPasswordDialog;
+
+  /* ---- 两步验证 ---- */
+  $('#totpBtn').onclick = () => {
+    if (String((state.user || {}).totpEnabled) === 'true') showTOTPDisableDialog();
+    else showTOTPSetupDialog();
+  };
+
+  /* ---- API 令牌 ---- */
+  $('#createTokenBtn').onclick = async () => {
+    const name = $('#tokenName').value.trim();
+    if (!name) { toast('请填写令牌名称', 'err'); return; }
+    const btn = $('#createTokenBtn');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/tokens', {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          scopes: [$('#tokenScope').value],
+          expiresDays: Number($('#tokenDays').value) || 0,
+        }),
+      });
+      showRawToken(r.token, r.meta);
+      viewSettings();
+    } catch (e) {
+      toast('创建失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  $$('[data-del-token]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('删除该 API 令牌？使用它的自动化会立即失去访问权限。')) return;
+      try {
+        await adminApi('/api/admin/tokens/' + encodeURIComponent(b.dataset.delToken), { method: 'DELETE' });
+        toast('令牌已删除');
+        viewSettings();
+      } catch (e) { toast('删除失败：' + e.message, 'err'); }
+    };
+  });
+
+  /* ---- 加密备份 ---- */
+  $('#backupBtn').onclick = async () => {
+    const pwd = $('#view [name="backupPwd"]').value;
+    if (pwd.length < 8) { toast('备份密码至少 8 个字符', 'err'); return; }
+    const btn = $('#backupBtn');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/backup', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+      // 保存 base64 文本而不是原始字节：导入端按文本读取后原样回传，
+      // 文本格式也便于通过密码管理器/配置仓库传递。
+      const blob = new Blob([r.data + '\n'], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = r.filename || 'rollcall-backup.rcbk';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      toast('备份已生成（校验 ' + r.checksum + '）');
+    } catch (e) {
+      toast('导出失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  $('#restoreBtn').onclick = async () => {
+    const pwd = $('#view [name="restorePwd"]').value;
+    const file = $('#restoreFile').files[0];
+    const confirmBox = $('#view [name="restoreConfirm"]');
+    if (!file) { toast('请选择备份文件', 'err'); return; }
+    if (!pwd) { toast('请输入备份密码', 'err'); return; }
+    if (!confirmBox.checked) { toast('请先勾选确认覆盖配置', 'err'); return; }
+    if (!confirm('导入会替换当前全部节点、探测、规则与设置，且无法撤销。继续？')) return;
+    const btn = $('#restoreBtn');
+    btn.disabled = true;
+    try {
+      const data = (await file.text()).trim();
+      const r = await adminApi('/api/admin/restore', {
+        method: 'POST',
+        body: JSON.stringify({ password: pwd, data, confirm: true }),
+      });
+      toast('导入完成：' + r.nodes + ' 节点 / ' + r.services + ' 服务 / ' + r.rules + ' 规则');
+      viewSettings();
+    } catch (e) {
+      toast('导入失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  };
 
   /* ---- 外观主题 ---- */
   const themeForm = $('#themeForm');
@@ -1738,8 +2394,11 @@ async function viewSettings() {
     try {
       const r = await adminApi('/api/admin/nodes', { method: 'POST', body: JSON.stringify({
         name: d.name, provider: d.provider, region: d.region, group: d.group,
+        country: (d.country || '').toUpperCase(),
         expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
-        note: d.note, weight: Number(d.weight) || 0,
+        trafficQuotaGb: Number(d.trafficQuotaGb) || 0,
+        trafficResetDay: Number(d.trafficResetDay) || 0,
+        note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
       }) });
       toast('节点已创建');
       showAgentConfig(r);
@@ -1844,10 +2503,28 @@ async function viewSettings() {
 
   async function apiSaveSettings(silent) {
     collectChannels();
+    const v = (name) => {
+      const el = document.querySelector('#view [name="' + name + '"]');
+      return el ? el.value : '';
+    };
+    const c = (name) => {
+      const el = document.querySelector('#view [name="' + name + '"]');
+      return !!(el && el.checked);
+    };
     const body = {
-      enabled: $('#nEnabled').checked,
-      minSeverity: $('#nMinSeverity').value,
-      repeatInterval: Number($('#nRepeat').value) || 0,
+      enabled: c('nEnabled'),
+      minSeverity: v('nMinSeverity'),
+      repeatInterval: Number(v('nRepeat')) || 0,
+      quietStart: Number(v('quietStart')),
+      quietEnd: Number(v('quietEnd')),
+      digestMins: Number(v('digestMins')) || 0,
+      expiryDays: Number(v('expiryDays')),
+      titleFormat: v('titleFormat').trim(),
+      bodyFormat: v('bodyFormat').trim(),
+      reportDaily: c('reportDaily'),
+      reportWeekly: c('reportWeekly'),
+      reportMonthly: c('reportMonthly'),
+      reportHour: Number(v('reportHour')),
       channels: chState,
     };
     const r = await adminApi('/api/admin/settings', { method: 'POST', body: JSON.stringify(body) });
@@ -2030,6 +2707,7 @@ const STATUS_VIS_ITEMS = [
   ['swap', 'Swap 用量'],
   ['region', '地区'],
   ['provider', '服务商'],
+  ['country', '国家/地区（用于「地区分布」区块）'],
   ['hostname', '真实主机名（可用于指纹识别，慎开）'],
   ['os', '操作系统'],
   ['kernel', '内核版本'],
@@ -2043,6 +2721,8 @@ const STATUS_BLOCK_ITEMS = [
   ['services', '服务探测区'],
   ['incidents', '事件时间线'],
   ['history', 'N 天可用率日柱'],
+  ['map', '地区分布（需开启「国家/地区」）'],
+  ['activity', '最近活动流'],
   ['nodeDetail', '允许访客点进节点详情'],
 ];
 
@@ -2313,12 +2993,16 @@ function showNodeEdit(n) {
       ${field('名称', 'name', n.name, { required: true, placeholder: '例如 prod-01' })}
       ${field('服务商', 'provider', n.provider, { placeholder: 'racknerd / 腾讯云 …' })}
       ${field('位置', 'region', n.region, { placeholder: '美国 / 香港 …' })}
+      ${field('国家代码', 'country', n.country, { placeholder: 'US / JP / DE', hint: '两位 ISO 代码，公开页分布图使用' })}
       ${field('分组', 'group', n.group, { placeholder: 'prod / test' })}
       ${field('到期日', 'expireAt', n.expireAt, { placeholder: '2027-06-01' })}
       ${field('年付价', 'price', n.price, { type: 'number', placeholder: '11.00' })}
       ${selectField('币种', 'currency', n.currency || 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
+      ${field('月度流量配额（GB）', 'trafficQuotaGb', n.trafficQuotaGb || '', { type: 'number', placeholder: '0 = 不限制' })}
+      ${field('流量重置日', 'trafficResetDay', n.trafficResetDay == null ? 1 : n.trafficResetDay, { type: 'number', hint: '每月 1–28 日' })}
       ${field('备注', 'note', n.note, { placeholder: '可选' })}
       ${field('排序权重', 'weight', n.weight, { type: 'number', placeholder: '0' })}
+      ${checkbox('收藏（对比页优先展示）', 'favorite', !!n.favorite)}
       <div class="form-actions">
         <button class="btn" type="button" id="editCancel">取消</button>
         <button class="btn primary" type="submit">保存</button>
@@ -2337,8 +3021,11 @@ function showNodeEdit(n) {
         method: 'PUT',
         body: JSON.stringify({
           name: d.name, provider: d.provider, region: d.region, group: d.group,
+          country: (d.country || '').toUpperCase(),
           expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
-          note: d.note, weight: Number(d.weight) || 0,
+          trafficQuotaGb: Number(d.trafficQuotaGb) || 0,
+          trafficResetDay: Number(d.trafficResetDay) || 0,
+          note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
         }),
       });
       close();
@@ -2355,6 +3042,7 @@ function showNodeEdit(n) {
 const ROUTES = {
   overview: { title: '概览', sub: '机群健康状态与关键指标', fn: viewOverview },
   nodes: { title: '节点', sub: '全部受监控服务器', fn: viewNodes },
+  compare: { title: '节点对比', sub: '跨节点指标对比与分组聚合', fn: viewCompare },
   services: { title: '服务', sub: '网站与端口可用性探测', fn: viewServices },
   alerts: { title: '告警', sub: '规则触发与历史记录', fn: viewAlerts },
   assets: { title: '台账', sub: '资产、到期与成本', fn: viewAssets },
@@ -2433,6 +3121,15 @@ function showLoginGate() {
             </button>
           </span>
         </label>
+        <label class="login-field" id="gateTotpWrap" hidden>
+          <span class="login-label">动态验证码</span>
+          <span class="login-input-wrap">
+            <input class="login-input" id="gateTotp" name="totp" type="text"
+                   placeholder="身份验证器中的 6 位数字" inputmode="numeric"
+                   pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
+                   aria-describedby="loginError">
+          </span>
+        </label>
         <button class="login-btn" id="gateSubmit" type="submit">登 录</button>
       </form>
       <div class="login-hint">
@@ -2472,6 +3169,7 @@ function showLoginGate() {
     const d = formData(e.target);
     const identifier = String(d.identifier || '').trim();
     const password = String(d.password || '');
+    const totp = String(d.totp || '').trim();
     if (!identifier || !password) {
       showErr('请输入用户名/邮箱和密码。');
       return;
@@ -2488,11 +3186,20 @@ function showLoginGate() {
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
         },
-        body: JSON.stringify({ identifier, password }),
+        body: JSON.stringify({ identifier, password, totp }),
       });
       let data = null;
       try { data = await r.json(); } catch (ex) { /* 错误页可能不是 JSON */ }
       if (r.status === 401) {
+        const wrap = layer.querySelector('#gateTotpWrap');
+        if (data && (data.totpRequired || !wrap.hidden)) {
+          wrap.hidden = false;
+          const totpInp = layer.querySelector('#gateTotp');
+          totpInp.focus();
+          totpInp.select();
+          showErr((data && data.error) || '动态验证码错误。');
+          return;
+        }
         showErr('用户名或密码错误，请核对后重试。');
         passInp.value = '';
         passInp.focus();

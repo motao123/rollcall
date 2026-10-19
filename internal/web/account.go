@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/motao/rollcall/internal/auth"
 )
@@ -175,6 +176,89 @@ func (s *Server) accountResponse(w http.ResponseWriter, r *http.Request, u *auth
 		resp["expiresAt"] = exp.Unix()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type accountTOTPRequest struct {
+	Action          string `json:"action"` // setup | enable | disable
+	CurrentPassword string `json:"currentPassword"`
+	Code            string `json:"code"`
+}
+
+// handleAdminAccountTOTP 管理两步验证：生成密钥、启用、停用。
+func (s *Server) handleAdminAccountTOTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.accountChange(w, r, func(w http.ResponseWriter, r *http.Request, current *auth.User) {
+		var in accountTOTPRequest
+		if !decodeAccountJSON(w, r, &in) {
+			return
+		}
+		if in.CurrentPassword == "" || !auth.VerifyPassword(current.PasswordHash, in.CurrentPassword) {
+			fail(w, http.StatusForbidden, "当前密码不正确")
+			return
+		}
+		switch in.Action {
+		case "setup":
+			if current.TOTPEnabled {
+				fail(w, http.StatusBadRequest, "两步验证已启用，请先停用再重新绑定")
+				return
+			}
+			secret, err := auth.NewTOTPSecret()
+			if err != nil {
+				fail(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			updated, err := auth.UpdateTOTP(s.userPath, current, secret, false)
+			if err != nil {
+				fail(w, http.StatusInternalServerError, "保存 TOTP 密钥失败: "+err.Error())
+				return
+			}
+			s.setUser(updated)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"enabled": false,
+				"secret":  secret,
+				"otpauth": auth.TOTPURL("Rollcall", updated.Username, secret),
+			})
+		case "enable":
+			if strings.TrimSpace(in.Code) == "" {
+				fail(w, http.StatusBadRequest, "请输入身份验证器中的 6 位动态码")
+				return
+			}
+			if current.TOTPSecret == "" {
+				fail(w, http.StatusBadRequest, "请先生成 TOTP 密钥")
+				return
+			}
+			if !auth.VerifyTOTP(current.TOTPSecret, in.Code, time.Now()) {
+				fail(w, http.StatusBadRequest, "动态验证码错误，请确认手机时间准确")
+				return
+			}
+			updated, err := auth.UpdateTOTP(s.userPath, current, current.TOTPSecret, true)
+			if err != nil {
+				fail(w, http.StatusInternalServerError, "启用 TOTP 失败: "+err.Error())
+				return
+			}
+			s.setUser(updated)
+			log.Printf("管理员已启用 TOTP user=%s ip=%s", updated.Username, clientIP(r, s.trustedProxies))
+			s.accountResponse(w, r, updated, true)
+		case "disable":
+			if current.TOTPEnabled && !auth.VerifyTOTP(current.TOTPSecret, in.Code, time.Now()) {
+				fail(w, http.StatusBadRequest, "动态验证码错误，无法停用")
+				return
+			}
+			updated, err := auth.UpdateTOTP(s.userPath, current, "", false)
+			if err != nil {
+				fail(w, http.StatusInternalServerError, "停用 TOTP 失败: "+err.Error())
+				return
+			}
+			s.setUser(updated)
+			log.Printf("管理员已停用 TOTP user=%s ip=%s", updated.Username, clientIP(r, s.trustedProxies))
+			s.accountResponse(w, r, updated, true)
+		default:
+			fail(w, http.StatusBadRequest, "action 必须是 setup / enable / disable")
+		}
+	})
 }
 
 func decodeAccountJSON(w http.ResponseWriter, r *http.Request, dst any) bool {

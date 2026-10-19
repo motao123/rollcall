@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -157,6 +158,58 @@ func TestEncodeHeaderStripsCRLF(t *testing.T) {
 		if strings.ContainsAny(out, "\r\n") {
 			t.Errorf("encodeHeader(%q) 仍含 CR/LF: %q", in, out)
 		}
+	}
+}
+
+// TestWebhookUsesRenderedTemplate 是回归测试：Webhook 曾直接序列化原始
+// Message，导致全局模板对 Webhook 通道静默失效（其他通道均使用渲染结果）。
+func TestWebhookUsesRenderedTemplate(t *testing.T) {
+	SetAllowPrivateTargets(true)
+	t.Cleanup(func() { SetAllowPrivateTargets(false) })
+
+	got := make(chan Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m Message
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			t.Errorf("解析 webhook 请求体: %v", err)
+		}
+		got <- m
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Enabled:     true,
+		MinSeverity: "info",
+		TitleFormat: "[RC] {title}",
+		BodyFormat:  "{detail} @ {node}",
+		Channels: []ChannelConfig{{
+			ID: "wh", Type: "webhook", Enabled: true,
+			Options: map[string]string{"url": srv.URL},
+		}},
+	}
+	res := Send(cfg, Message{
+		Title: "CPU 过高", Body: "load 12.3", NodeName: "hk-1",
+		Severity: "warn", RuleName: "r_cpu", TS: 1000,
+	})
+	if len(res) != 1 || !res[0].OK {
+		t.Fatalf("Webhook 投递失败: %+v", res)
+	}
+
+	select {
+	case m := <-got:
+		if m.Title != "[RC] CPU 过高" {
+			t.Errorf("Webhook 标题未应用模板: %q", m.Title)
+		}
+		if m.Body != "load 12.3 @ hk-1" {
+			t.Errorf("Webhook 正文未应用模板: %q", m.Body)
+		}
+		// 模板只替换标题/正文，其余结构化字段必须保留。
+		if m.NodeName != "hk-1" || m.RuleName != "r_cpu" || m.Severity != "warn" {
+			t.Errorf("Webhook 结构化字段丢失: %+v", m)
+		}
+	default:
+		t.Fatal("Webhook 未收到请求")
 	}
 }
 

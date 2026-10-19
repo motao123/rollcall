@@ -244,6 +244,8 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/alerts", authReadonly, http.HandlerFunc(s.handleAlerts)},
 		{"/api/rules", authReadonly, http.HandlerFunc(s.handleRules)},
 		{"/api/assets", authReadonly, http.HandlerFunc(s.handleAssets)},
+		{"/api/renewals", authReadonly, http.HandlerFunc(s.handleRenewals)},
+		{"/api/compare", authReadonly, http.HandlerFunc(s.handleCompare)},
 
 		// 管理写操作与运营数据导出：管理令牌或面板会话
 		{"/api/admin/nodes", authAdmin, http.HandlerFunc(s.handleAdminNodes)},
@@ -252,10 +254,17 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
 		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
+		{"/api/admin/renewals", authAdmin, http.HandlerFunc(s.handleAdminRenewals)},
+		{"/api/admin/renewals/", authAdmin, http.HandlerFunc(s.handleAdminRenewalByID)},
 		// 管理员账号资料与密码：除会话/令牌外还要求当前密码，
 		// 防止被窃取的会话直接接管账号。
 		{"/api/admin/account", authAdmin, http.HandlerFunc(s.handleAdminAccount)},
 		{"/api/admin/account/password", authAdmin, http.HandlerFunc(s.handleAdminAccountPassword)},
+		{"/api/admin/account/totp", authAdmin, http.HandlerFunc(s.handleAdminAccountTOTP)},
+		{"/api/admin/tokens", authAdmin, http.HandlerFunc(s.handleAdminTokens)},
+		{"/api/admin/tokens/", authAdmin, http.HandlerFunc(s.handleAdminTokenByID)},
+		{"/api/admin/backup", authAdmin, http.HandlerFunc(s.handleBackup)},
+		{"/api/admin/restore", authAdmin, http.HandlerFunc(s.handleRestore)},
 		{"/api/admin/theme", authAdmin, http.HandlerFunc(s.handleAdminTheme)},
 		{"/api/admin/test-notify", authAdmin, http.HandlerFunc(s.handleTestNotify)},
 		{"/api/admin/rules", authAdmin, http.HandlerFunc(s.handleAdminRules)},
@@ -371,7 +380,7 @@ func (s *Server) guard(level authLevel, h http.Handler) http.Handler {
 // 管理令牌用于自动化；面板会话用于浏览器；-auth 的 Basic 凭据保留兼容。
 func (s *Server) requireReadonly(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.adminTokenOK(r) || s.panelBasicOK(r) || s.sessionOK(r) {
+		if s.adminTokenOK(r) || s.apiTokenOK(r, false) || s.panelBasicOK(r) || s.sessionOK(r) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -385,7 +394,7 @@ func (s *Server) requireReadonly(h http.Handler) http.Handler {
 // X-Requested-With，配合 SameSite=Strict Cookie 阻断跨站表单提交。
 func (s *Server) requireAdmin(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.adminOK(r) {
+		if s.adminOK(r) || s.apiTokenOK(r, true) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -654,6 +663,33 @@ func sanitizeMetrics(m model.Metrics) model.Metrics {
 	if m.Uptime > maxUptime {
 		m.Uptime = maxUptime
 	}
+	if len(m.Mounts) > 16 {
+		m.Mounts = m.Mounts[:16]
+	}
+	for i := range m.Mounts {
+		m.Mounts[i].Path = sanitizetext.Text(m.Mounts[i].Path, 200)
+		if m.Mounts[i].Used > m.Mounts[i].Total {
+			m.Mounts[i].Used = m.Mounts[i].Total
+		}
+	}
+	if len(m.NICs) > 8 {
+		m.NICs = m.NICs[:8]
+	}
+	for i := range m.NICs {
+		m.NICs[i].Name = sanitizetext.Text(m.NICs[i].Name, 32)
+		if m.NICs[i].Rx > maxNetCounter {
+			m.NICs[i].Rx = maxNetCounter
+		}
+		if m.NICs[i].Tx > maxNetCounter {
+			m.NICs[i].Tx = maxNetCounter
+		}
+	}
+	if m.DiskReadBytes > maxNetCounter {
+		m.DiskReadBytes = maxNetCounter
+	}
+	if m.DiskWriteBytes > maxNetCounter {
+		m.DiskWriteBytes = maxNetCounter
+	}
 	return m
 }
 
@@ -712,6 +748,7 @@ func (s *Server) nodeViews(withExtras bool) []model.NodeView {
 		v := model.NodeMeta(n)
 		v.Host = s.st.Host(n.ID)
 		v.Latest = m
+		v.Traffic = s.st.TrafficUsage(n.ID)
 		v.Online = state == model.NodeStateOnline
 		v.State = state
 		v.LastSeen = ts
@@ -834,6 +871,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		"node":          n,
 		"host":          s.st.Host(id),
 		"latest":        m,
+		"traffic":       s.st.TrafficUsage(id),
 		"lastSeen":      ts,
 		"online":        state == model.NodeStateOnline,
 		"state":         state,
@@ -869,12 +907,16 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		OK        bool       `json:"ok"`
 		LatencyMs int        `json:"latencyMs"`
 		CertDays  int        `json:"certDays"`
+		LossPct   float64    `json:"lossPct"`
+		JitterMs  float64    `json:"jitterMs"`
 		Uptime    float64    `json:"uptime"` // 24h 可用率
 		Spark     [][3]int64 `json:"spark"`
 	}
 	out := make([]item, 0, len(svcs))
+	now := time.Now().Unix()
 	for _, sv := range svcs {
 		_, lat, ok, cert, has := s.st.ServiceLastFull(sv.ID)
+		st := s.st.ServiceStats(sv.ID, now-3600)
 		hist := s.st.ServiceSeries(sv.ID)
 		// Uptime 声明为 24h 可用率，而 ServiceSeries 返回整个环形缓冲
 		// （2880 点，按探测间隔不同可能是 8h 或 48h），必须显式截断窗口。
@@ -893,7 +935,8 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		if tot > 0 {
 			rate = float64(up) / float64(tot) * 100
 		}
-		it := item{Service: *sv, LatencyMs: lat, Spark: hist, Uptime: rate, CertDays: -1}
+		it := item{Service: *sv, LatencyMs: lat, Spark: hist, Uptime: rate, CertDays: -1,
+			LossPct: st.LossPct, JitterMs: st.JitterMs}
 		if has {
 			it.OK = ok
 			it.CertDays = cert
@@ -988,6 +1031,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Has          bool          `json:"has"` // 是否已有探测数据
 		Uptime       float64       `json:"uptime"`
 		FailRate     float64       `json:"failRate,omitempty"`
+		LossPct      float64       `json:"lossPct"`
+		JitterMs     float64       `json:"jitterMs"`
 		Latency      int           `json:"latencyMs"`
 		LatencySpark []model.Point `json:"latencySpark,omitempty"` // 24h 成功探测延迟
 	}
@@ -1061,6 +1106,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if vis.Provider {
 			p.Provider = v.Provider
 		}
+		if vis.Country {
+			p.Country = v.Country
+		}
 		// 迷你曲线：24h 序列降采样到 ~48 点，够画一条趋势线又不拖慢首屏
 		if vis.Metrics && len(series) > 1 {
 			step := len(series) / 48
@@ -1086,7 +1134,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		hist := s.st.ServiceSeries(sv.ID)
 		_, lat, ok, has := s.st.ServiceLast(sv.ID)
 		rate, rateHas := serviceUptime24(hist, now)
-		sp := svcPub{Name: sv.Name, Uptime: round1(rate), Has: has}
+		st := s.st.ServiceStats(sv.ID, now-3600)
+		sp := svcPub{Name: sv.Name, Uptime: round1(rate), Has: has,
+			LossPct: round1(st.LossPct), JitterMs: round1(st.JitterMs)}
 		if has {
 			sp.OK = ok
 			sp.Latency = lat
@@ -1154,6 +1204,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if cfg.Announcement.Enabled {
 		resp["announcement"] = cfg.Announcement
+	}
+	if cfg.Blocks.Map {
+		counts := map[string]int{}
+		for _, p := range out {
+			if p.Country != "" {
+				counts[p.Country]++
+			}
+		}
+		resp["map"] = counts
+	}
+	if cfg.Blocks.Activity {
+		// 活动流只下发公开可见的事件；资产到期等运营信息不进入公开页。
+		feed := make([]map[string]any, 0, 20)
+		for _, ev := range s.st.Events(40) {
+			switch ev.Kind {
+			case "node_online", "node_offline", "alert_opened", "alert_resolved":
+			default:
+				continue
+			}
+			feed = append(feed, map[string]any{
+				"ts": ev.TS, "kind": ev.Kind, "level": ev.Level, "text": ev.Text,
+			})
+			if len(feed) >= 20 {
+				break
+			}
+		}
+		resp["activity"] = feed
 	}
 	resp["maintenance"] = maintenanceBanner(maintGlobal, maintNodes)
 	resp["visibility"] = vis
@@ -1410,8 +1487,25 @@ func validateNodeMeta(n *model.Node) string {
 	n.Note = strings.TrimSpace(n.Note)
 	n.ExpireAt = strings.TrimSpace(n.ExpireAt)
 	n.Currency = strings.ToUpper(strings.TrimSpace(n.Currency))
+	n.Country = strings.ToUpper(strings.TrimSpace(n.Country))
 	if n.Name == "" {
 		return "name is required"
+	}
+	if n.Country != "" {
+		if len(n.Country) != 2 {
+			return "country 必须是两位 ISO 国家代码（如 US / JP / DE）"
+		}
+		for _, r := range n.Country {
+			if r < 'A' || r > 'Z' {
+				return "country 必须是两位字母国家代码"
+			}
+		}
+	}
+	if n.TrafficQuotaGB < 0 || n.TrafficQuotaGB > 1000000 {
+		return "trafficQuotaGb 必须在 0–1000000 之间"
+	}
+	if n.TrafficResetDay < 0 || n.TrafficResetDay > 28 {
+		return "trafficResetDay 必须在 0–28 之间"
 	}
 	if n.Currency == "" {
 		n.Currency = "USD"
@@ -1532,6 +1626,10 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		updated.Price = in.Price
 		updated.Currency = in.Currency
 		updated.Weight = in.Weight
+		updated.Country = in.Country
+		updated.Favorite = in.Favorite
+		updated.TrafficQuotaGB = in.TrafficQuotaGB
+		updated.TrafficResetDay = in.TrafficResetDay
 		// ID 与 Token 来自原节点，避免一次台账编辑静默换掉 Agent 凭据。
 		s.st.UpsertNode(&updated)
 		writeJSON(w, 200, adminNode(&updated))
@@ -1606,8 +1704,8 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		typ := strings.ToLower(strings.TrimSpace(in.Type))
-		if typ != "http" && typ != "https" && typ != "tcp" {
-			fail(w, 400, "type 必须是 http / https / tcp")
+		if typ != "http" && typ != "https" && typ != "tcp" && typ != "dns" {
+			fail(w, 400, "type 必须是 http / https / tcp / dns")
 			return
 		}
 		in.Type = typ
@@ -1662,9 +1760,13 @@ func (s *Server) handleAdminServiceByID(w http.ResponseWriter, r *http.Request) 
 		fail(w, 405, "method not allowed")
 		return
 	}
+	active := s.st.ActiveAlertsByService(id)
 	if !s.st.DeleteService(id) {
 		fail(w, 404, "service not found")
 		return
+	}
+	if s.engine != nil {
+		s.engine.RecoverClosed(active, "服务已删除")
 	}
 	writeJSON(w, 200, map[string]any{"deleted": id})
 }
@@ -1777,6 +1879,10 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 	testCfg := &notify.Config{
 		Enabled:     true,
 		MinSeverity: "info",
+		// 测试通知必须带上已保存的模板，否则用户无法在面板里验证
+		// 自定义标题/正文是否符合预期。
+		TitleFormat: cfg.TitleFormat,
+		BodyFormat:  cfg.BodyFormat,
 		Channels:    make([]notify.ChannelConfig, 0, len(cfg.Channels)),
 	}
 	for _, ch := range cfg.Channels {
@@ -1834,6 +1940,16 @@ type ruleMetric struct {
 
 // handleRuleMeta 下发规则表单的元数据。虽为静态字典，仍与同前缀管理路由保持一致要求令牌。
 func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
+	services := s.st.Services()
+	type serviceOption struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		NodeID string `json:"nodeId"`
+	}
+	svcOpts := make([]serviceOption, 0, len(services))
+	for _, sv := range services {
+		svcOpts = append(svcOpts, serviceOption{ID: sv.ID, Name: sv.Name, NodeID: sv.NodeID})
+	}
 	writeJSON(w, 200, map[string]any{
 		"metrics": []ruleMetric{
 			{Value: "offline", Label: "节点失联", Unit: "秒", Op: "gt", NoVal: true,
@@ -1844,9 +1960,32 @@ func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
 				Hint: "常用阈值 85–90"},
 			{Value: "disk", Label: "磁盘使用率", Unit: "%", Op: "gt", Min: 1, Max: 100, Step: 1,
 				Hint: "常用阈值 80–90"},
+			{Value: "swap", Label: "Swap 使用率", Unit: "%", Op: "gt", Min: 1, Max: 100, Step: 1,
+				Hint: "Swap 持续占用通常意味着内存不足"},
 			{Value: "load", Label: "1 分钟负载", Unit: "", Op: "gt", Min: 0.1, Max: 10000, Step: 0.1,
 				Hint: "建议设为 CPU 核心数的 1–2 倍"},
+			{Value: "load5", Label: "5 分钟负载", Unit: "", Op: "gt", Min: 0.1, Max: 10000, Step: 0.1,
+				Hint: "用于识别持续性负载"},
+			{Value: "load15", Label: "15 分钟负载", Unit: "", Op: "gt", Min: 0.1, Max: 10000, Step: 0.1,
+				Hint: "用于识别长期过载"},
+			{Value: "tcp_conn", Label: "TCP 连接数", Unit: "个", Op: "gt", Min: 1, Max: 1000000, Step: 1,
+				Hint: "可发现连接泄漏或异常扫描"},
+			{Value: "procs", Label: "进程数", Unit: "个", Op: "gt", Min: 1, Max: 1000000, Step: 1,
+				Hint: "进程暴涨可能是 fork 风暴"},
+			{Value: "traffic_quota", Label: "流量配额使用率", Unit: "%", Op: "gt", Min: 1, Max: 1000, Step: 1,
+				Hint: "按节点设置的月度配额计算；常用阈值 90–100"},
+			{Value: "service_down", Label: "服务探测失败", Unit: "", Op: "gt", NoVal: true,
+				Hint: "HTTP/TCP/DNS 探测失败即触发；阈值固定为 1"},
+			{Value: "latency", Label: "服务延迟", Unit: "ms", Op: "gt", Min: 1, Max: 600000, Step: 10,
+				Hint: "作用于服务探测；常用阈值 1000–3000"},
+			{Value: "loss", Label: "服务丢包率", Unit: "%", Op: "gt", Min: 1, Max: 100, Step: 1,
+				Hint: "最近 1 小时探测失败占比"},
+			{Value: "jitter", Label: "服务抖动", Unit: "ms", Op: "gt", Min: 1, Max: 600000, Step: 1,
+				Hint: "最近 1 小时相邻成功探测的延迟差均值"},
+			{Value: "cert_days", Label: "证书剩余天数", Unit: "天", Op: "lt", Min: 1, Max: 3650, Step: 1,
+				Hint: "仅作用于 HTTPS 服务；常用阈值 7–30"},
 		},
+		"services": svcOpts,
 		"severities": []map[string]string{
 			{"value": "critical", "label": "严重"},
 			{"value": "warn", "label": "警告"},
@@ -1872,16 +2011,17 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 		body := http.MaxBytesReader(w, r.Body, 16<<10)
 		// Enabled 用指针接收，区分"未提供"（默认启用）与"显式 false"
 		var req struct {
-			ID        string   `json:"id"`
-			Name      string   `json:"name"`
-			Metric    string   `json:"metric"`
-			Op        string   `json:"op"`
-			Threshold *float64 `json:"threshold"`
-			Duration  int      `json:"duration"`
-			Severity  string   `json:"severity"`
-			Enabled   *bool    `json:"enabled"`
-			NodeIDs   []string `json:"nodeIds"`
-			Groups    []string `json:"groups"`
+			ID         string   `json:"id"`
+			Name       string   `json:"name"`
+			Metric     string   `json:"metric"`
+			Op         string   `json:"op"`
+			Threshold  *float64 `json:"threshold"`
+			Duration   int      `json:"duration"`
+			Severity   string   `json:"severity"`
+			Enabled    *bool    `json:"enabled"`
+			NodeIDs    []string `json:"nodeIds"`
+			Groups     []string `json:"groups"`
+			ServiceIDs []string `json:"serviceIds"`
 		}
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
@@ -1894,7 +2034,7 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !validMetric(req.Metric) {
-			fail(w, 400, "metric 无效，可选 offline/cpu/mem/disk/load")
+			fail(w, 400, "metric 无效")
 			return
 		}
 		severity := strings.TrimSpace(req.Severity)
@@ -1906,9 +2046,9 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// offline 规则不需要阈值；其余指标必须提供且在合理区间
+		// offline / service_down 规则不需要阈值；其余指标必须提供且在合理区间
 		threshold := 0.0
-		if req.Metric != "offline" {
+		if req.Metric != "offline" && req.Metric != "service_down" {
 			if req.Threshold == nil {
 				fail(w, 400, "该指标必须提供 threshold")
 				return
@@ -1932,16 +2072,17 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		rule := &model.AlertRule{
-			ID:        req.ID,
-			Name:      strings.TrimSpace(req.Name),
-			Metric:    req.Metric,
-			Op:        normalizeOp(req.Op, req.Metric),
-			Threshold: threshold,
-			Duration:  duration,
-			Severity:  severity,
-			Enabled:   true,
-			NodeIDs:   normalizeScope(req.NodeIDs),
-			Groups:    normalizeScope(req.Groups),
+			ID:         req.ID,
+			Name:       strings.TrimSpace(req.Name),
+			Metric:     req.Metric,
+			Op:         normalizeOp(req.Op, req.Metric),
+			Threshold:  threshold,
+			Duration:   duration,
+			Severity:   severity,
+			Enabled:    true,
+			NodeIDs:    normalizeScope(req.NodeIDs),
+			Groups:     normalizeScope(req.Groups),
+			ServiceIDs: normalizeScope(req.ServiceIDs),
 		}
 		if req.Enabled != nil {
 			rule.Enabled = *req.Enabled
@@ -1978,15 +2119,16 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		body := http.MaxBytesReader(w, r.Body, 16<<10)
 		var req struct {
-			Name      string    `json:"name"`
-			Metric    string    `json:"metric"`
-			Op        string    `json:"op"`
-			Threshold *float64  `json:"threshold"`
-			Duration  *int      `json:"duration"`
-			Severity  string    `json:"severity"`
-			Enabled   *bool     `json:"enabled"`
-			NodeIDs   *[]string `json:"nodeIds"`
-			Groups    *[]string `json:"groups"`
+			Name       string    `json:"name"`
+			Metric     string    `json:"metric"`
+			Op         string    `json:"op"`
+			Threshold  *float64  `json:"threshold"`
+			Duration   *int      `json:"duration"`
+			Severity   string    `json:"severity"`
+			Enabled    *bool     `json:"enabled"`
+			NodeIDs    *[]string `json:"nodeIds"`
+			Groups     *[]string `json:"groups"`
+			ServiceIDs *[]string `json:"serviceIds"`
 		}
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
@@ -2025,9 +2167,9 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 			// offline 规则的阈值是「失联多少秒」，与 cpu/mem 的量纲无关。
 			// 原来这里借道 thresholdRange 拿到 (0,0)，导致前端整体回传规则时
 			// 被 400 拒绝；改为按秒数区间单独校验，并归一化为 0。
-			if updated.Metric == "offline" {
-				if *req.Threshold < 0 || *req.Threshold > 86400*7 {
-					fail(w, 400, "offline 规则的 threshold 是失联秒数，必须在 0 – 604800 之间")
+			if updated.Metric == "offline" || updated.Metric == "service_down" {
+				if *req.Threshold != 0 && *req.Threshold != 1 {
+					fail(w, 400, "该指标的阈值固定为 1，无需填写")
 					return
 				}
 				updated.Threshold = 0
@@ -2056,7 +2198,10 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 		if req.Groups != nil {
 			updated.Groups = normalizeScope(*req.Groups)
 		}
-		if updated.Metric == "offline" {
+		if req.ServiceIDs != nil {
+			updated.ServiceIDs = normalizeScope(*req.ServiceIDs)
+		}
+		if updated.Metric == "offline" || updated.Metric == "service_down" {
 			updated.Threshold = 0
 			updated.Op = "gt"
 		} else {
@@ -2129,7 +2274,9 @@ func normalizeScope(values []string) []string {
 
 func validMetric(m string) bool {
 	switch m {
-	case "offline", "cpu", "mem", "disk", "load":
+	case "offline", "cpu", "mem", "disk", "swap", "load", "load5", "load15",
+		"tcp_conn", "procs", "traffic_quota",
+		"service_down", "latency", "loss", "jitter", "cert_days":
 		return true
 	}
 	return false
@@ -2146,22 +2293,35 @@ func validSeverity(sv string) bool {
 // thresholdRange 返回各指标的合法阈值区间。
 func thresholdRange(metric string) (float64, float64) {
 	switch metric {
-	case "cpu", "mem", "disk":
+	case "cpu", "mem", "disk", "swap", "loss":
 		return 1, 100
-	case "load":
+	case "load", "load5", "load15":
 		return 0.1, 10000
-	case "offline":
+	case "tcp_conn":
+		return 1, 1000000
+	case "procs":
+		return 1, 1000000
+	case "latency", "jitter":
+		return 1, 600000
+	case "cert_days":
+		return 1, 3650
+	case "traffic_quota":
+		return 1, 1000
+	case "offline", "service_down":
 		return 0, 0
 	}
 	return 0, 0
 }
 
-// normalizeOp 归一化比较符：offline 固定 gt；其余默认 gt。
+// normalizeOp 归一化比较符：offline 固定 gt；证书剩余天数默认 lt；其余默认 gt。
 func normalizeOp(op, metric string) string {
-	if metric == "offline" {
+	if metric == "offline" || metric == "service_down" {
 		return "gt"
 	}
-	if op == "lt" {
+	if op == "lt" || op == "gt" {
+		return op
+	}
+	if metric == "cert_days" {
 		return "lt"
 	}
 	return "gt"

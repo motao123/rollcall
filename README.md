@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.9.7**（`./rollcall-server -version` 可查）。
+当前版本 **v1.10.0**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -70,14 +70,17 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 
 ### 1. 节点监控（融合）
 - **Nezha 式指标维度**：CPU、内存、Swap、磁盘、负载（1/5/15）、TCP 连接数、进程数、运行时长、网络收发
+- **采集粒度**：除根分区与总网卡外，Agent 还会上报每个挂载点（`mounts`）、每块网卡（`nics`）
+  与累计磁盘 I/O（`diskReadBytes` / `diskWriteBytes`），节点详情页可展开查看
 - **Komari 式轻量实现**：无数据库、单二进制、启动即用
 - 每个节点一张卡片：三色资源条 + 迷你 CPU 曲线 + 区域/流量/运行时长
 - 节点详情：五张时序图（CPU / 内存 / 磁盘 / 网络速率 / 负载），支持 1h / 6h / 24h / 7d / 30d / 365d 切换；
   长范围自动使用 1m / 5m / 1h 聚合，不会一次返回数十万原始点
 
 ### 2. 服务探测（Nezha 强项）
-- 协议：HTTP(S) / TCP
-- 指标：可用性、延迟、HTTP 状态码、**TLS 证书剩余天数**（不足一天按 1 计，`0`=已过期，`-1`=非 TLS）
+- 协议：HTTP(S) / TCP / **DNS**（解析 A/AAAA，可配合 `loss`、`latency` 规则）
+- 指标：可用性、延迟、HTTP 状态码、**TLS 证书剩余天数**（不足一天按 1 计，`0`=已过期，`-1`=非 TLS）、
+  **抖动（jitter）与丢包率（loss）**（基于该服务最近探测样本计算）
 - 24 小时可用率统计 + 最近 2 小时延迟迷你曲线
 - **异常服务自动置顶**，一眼看到哪里坏了
 - 探测由**服务端发起**，不经 Agent —— 单个 Agent 沦陷无法污染其他节点的服务状态
@@ -86,11 +89,17 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 - HTTP 跳转逐跳重新校验地址，3xx 不再默认视为健康；TCP 目标必须是合法的 `host:port`
 
 ### 3. 告警与通知（融合三者）
-- 规则维度：`offline` / `cpu` / `mem` / `disk` / `load`
+- 规则维度：`offline` / `cpu` / `mem` / `disk` / `swap` / `load` / `load5` / `load15` /
+  `tcp_conn` / `procs` / `traffic_quota` / `service_down` / `latency` / `loss` / `jitter` / `cert_days`
 - 支持 `gt` / `lt` 比较与 **持续时长抑制**（避免抖动误报）
 - 三级严重度：`info` / `warn` / `critical`，可按阈值过滤
 - 告警自动恢复（指标回落即置为已恢复）
-- 默认规则开箱即用：失联 3 分钟、CPU>90% 持续 5 分钟、内存>90%、磁盘>85%
+- **服务类规则可按服务定向**：`serviceIds` 留空表示全部服务；证书临期、服务宕机、丢包、抖动
+  都可只对指定探测目标生效
+- **流量配额告警**：节点可设置每周期配额（GB）与周期起始日（1–28），
+  跨月自动重置，使用率超过默认规则阈值（100%）即告警
+- 默认规则开箱即用：失联 3 分钟、CPU>90% 持续 5 分钟、内存>90%、磁盘>85%、
+  服务探测失败、证书剩余不足 14 天、流量配额超限
 - **规则可在界面增删改**：阈值、持续时间、级别、启停全部可调
   （`offline` 规则自动隐藏阈值输入框）；服务端做完整校验
   （metric 白名单、阈值区间 1–100、duration 0–86400、severity 白名单）
@@ -134,6 +143,15 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 - **队列可运维**：设置页列出最近 100 条任务（状态、尝试次数、最近错误），失败或被静默拦截的任务
   可在修复通道后手动重试，重试会重置尝试次数并立即唤醒调度器
 - **变更留痕**：规则停用、删除或收紧定向范围导致活跃告警被关闭时，会补发恢复通知，不再静默消失
+- **免打扰时段**：可设置起止小时（支持跨午夜）。窗口内只有 `critical` 与恢复通知立即发送，
+  其余任务推迟到窗口结束；实际发送时间记录在通知队列中
+- **摘要聚合**：`digestMins` 可把普通告警按固定分钟窗口合并为一条摘要，critical 与恢复通知不合并；
+  摘要窗口与免打扰同时启用时取较晚的时间
+- **自定义模板**：标题/正文支持 `{title}`、`{detail}`、`{node}`、`{rule}`、`{value}`、
+  `{severity}`、`{status}`、`{time}`、`{link}` 占位符；所有通道（含 Webhook）统一套用，
+  发送测试通知时也会应用当前模板，便于先验证再启用
+- **运行报告**：可开启每日/每周/每月报告，在配置的小时（本地时区）汇总节点在线率、
+  平均资源、活跃告警、服务异常、周期流量与成本；报告随同现有通知通道发送
 
 **通知插件（可选，显式开启）**
 
@@ -171,10 +189,31 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
 
-- 字段：服务商、地域、分组、到期日、年付价、币种、备注
+- 字段：服务商、地域、分组、到期日、年付价、币种、备注、国家代码、收藏
 - 30 天内到期自动进入「即将到期」列表（7 天内标红）
 - 月度成本自动折算（年付 ÷ 12，CNY 按汇率折算为 USD 聚合）
 - 节点卡片与台账共用同一份数据，不重复录入
+- **到期提醒**：`expiryDays` 控制提前提醒天数（默认 7 天，`-1` 关闭），
+  到期当天与提前提醒各发送一次通知，跨重启不会重复轰炸（已发送记录持久化）
+- **续费日历**：可登记每次实际续费（日期、金额、币种、备注），
+  台账页按月展示续费记录与成本回溯；续费记录随状态快照持久化
+
+### 4.1 跨节点对比与收藏
+
+- 「对比」页按当前实时指标横向比较所有节点：CPU/内存/磁盘、负载、实时网速、
+  本周期流量、月摊成本与到期剩余天数
+- 支持只看收藏（`favorite=1`），收藏状态在节点/台账中一键切换
+- `GET /api/compare` 返回聚合行与 `summary`（收藏数、在线数、周期流量合计等），
+  可直接用于外部报表
+
+### 4.2 加密配置备份
+
+- 设置页可导出**配置级**加密备份（v2 格式）：节点台账、服务、规则、通知配置、
+  状态页、主题、续费记录与令牌摘要；不包含历史指标大文件
+- 备份文件使用 PBKDF2-SHA256 派生密钥 + AES-256-GCM 加密，导出响应附带
+  `filename`、`size` 与 `sha256` 校验值
+- 恢复时必须显式提交 `confirm` 与备份密码，并校验摘要；恢复后会保留节点上报令牌，
+  Agent 无需重新配置
 
 ### 5. 公开状态页（免登录）
 
@@ -188,6 +227,8 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
   - 搜索（名称/分组/地区/系统）+ 状态筛选 + 分组下拉
   - 节点卡片：状态徽标与数据延迟/离线的"最后上报"提示、CPU/内存/磁盘进度条
     （按 75%/90% 变色）、实时上下行与累计流量、CPU 迷你趋势、**48 段 24h 可用性色块**
+  - **国家/地区分布图**与**最近活动流**（告警开启/恢复、节点上下线）可在展示配置中开关；
+    只使用显式开启的国家字段，未设置国家的节点不会出现在地图上
 - **节点详情**（`#/n/<hid>`）
   - 资源环（CPU/内存/磁盘）、24h 可用率、负载/运行时间/进程/TCP/Swap/实时网速
   - 主机信息（按开关展示主机名、系统、内核、架构、CPU 型号、核心数、虚拟化）
@@ -250,6 +291,21 @@ CPU 型号、核心数、虚拟化、进程数、TCP、Swap 等默认关闭，�
 管理写接口与 CSV 导出接受会话 Cookie（写操作需带 `X-Requested-With`）或 `X-Admin-Token`；
 Agent 上报只认节点令牌。
 
+**两步验证（TOTP）**：设置页可绑定任意标准 TOTP 应用（RFC 6238，6 位/30 秒，±1 窗口）。
+启用后登录必须先提交密码、再提交动态码；启用/停用都需要当前密码，停用还需有效动态码。
+启用或停用会递增会话版本号，其他设备上的旧会话立即失效。
+
+**范围化 API 令牌**：除固定的 `X-Admin-Token` 外，可在设置页创建 `rct_` 前缀的自动化令牌：
+
+| scope | 权限 |
+|---|---|
+| `read` | 全部只读接口（`/api/overview`、`/api/nodes`、`/api/services`、`/api/alerts`、`/api/compare` 等） |
+| `admin` | 全部接口与写操作 |
+
+- 明文只在创建响应中出现一次；服务端仅保存 SHA-256 摘要，列表与日志永不回显
+- 可设置有效期（0–3650 天），到期自动拒绝；最近使用时间会持久化，重启后令牌仍然有效
+- 令牌通过 `Authorization: Bearer <token>` 使用；`read` 令牌访问管理写接口返回 403
+
 ---
 
 ## 三、数据采集与展示
@@ -263,8 +319,9 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 | CPU 使用率 | `/proc/stat` 两次差值 |
 | 内存 / Swap | `/proc/meminfo`（用 `MemAvailable` 算真实可用） |
 | 负载 / 进程数 | `/proc/loadavg` |
-| 磁盘 | `statfs("/")` |
-| 网络收发 | `/proc/net/dev`（排除 lo / veth / docker） |
+| 磁盘 | `statfs`：根分区 + `/proc/mounts` 中每个真实挂载点 |
+| 磁盘 I/O | `/proc/diskstats`（累计读写字节，排除分区重复计数） |
+| 网络收发 | `/proc/net/dev`（汇总 + 每块物理网卡；排除 lo / veth / docker） |
 | TCP 连接数 | `/proc/net/tcp{,6}` 中状态为 `01`（ESTABLISHED） |
 | 运行时长 | `/proc/uptime` |
 | 主机信息 | `/etc/os-release`、`/proc/cpuinfo`、`/proc/sys/kernel/osrelease` |
@@ -288,9 +345,11 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 - 启动时自动恢复；兼容旧版本写出的明文 JSON，首次保存后自动转为 gzip
 - 历史缺失或损坏时自动用 24h 原始点回填，损坏文件隔离为 `history.json.corrupt-<时间>`；
   正常重启只回放上次落盘之后的原始点，不会重复累计
-- 快照带 `schemaVersion`（当前为 3）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
+- 快照带 `schemaVersion`（当前为 4）：更高版本的快照会被隔离为 `state.json.newer-<时间>` 并拒绝载入，
   避免新结构被旧程序静默读成零值；v2 新增通知队列、投递统计与静默期，
-  v3 仅提升版本号（历史聚合写入独立文件），旧版 v1/v2/无版本快照仍可直接载入
+  v3 将历史聚合写入独立文件，v4 新增续费记录、API 令牌摘要、活动事件、
+  到期提醒发送记录与流量周期；
+  旧版 v1/v2/v3/无版本快照仍可直接载入
 - 快照损坏会隔离为 `state.json.corrupt-<时间>` 并拒绝启动，
   而不是静默以空库运行（否则全部节点与令牌会凭空消失）
 
@@ -377,7 +436,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.7`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -751,7 +810,7 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 构建机
-make linux VERSION=v1.9.7
+make linux VERSION=v1.10.0
 scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
 ```
 
@@ -776,6 +835,27 @@ sudo systemctl start rollcall-server
 ```
 
 unit 文件只有在该版本明确要求时才需要同步替换；替换后执行 `systemctl daemon-reload`。
+
+**一键升级/回滚脚本**（可选）：`deploy/rollcall-server-upgrade.sh` 把上面的步骤收敛为一条命令，
+适合脚本化发布：
+
+```bash
+# 在控制端本机执行；--sha256 为必填，防止传输损坏或拉错文件
+sudo sh deploy/rollcall-server-upgrade.sh upgrade \
+  --file /tmp/rollcall-server.new \
+  --sha256 "$(sha256sum /tmp/rollcall-server.new | awk '{print $1}')" \
+  --service rollcall-server \
+  --health http://127.0.0.1:19080/healthz
+
+# 回滚到升级前的 .prev
+sudo sh deploy/rollcall-server-upgrade.sh rollback --service rollcall-server \
+  --health http://127.0.0.1:19080/healthz
+```
+
+- 升级前校验 ELF 魔数、架构与 SHA-256；当前二进制备份为 `rollcall-server.prev`
+- 原子替换后重启 systemd 单元，最多等待 20 秒健康检查；失败自动恢复 `.prev` 并再次重启
+- 使用 `/run/rollcall-upgrade.lock` 防止并发执行；仅支持 Linux
+- 脚本不会修改 unit 文件与数据目录；schema 升级后的数据回滚仍需按下方说明恢复备份
 
 ### 2. 被控端 Agent
 
@@ -911,11 +991,12 @@ rollcall/
 
 ## 九、已知限制
 
-1. **未实现** ICMP 探测（需 raw socket 权限；HTTP/TCP 已覆盖绝大多数场景）
+1. 未内置 ICMP ping 探测（需 raw socket 权限）；HTTP/TCP/DNS + 丢包/抖动已覆盖绝大多数场景
 2. 长历史依赖本地分层聚合（默认 1h 层 365 天）；更长期归档或多实例仍需外接 TSDB
 3. 单实例单进程，无水平扩展设计（40 台规模绰绰有余）
-4. 无多用户与权限体系（单一管理员账号，适合个人/小团队）
-5. Agent 自更新仅支持 Linux，且要求对二进制目录有写权限；服务端升级仍由运维执行
+4. 无多用户与权限体系（单一管理员账号 + 两种 API 令牌 scope，适合个人/小团队）
+5. Agent 自更新仅支持 Linux，且要求对二进制目录有写权限；控制端升级由运维执行，
+   可用 `deploy/rollcall-server-upgrade.sh` 一键完成，但**不支持**远程下发升级
 6. 主题只有固定字段，通知插件是本机受信任扩展而非沙箱；两者都需要管理权限才能配置
 
 ---
@@ -933,6 +1014,10 @@ rollcall/
 | ~~P7~~ | ~~外观主题沙箱（固定字段 + 白名单 CSS 变量）~~ ✅ |
 | ~~P8~~ | ~~通知插件机制（本地清单、无 shell、环境/超时隔离）~~ ✅ |
 | ~~P9~~ | ~~Agent 签名自更新 + 自动/手动回滚~~ ✅ |
+| ~~P10~~ | ~~监控闭环：服务/证书告警、到期提醒、流量配额、续费日历~~ ✅ |
+| ~~P11~~ | ~~告警指标扩展、通知降噪（免打扰/摘要/模板/报告）、DNS 与丢包抖动、TOTP、范围化 API 令牌~~ ✅ |
+| ~~P12~~ | ~~跨节点对比与收藏、加密配置备份、运行报告、公开页地图/活动流、多挂载点/网卡/磁盘 I/O 采集~~ ✅ |
+| ~~P13~~ | ~~控制端一键升级/回滚脚本（校验哈希 + 健康检查 + 自动回滚）~~ ✅ |
 
 **P5 明细**：
 
@@ -983,15 +1068,27 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十一、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.7）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.10.0）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.7、active + enabled |
-| 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过 |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.10.0、active + enabled；13/13 节点在线 |
+| 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过；Node 20 对 `app.js`/`status.js` 语法检查通过 |
+| 端到端脚本 | `rollcall-e2e.sh` 隔离实例 116/116 通过：P0–P3 全部新功能、通知模板、摘要/免打扰、证书/服务/流量告警、DNS/抖动/丢包、TOTP、范围化令牌、加密备份、报告、升级/回滚 |
 | 面板账号 | 设置页可直接修改用户名/邮箱与密码，均需当前密码确认；改后当前浏览器续签、其他设备旧会话立即失效；旧用户名/旧密码登录 401，新凭据可登录；`admin-user.json` 仍仅存 PBKDF2 哈希 |
-| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.6 → v1.9.7，配置未改动，`.prev` 保留 v1.9.6；分发目录同步更新 amd64/arm64 二进制 |
-| Agent 版本上报 | `X-Agent-Version` 上报后管理 API 显示 v1.9.7 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion` |
+| 服务端升级脚本 | 生产机用 `deploy/rollcall-server-upgrade.sh`：v1.9.7 → v1.10.0，强制 sha256 校验、`.prev` 保留、健康检查失败自动回滚；升级后 `/healthz` ok、登录 200/未登录 401 |
+| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.7 → v1.10.0，配置与 unit 哈希未改动，`.prev` 保留 v1.9.7；分发目录同步更新 amd64/arm64 二进制 |
+| Agent 版本上报 | 本机 Agent 上报 v1.10.0 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion`（远端节点多为旧版 Agent，未发送版本头） |
+| 新告警闭环 | 服务宕机、TLS 证书剩余天数、月度流量配额三条默认规则在生产创建成功（201）；告警触发 Webhook 与恢复通知、到期提醒均进入 Outbox |
+| 网络质量 | DNS/HTTPS/TCP 探测返回延迟、抖动与丢包；公开页展示「可用率 · 抖动 · 丢包」，探测全失败时标记「探测失败」 |
+| 通知降噪 | 免打扰窗口、摘要聚合、自定义标题/正文模板对 Webhook 同样生效；每日/每周/每月报告可配置并经通知通道送达 |
+| 资产与续费 | 台账页续费日历按月列出到期与续费记录；到期提醒按 `expiryDays` 提前发送且同一资产只提醒一次 |
+| 对比与收藏 | 对比页展示分组聚合、节点横向对比、收藏优先排序；收藏状态持久化 |
+| 公开页增强 | 地区分布、事件时间线与最近活动流正常渲染；公开接口仍不含主机名/IP/价格等敏感字段 |
+| 安全增强 | TOTP 登录（RFC 6238，±1 窗口）与 `rct_` 范围化 API 令牌（read/admin、SHA-256 落盘、重启后仍可匹配）；`/metrics`、管理令牌 API 正常 |
+| 加密备份 | AES-256-GCM 导出/导入仅覆盖配置（节点、探测、规则、静默、续费、设置与节点令牌），导入需确认且不触碰监控历史 |
+| 采集粒度 | 本机节点上报多挂载点、多网卡与磁盘 I/O；`/api/admin/nodes` 详情可见 mounts/nics/diskIo，快照 schema 升为 4 |
+| UI 冒烟 | 概览、对比、台账、状态页、设置、公开页均正常渲染；1323px 视口无横向溢出、控制台无错误；登录、会话与退出正常 |
 | 会话吊销 | 退出登录后旧 Cookie 访问会话接口返回未登录、管理 API 401；重启控制端后旧 Cookie 仍处于吊销状态（吊销列表已持久化）；仅接受规范 base64 令牌，改写末位字符无法绕过吊销 |
 | 升级提示 UI | 概览、节点列表、设置页与详情页均显示「可升级」（临时实例模拟旧 Agent）；636px 宽无横向溢出，浏览器控制台无错误 |
 | 公开状态页 | `/status` 匿名可访问；13 个节点实测在线；1440px 三列 / 390px 单列均无横向溢出；浅色、深色、跟随系统切换正常 |
@@ -1008,7 +1105,7 @@ certificate_days_remaining,uptime_percent_24h}`
 | 凭据存储 | `admin-user.json` 仅存 PBKDF2-SHA256 哈希（600,000 次迭代），无明文密码；`session.key` 0600 |
 | 上报频率 | 30 秒一报，在线/数据延迟/离线状态判定正确 |
 | 指标正确性 | CPU/内存/磁盘与 `df`/`free` 交叉核对无偏差 |
-| 数据持久化 | state.json 与 gzip history.json 重启后保留，历史快照升级 schema 2 |
+| 数据持久化 | state.json 与 gzip history.json 重启后保留；生产快照 schema 4、历史 schema 2，旧版本快照可自动载入 |
 | 历史范围 | 1h/6h/24h 原始点；7d/30d/365d 走 1m/5m/1h 聚合，全年合成数据 UI 验证通过 |
 | 告警与通知 | 默认规则加载；Outbox 指标正常；插件投递、环境隔离与拒绝全局可写目录在独立实例验证 |
 | 主题 | 公开读取默认主题，管理端校验、保存与重启后持久化均正常 |

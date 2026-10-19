@@ -36,6 +36,7 @@ type Engine struct {
 	active map[string]*model.Alert // 已在告警中的条目
 	lastAt map[string]int64        // 上次通知时间，用于重复提醒
 	recAt  map[string]int64        // ruleID|nodeID -> 最近一次恢复时间，用于抖动抑制
+	states map[string]string       // nodeID -> 上一轮状态，用于活动流上下线事件
 	notify func(notify.Message)    // 投递回调（nil 表示不通知）
 	repeat int                     // 重复通知间隔（秒），0=不重复
 	link   string                  // 面板地址，拼进通知
@@ -64,6 +65,7 @@ func (e *Engine) now() int64 {
 	return fn()
 }
 
+// New 初始化引擎，并从持久化的未恢复告警恢复状态。
 func New(st *store.Store) *Engine {
 	e := &Engine{
 		st:     st,
@@ -71,18 +73,46 @@ func New(st *store.Store) *Engine {
 		active: map[string]*model.Alert{},
 		lastAt: map[string]int64{},
 		recAt:  map[string]int64{},
+		states: map[string]string{},
 	}
 	// 从持久化的未恢复告警恢复引擎状态：
 	// 否则重启后首轮评估会把这些告警当成"新告警"再通知一遍。
 	// lastAt 设为当前时间，让重复提醒从重启时刻重新计时。
 	now := time.Now().Unix()
 	for _, a := range st.ActiveAlerts() {
-		key := a.RuleID + "|" + a.NodeID
+		key := alertKey(a)
 		e.active[key] = a
 		e.since[key] = a.StartedAt
 		e.lastAt[key] = now
 	}
 	return e
+}
+
+// alertKey 返回告警在引擎内的唯一键。
+// 节点规则用 ruleID|nodeID；服务规则用 ruleID|serviceID —— 服务 ID 与
+// 节点 ID 前缀不同（s_/n_），不会互相碰撞，又能让同一条规则下的
+// 多个服务各自独立计时。
+func alertKey(a *model.Alert) string {
+	if a.ServiceID != "" {
+		return a.RuleID + "|" + a.ServiceID
+	}
+	return a.RuleID + "|" + a.NodeID
+}
+
+func ruleKey(ruleID, nodeID, serviceID string) string {
+	if serviceID != "" {
+		return ruleID + "|" + serviceID
+	}
+	return ruleID + "|" + nodeID
+}
+
+// isServiceMetric 判断规则是否作用于服务探测结果。
+func isServiceMetric(metric string) bool {
+	switch metric {
+	case "service_down", "latency", "loss", "jitter", "cert_days":
+		return true
+	}
+	return false
 }
 
 // SetNotifier 注入通知投递回调。
@@ -119,7 +149,7 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 		// （engine.Start 早于 web.New 装通知器、或 Outbox=nil 时会被置空）。
 		// 放在 nil 判断之后 return 会让 lastAt 永久残留，同一 key 下次越界
 		// 时就会拿一个陈旧时间做「重复提醒」判断。
-		delete(e.lastAt, a.RuleID+"|"+a.NodeID)
+		delete(e.lastAt, alertKey(a))
 	}
 	e.mu.Unlock()
 	if fn == nil {
@@ -178,7 +208,7 @@ func (e *Engine) recoverClosedLocked(alerts []*model.Alert, reason, purgeRuleID 
 		keys := make(map[string]struct{}, len(alerts))
 		for _, a := range alerts {
 			if a != nil {
-				keys[a.RuleID+"|"+a.NodeID] = struct{}{}
+				keys[alertKey(a)] = struct{}{}
 			}
 		}
 		belongs = func(key string) bool {
@@ -273,6 +303,42 @@ func (e *Engine) FlapDeferred(rule *model.AlertRule, nodeID string, first, now i
 	return without && !with
 }
 
+// trackNodeStates 记录节点上下线事件，供公开活动流展示。
+func (e *Engine) trackNodeStates(nodes []*model.Node, now int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	seen := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = struct{}{}
+		_, ts, _ := e.st.Latest(n.ID)
+		st := store.NodeState(ts, now)
+		prev, ok := e.states[n.ID]
+		e.states[n.ID] = st
+		if !ok || prev == st {
+			continue
+		}
+		switch {
+		case st == model.NodeStateOffline && prev != model.NodeStateNoData:
+			e.st.AddEvent(model.Event{
+				TS: now, Kind: "node_offline", Level: model.LevelCritical,
+				NodeID: n.ID, NodeName: n.Name,
+				Text: n.Name + " 已失联",
+			})
+		case st == model.NodeStateOnline && prev == model.NodeStateOffline:
+			e.st.AddEvent(model.Event{
+				TS: now, Kind: "node_online", Level: model.LevelInfo,
+				NodeID: n.ID, NodeName: n.Name,
+				Text: n.Name + " 已恢复在线",
+			})
+		}
+	}
+	for id := range e.states {
+		if _, ok := seen[id]; !ok {
+			delete(e.states, id)
+		}
+	}
+}
+
 // Evaluate 执行一轮评估。
 func (e *Engine) Evaluate() {
 	e.evalMu.Lock()
@@ -287,6 +353,10 @@ func (e *Engine) Evaluate() {
 	// 其既有活跃告警以"计划维护"为由关闭，避免挂到窗口结束才自愈。
 	maintGlobal, maintNodes := e.st.MaintenanceAt(now)
 
+	// 上下线事件独立于规则：即使没有启用离线规则，公开活动流也应能看到
+	// 节点掉线/恢复。只在状态真正变化时记录，避免每轮评估刷事件。
+	e.trackNodeStates(nodes, now)
+
 	// 本轮实际评估到的 key，用于清理引擎状态：
 	// 节点被删除或规则被停用后，它们不再进入下面的循环，
 	// 其 since/active/lastAt 条目会永久残留（内存泄漏），
@@ -297,6 +367,10 @@ func (e *Engine) Evaluate() {
 		if !rule.Enabled {
 			// 停用规则：关闭遗留活跃告警并补发恢复通知，避免静默消失
 			e.recoverClosedLocked(e.st.ResolveRuleAlerts(rule.ID), "规则已停用", rule.ID)
+			continue
+		}
+		if isServiceMetric(rule.Metric) {
+			// 服务规则在下面按服务维度评估；节点循环只处理节点指标。
 			continue
 		}
 		for _, n := range nodes {
@@ -352,7 +426,7 @@ func (e *Engine) Evaluate() {
 				continue
 			}
 			seen[key] = struct{}{}
-			val, breached := e.check(rule, n.ID, now)
+			val, breached := e.check(rule, n, now)
 
 			if !breached {
 				e.mu.Lock()
@@ -377,6 +451,14 @@ func (e *Engine) Evaluate() {
 					}
 					if prev != nil {
 						a.ID = prev.ID
+					}
+					// 只在实际关闭了一条告警时记录活动，避免每轮评估都刷事件。
+					if wasActive {
+						e.st.AddEvent(model.Event{
+							TS: now, Kind: "alert_resolved", Level: model.LevelInfo,
+							NodeID: n.ID, NodeName: n.Name,
+							Text: fmt.Sprintf("%s 的「%s」已恢复", n.Name, rule.Name),
+						})
 					}
 					e.send(a, true)
 				}
@@ -436,6 +518,176 @@ func (e *Engine) Evaluate() {
 				e.active[key] = a
 				e.lastAt[key] = now
 				e.mu.Unlock()
+				if isNew {
+					e.st.AddEvent(model.Event{
+						TS: now, Kind: "alert_opened", Level: rule.Severity,
+						NodeID: n.ID, NodeName: n.Name, Text: a.Message,
+					})
+				}
+				e.send(a, false)
+			}
+		}
+	}
+
+	// 服务类规则按服务维度独立评估。
+	// 不能把它们挂在节点循环里：节点离线时指标类规则会被跳过，
+	// 但服务探测仍然有效，而且证书剩余天数与节点在线状态无关。
+	nodeByID := make(map[string]*model.Node, len(nodes))
+	for _, n := range nodes {
+		nodeByID[n.ID] = n
+	}
+	services := e.st.Services()
+	for _, rule := range rules {
+		if !rule.Enabled || !isServiceMetric(rule.Metric) {
+			continue
+		}
+		for _, sv := range services {
+			n := nodeByID[sv.NodeID]
+			if n == nil {
+				continue
+			}
+			key := ruleKey(rule.ID, n.ID, sv.ID)
+			applies := serviceInScope(rule, sv) && ruleApplies(rule, n)
+			m := maintNodes[n.ID]
+			if m == nil {
+				m = maintGlobal
+			}
+			if !sv.Enabled || !applies || m != nil {
+				reason := "规则范围已调整"
+				if !sv.Enabled {
+					reason = "服务已停用"
+				}
+				if m != nil {
+					reason = maintenanceReason(m)
+				}
+				e.mu.Lock()
+				prev := e.active[key]
+				delete(e.since, key)
+				delete(e.active, key)
+				delete(e.lastAt, key)
+				delete(e.recAt, key)
+				e.mu.Unlock()
+				if e.st.ResolveServiceAlert(rule.ID, sv.ID) {
+					if prev == nil {
+						prev = &model.Alert{
+							RuleID: rule.ID, RuleName: rule.Name,
+							NodeID: n.ID, NodeName: n.Name,
+							ServiceID: sv.ID, ServiceName: sv.Name,
+							Severity: rule.Severity,
+						}
+					}
+					e.recoverClosedLocked([]*model.Alert{prev}, reason, "")
+				}
+				continue
+			}
+			seen[key] = struct{}{}
+			val, breached, known := e.checkService(rule, sv.ID, now)
+			if !known && !breached {
+				// 从未探测过的服务不产生指标类告警；service_down 会在
+				// checkService 里直接把「没有结果」判为故障。
+				e.mu.Lock()
+				delete(e.since, key)
+				prev, wasActive := e.active[key]
+				delete(e.active, key)
+				e.mu.Unlock()
+				if wasActive {
+					e.send(&model.Alert{
+						ID: prev.ID, RuleID: rule.ID, RuleName: rule.Name,
+						NodeID: n.ID, NodeName: n.Name,
+						ServiceID: sv.ID, ServiceName: sv.Name,
+						Severity: rule.Severity,
+						Message:  fmt.Sprintf("%s / %s 的「%s」已恢复", n.Name, sv.Name, rule.Name),
+					}, true)
+				}
+				e.st.ResolveServiceAlert(rule.ID, sv.ID)
+				continue
+			}
+
+			if !breached {
+				e.mu.Lock()
+				delete(e.since, key)
+				prev, wasActive := e.active[key]
+				delete(e.active, key)
+				if wasActive {
+					e.recAt[key] = now
+				}
+				e.mu.Unlock()
+				resolved := e.st.ResolveServiceAlert(rule.ID, sv.ID)
+				if wasActive || resolved {
+					a := &model.Alert{
+						RuleID: rule.ID, RuleName: rule.Name,
+						NodeID: n.ID, NodeName: n.Name,
+						ServiceID: sv.ID, ServiceName: sv.Name,
+						Severity: rule.Severity, Value: val,
+						Message: fmt.Sprintf("%s / %s 的「%s」已恢复", n.Name, sv.Name, rule.Name),
+					}
+					if prev != nil {
+						a.ID = prev.ID
+					}
+					if wasActive {
+						e.st.AddEvent(model.Event{
+							TS: now, Kind: "alert_resolved", Level: model.LevelInfo,
+							NodeID: n.ID, NodeName: n.Name, Text: a.Message,
+						})
+					}
+					e.send(a, true)
+				}
+				continue
+			}
+
+			e.mu.Lock()
+			first, ok := e.since[key]
+			if !ok {
+				e.since[key] = now
+				first = now
+			}
+			e.mu.Unlock()
+			need := e.requiredDuration(rule, key, now, false)
+			if now-first < need {
+				continue
+			}
+
+			a := &model.Alert{
+				ID:          fmt.Sprintf("al_%d_%s_%s", now, rule.ID, sv.ID),
+				RuleID:      rule.ID,
+				RuleName:    rule.Name,
+				NodeID:      n.ID,
+				NodeName:    n.Name,
+				ServiceID:   sv.ID,
+				ServiceName: sv.Name,
+				Severity:    rule.Severity,
+				Value:       val,
+				Message:     describeService(rule, n.Name, sv.Name, val),
+				StartedAt:   first,
+			}
+			isNew, exists := e.st.OpenAlert(a)
+			if !exists {
+				continue
+			}
+			e.mu.Lock()
+			_, tracked := e.active[key]
+			last := e.lastAt[key]
+			repeat := e.repeat
+			if !tracked && !isNew {
+				e.active[key] = a
+				e.lastAt[key] = now
+			}
+			e.mu.Unlock()
+			fire := isNew
+			if tracked && !fire && repeat > 0 && now-last >= int64(repeat) {
+				fire = true
+			}
+			if fire {
+				e.mu.Lock()
+				e.active[key] = a
+				e.lastAt[key] = now
+				e.mu.Unlock()
+				if isNew {
+					e.st.AddEvent(model.Event{
+						TS: now, Kind: "alert_opened", Level: rule.Severity,
+						NodeID: n.ID, NodeName: n.Name, Text: a.Message,
+					})
+				}
 				e.send(a, false)
 			}
 		}
@@ -489,6 +741,19 @@ func ruleApplies(rule *model.AlertRule, n *model.Node) bool {
 	return false
 }
 
+// serviceInScope 判断服务是否在规则的 ServiceIDs 范围内。
+func serviceInScope(rule *model.AlertRule, sv *model.Service) bool {
+	if len(rule.ServiceIDs) == 0 {
+		return true
+	}
+	for _, id := range rule.ServiceIDs {
+		if id == sv.ID {
+			return true
+		}
+	}
+	return false
+}
+
 // maintenanceReason 生成维护窗口的恢复原因。
 // 带上窗口标题，让恢复通知能说清"因为哪次维护"，而不是一句笼统的"计划维护"。
 func maintenanceReason(m *model.Maintenance) string {
@@ -499,7 +764,8 @@ func maintenanceReason(m *model.Maintenance) string {
 }
 
 // check 返回当前值与是否越界。
-func (e *Engine) check(rule *model.AlertRule, nodeID string, now int64) (float64, bool) {
+func (e *Engine) check(rule *model.AlertRule, n *model.Node, now int64) (float64, bool) {
+	nodeID := n.ID
 	m, ts, ok := e.st.Latest(nodeID)
 
 	// 离线判定与指标无关
@@ -514,6 +780,16 @@ func (e *Engine) check(rule *model.AlertRule, nodeID string, now int64) (float64
 		return 0, false
 	}
 
+	if rule.Metric == "traffic_quota" {
+		if n.TrafficQuotaGB <= 0 {
+			return 0, false
+		}
+		used := e.st.TrafficUsage(nodeID)
+		gb := float64(used.UsedRx+used.UsedTx) / (1 << 30)
+		pct := gb / n.TrafficQuotaGB * 100
+		return pct, pct >= rule.Threshold
+	}
+
 	if !ok || now-ts > store.OnlineWindow {
 		return 0, false // 已离线时不重复触发指标类告警
 	}
@@ -526,8 +802,18 @@ func (e *Engine) check(rule *model.AlertRule, nodeID string, now int64) (float64
 		v = pct(m.MemUsed, m.MemTotal)
 	case "disk":
 		v = pct(m.DiskUsed, m.DiskTotal)
+	case "swap":
+		v = pct(m.SwapUsed, m.SwapTotal)
 	case "load":
 		v = m.Load1
+	case "load5":
+		v = m.Load5
+	case "load15":
+		v = m.Load15
+	case "tcp_conn":
+		v = float64(m.TCPConn)
+	case "procs":
+		v = float64(m.Procs)
 	default:
 		return 0, false
 	}
@@ -537,6 +823,56 @@ func (e *Engine) check(rule *model.AlertRule, nodeID string, now int64) (float64
 		return v, v < rule.Threshold
 	default: // gt
 		return v, v > rule.Threshold
+	}
+}
+
+// checkService 返回服务指标当前值、是否越界、以及是否有可用数据。
+// 无数据时只有 service_down 视为故障；延迟/证书类指标静默等待首个探测结果，
+// 避免新建服务在第一次探测前就误报。
+func (e *Engine) checkService(rule *model.AlertRule, serviceID string, now int64) (float64, bool, bool) {
+	ts, latency, ok, certDays, has := e.st.ServiceLastFull(serviceID)
+	if rule.Metric == "service_down" {
+		if !has {
+			return 0, true, true
+		}
+		return 0, !ok, true
+	}
+	if !has {
+		return 0, false, false
+	}
+	_ = ts
+	_ = now
+	var v float64
+	switch rule.Metric {
+	case "latency":
+		if !ok {
+			return 0, false, true
+		}
+		v = float64(latency)
+	case "cert_days":
+		if certDays < 0 {
+			// 非 TLS 服务不参与证书规则。
+			return 0, false, false
+		}
+		v = float64(certDays)
+	case "loss", "jitter":
+		st := e.st.ServiceStats(serviceID, now-3600)
+		if !st.Has {
+			return 0, false, false
+		}
+		if rule.Metric == "loss" {
+			v = st.LossPct
+		} else {
+			v = st.JitterMs
+		}
+	default:
+		return 0, false, false
+	}
+	switch rule.Op {
+	case "lt":
+		return v, v < rule.Threshold, true
+	default:
+		return v, v > rule.Threshold, true
 	}
 }
 
@@ -559,13 +895,50 @@ func describe(rule *model.AlertRule, node string, v float64) string {
 			return fmt.Sprintf("%s 从未上报过数据（Agent 未部署或配置有误）", node)
 		}
 		return fmt.Sprintf("%s 已失联 %s", node, humanDur(int64(v)))
-	case "cpu", "mem", "disk":
+	case "cpu", "mem", "disk", "swap":
 		return fmt.Sprintf("%s %s 使用率 %.1f%%，%s阈值 %.0f%%",
 			node, metricName(rule.Metric), v, rel, rule.Threshold)
-	case "load":
-		return fmt.Sprintf("%s 1 分钟负载 %.2f，%s阈值 %.2f", node, v, rel, rule.Threshold)
+	case "load", "load5", "load15":
+		return fmt.Sprintf("%s %s %.2f，%s阈值 %.2f",
+			node, metricName(rule.Metric), v, rel, rule.Threshold)
+	case "tcp_conn":
+		return fmt.Sprintf("%s TCP 连接数 %.0f，%s阈值 %.0f", node, v, rel, rule.Threshold)
+	case "procs":
+		return fmt.Sprintf("%s 进程数 %.0f，%s阈值 %.0f", node, v, rel, rule.Threshold)
+	case "traffic_quota":
+		if rule.Op == "lt" {
+			return fmt.Sprintf("%s 本月流量使用率 %.1f%%，低于阈值 %.0f%%", node, v, rule.Threshold)
+		}
+		return fmt.Sprintf("%s 本月流量使用率 %.1f%%，%s阈值 %.0f%%（配额按节点设置）",
+			node, v, rel, rule.Threshold)
 	}
 	return fmt.Sprintf("%s %s = %.2f", node, rule.Metric, v)
+}
+
+// describeService 生成服务类告警文案。服务名与节点名同时出现，
+// 因为同一节点上可能配置了多个探测目标。
+func describeService(rule *model.AlertRule, node, service string, v float64) string {
+	rel := "超过"
+	if rule.Op == "lt" {
+		rel = "低于"
+	}
+	switch rule.Metric {
+	case "service_down":
+		return fmt.Sprintf("%s / %s 探测失败", node, service)
+	case "latency":
+		return fmt.Sprintf("%s / %s 延迟 %.0fms，%s阈值 %.0fms",
+			node, service, v, rel, rule.Threshold)
+	case "loss":
+		return fmt.Sprintf("%s / %s 丢包率 %.1f%%，%s阈值 %.0f%%",
+			node, service, v, rel, rule.Threshold)
+	case "jitter":
+		return fmt.Sprintf("%s / %s 抖动 %.1fms，%s阈值 %.0fms",
+			node, service, v, rel, rule.Threshold)
+	case "cert_days":
+		return fmt.Sprintf("%s / %s TLS 证书剩余 %.0f 天，%s阈值 %.0f 天",
+			node, service, v, rel, rule.Threshold)
+	}
+	return fmt.Sprintf("%s / %s %s = %.2f", node, service, rule.Metric, v)
 }
 
 func metricName(m string) string {
@@ -576,6 +949,14 @@ func metricName(m string) string {
 		return "内存"
 	case "disk":
 		return "磁盘"
+	case "swap":
+		return "Swap"
+	case "load":
+		return "1 分钟负载"
+	case "load5":
+		return "5 分钟负载"
+	case "load15":
+		return "15 分钟负载"
 	}
 	return m
 }
@@ -587,6 +968,9 @@ func DefaultRules() []*model.AlertRule {
 		{ID: "r_cpu", Name: "CPU 持续高负载", Metric: "cpu", Op: "gt", Threshold: 90, Duration: 300, Severity: "warn", Enabled: true},
 		{ID: "r_mem", Name: "内存使用率过高", Metric: "mem", Op: "gt", Threshold: 90, Duration: 300, Severity: "warn", Enabled: true},
 		{ID: "r_disk", Name: "磁盘空间不足", Metric: "disk", Op: "gt", Threshold: 85, Duration: 600, Severity: "critical", Enabled: true},
+		{ID: "r_service_down", Name: "服务探测失败", Metric: "service_down", Op: "gt", Threshold: 1, Duration: 120, Severity: "critical", Enabled: true},
+		{ID: "r_cert_days", Name: "TLS 证书临近过期", Metric: "cert_days", Op: "lt", Threshold: 14, Duration: 3600, Severity: "warn", Enabled: true},
+		{ID: "r_traffic_quota", Name: "流量配额超限", Metric: "traffic_quota", Op: "gt", Threshold: 100, Duration: 0, Severity: "warn", Enabled: true},
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -263,8 +264,12 @@ func (c *Collector) Collect() model.Metrics {
 		m.DiskUsed = (st.Blocks - st.Bfree) * uint64(st.Bsize)
 	}
 
-	// 网络（排除 lo）
-	m.NetRx, m.NetTx = readNetDev()
+	// 网络（排除 lo）：总量用于流量配额，明细用于面板展示
+	m.NetRx, m.NetTx, m.NICs = readNetDev()
+
+	// 磁盘 IO 累计扇区数与多挂载点
+	m.DiskReadBytes, m.DiskWriteBytes = readDiskIO()
+	m.Mounts = readMounts()
 
 	// TCP 已建立连接数
 	m.TCPConn = readTCPConns()
@@ -352,7 +357,7 @@ func readMemInfo() map[string]uint64 {
 	return out
 }
 
-func readNetDev() (rx, tx uint64) {
+func readNetDev() (rx, tx uint64, nics []model.NICInfo) {
 	f, err := os.Open("/proc/net/dev")
 	if err != nil {
 		return
@@ -377,8 +382,131 @@ func readNetDev() (rx, tx uint64) {
 		t, _ := strconv.ParseUint(f[8], 10, 64)
 		rx += r
 		tx += t
+		nics = append(nics, model.NICInfo{Name: iface, Rx: r, Tx: t})
+	}
+	sort.Slice(nics, func(i, j int) bool { return nics[i].Rx+nics[i].Tx > nics[j].Rx+nics[j].Tx })
+	if len(nics) > 8 {
+		nics = nics[:8]
 	}
 	return
+}
+
+// readDiskIO 汇总整盘读写扇区（diskstats 固定以 512 字节为单位）。
+// 跳过分区、dm/md/loop/ram：同时统计整盘与分区、或物理盘与 dm 映射
+// 会把同一份 IO 重复累加。
+func readDiskIO() (read, write uint64) {
+	b, err := os.ReadFile("/proc/diskstats")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 10 || !wholeDisk(f[2]) {
+			continue
+		}
+		r, _ := strconv.ParseUint(f[5], 10, 64)
+		w, _ := strconv.ParseUint(f[9], 10, 64)
+		read += r * 512
+		write += w * 512
+	}
+	return
+}
+
+func wholeDisk(name string) bool {
+	for _, p := range []string{"loop", "ram", "dm-", "md", "sr", "fd", "zram", "nbd"} {
+		if strings.HasPrefix(name, p) {
+			return false
+		}
+	}
+	if strings.HasPrefix(name, "nvme") {
+		// nvme0n1 是整盘，nvme0n1p1 是分区。
+		return !strings.Contains(name, "p")
+	}
+	if strings.HasPrefix(name, "mmcblk") {
+		return !strings.Contains(name, "p")
+	}
+	for _, p := range []string{"sd", "vd", "xvd", "hd"} {
+		if strings.HasPrefix(name, p) {
+			rest := name[len(p):]
+			if rest == "" {
+				return false
+			}
+			for _, c := range rest {
+				if c < 'a' || c > 'z' {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// readMounts 采集真实文件系统的挂载点用量。
+// 伪文件系统与容器运行时目录没有容量意义，统一跳过；按设备去重，
+// 避免 bind mount 把同一分区重复计入。
+func readMounts() []model.MountInfo {
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	skipFS := map[string]bool{
+		"proc": true, "sysfs": true, "devpts": true, "tmpfs": true, "devtmpfs": true,
+		"cgroup": true, "cgroup2": true, "securityfs": true, "pstore": true,
+		"bpf": true, "debugfs": true, "tracefs": true, "configfs": true,
+		"fusectl": true, "mqueue": true, "hugetlbfs": true, "autofs": true,
+		"rpc_pipefs": true, "nsfs": true, "binfmt_misc": true, "squashfs": true,
+		"fuse.gvfsd-fuse": true, "fuse.portal": true,
+	}
+	seen := map[string]bool{}
+	var out []model.MountInfo
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		dev := unescapeMount(fields[0])
+		path := unescapeMount(fields[1])
+		fstype := fields[2]
+		if skipFS[fstype] || strings.HasPrefix(fstype, "fuse.") {
+			continue
+		}
+		if dev == "none" || strings.HasPrefix(path, "/snap") ||
+			strings.HasPrefix(path, "/proc") || strings.HasPrefix(path, "/sys") ||
+			strings.HasPrefix(path, "/dev") || strings.HasPrefix(path, "/run") ||
+			strings.HasPrefix(path, "/var/lib/docker") {
+			continue
+		}
+		if seen[dev] {
+			continue
+		}
+		seen[dev] = true
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(path, &st); err != nil || st.Blocks == 0 {
+			continue
+		}
+		total := st.Blocks * uint64(st.Bsize)
+		used := (st.Blocks - st.Bfree) * uint64(st.Bsize)
+		out = append(out, model.MountInfo{Path: path, Used: used, Total: total})
+		if len(out) >= 12 {
+			break
+		}
+	}
+	// 根分区放最前，其余按路径排序，保证面板顺序稳定。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path == "/" || out[j].Path == "/" {
+			return out[i].Path == "/" && out[j].Path != "/"
+		}
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+func unescapeMount(s string) string {
+	r := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return r.Replace(s)
 }
 
 // sysClassNet 是网卡拓扑信息的根目录，测试中可替换。

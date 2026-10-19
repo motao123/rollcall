@@ -27,6 +27,9 @@ import (
 // sevRank 用于 MinSeverity 过滤。
 var sevRank = map[string]int{"info": 1, "warn": 2, "critical": 3}
 
+// SeverityRank 返回严重度排序值（未知为 0）。
+func SeverityRank(s string) int { return sevRank[s] }
+
 // ChannelConfig 是一个已配置的投递通道实例。
 // 同一类型可以配置多个（例如两个不同的 Telegram 群），因此用独立 ID 区分。
 type ChannelConfig struct {
@@ -43,6 +46,18 @@ type Config struct {
 	MinSeverity    string          `json:"minSeverity"`    // info | warn | critical
 	RepeatInterval int             `json:"repeatInterval"` // 同一告警重复通知间隔（秒），0=不重复
 	Channels       []ChannelConfig `json:"channels"`
+
+	// 通知降噪与扩展。旧配置没有这些键，Normalize 会补默认值。
+	QuietStart  int    `json:"quietStart"`    // 免打扰起始小时 0–23；-1 关闭
+	QuietEnd    int    `json:"quietEnd"`      // 免打扰结束小时 0–23
+	DigestMins  int    `json:"digestMins"`    // 摘要聚合窗口（分钟），0=逐条发送
+	TitleFormat string `json:"titleFormat"`   // 自定义标题模板，空=默认
+	BodyFormat  string `json:"bodyFormat"`    // 自定义正文模板，空=默认
+	ExpiryDays  int    `json:"expiryDays"`    // 到期提醒提前天数；<0 关闭
+	ReportDaily bool   `json:"reportDaily"`   // 每日运行报告
+	ReportWeek  bool   `json:"reportWeekly"`  // 每周运行报告
+	ReportMonth bool   `json:"reportMonthly"` // 每月运行报告
+	ReportHour  int    `json:"reportHour"`    // 报告发送小时（本地时区）
 }
 
 // Message 是一条待投递的通知。
@@ -97,9 +112,15 @@ type legacyConfig struct {
 	} `json:"email"`
 }
 
+// defaults 返回新配置的默认值。旧配置缺少新增字段时，
+// json.Unmarshal 会保留这里的值，避免被读成 0（例如免打扰 0–0 点）。
+func defaults() *Config {
+	return &Config{MinSeverity: "warn", QuietStart: -1, ExpiryDays: 7, ReportHour: 9}
+}
+
 // Parse 解析配置；自动把 v1 的三通道结构迁移为通用的 channels 列表。
 func Parse(raw string) (*Config, error) {
-	c := &Config{MinSeverity: "warn"}
+	c := defaults()
 	if strings.TrimSpace(raw) == "" {
 		return c, nil
 	}
@@ -176,6 +197,69 @@ func (c *Config) normalize() {
 	if c.RepeatInterval > 7*86400 {
 		c.RepeatInterval = 7 * 86400
 	}
+	// 免打扰：-1 关闭；起止相同视为关闭（旧配置两个字段都是 0）。
+	if c.QuietStart < 0 {
+		c.QuietStart = -1
+	} else if c.QuietStart > 23 {
+		c.QuietStart = 23
+	}
+	if c.QuietEnd < 0 || c.QuietEnd > 23 {
+		c.QuietEnd = 0
+	}
+	if c.QuietStart >= 0 && c.QuietStart == c.QuietEnd {
+		c.QuietStart = -1
+	}
+	// 摘要窗口：0 表示逐条发送；非 0 时至少 5 分钟，否则退化成每条都触发一次汇总。
+	if c.DigestMins != 0 {
+		if c.DigestMins < 5 {
+			c.DigestMins = 5
+		}
+		if c.DigestMins > 1440 {
+			c.DigestMins = 1440
+		}
+	}
+	c.TitleFormat = strings.TrimSpace(c.TitleFormat)
+	c.BodyFormat = strings.TrimSpace(c.BodyFormat)
+	if len([]rune(c.TitleFormat)) > 500 {
+		c.TitleFormat = string([]rune(c.TitleFormat)[:500])
+	}
+	if len([]rune(c.BodyFormat)) > 2000 {
+		c.BodyFormat = string([]rune(c.BodyFormat)[:2000])
+	}
+	if c.ExpiryDays < -1 {
+		c.ExpiryDays = -1
+	}
+	if c.ExpiryDays > 365 {
+		c.ExpiryDays = 365
+	}
+	if c.ReportHour < 0 || c.ReportHour > 23 {
+		c.ReportHour = 9
+	}
+}
+
+// QuietWindow 判断 now 是否处于免打扰时段，返回结束时间。
+// 起止跨越午夜（如 23 → 7）时按两段处理。
+func (c *Config) QuietWindow(now time.Time) (time.Time, bool) {
+	if c == nil || c.QuietStart < 0 || c.QuietStart == c.QuietEnd {
+		return time.Time{}, false
+	}
+	loc := now.Location()
+	start := time.Date(now.Year(), now.Month(), now.Day(), c.QuietStart, 0, 0, 0, loc)
+	end := time.Date(now.Year(), now.Month(), now.Day(), c.QuietEnd, 0, 0, 0, loc)
+	if c.QuietStart < c.QuietEnd {
+		if now.Before(start) || !now.Before(end) {
+			return time.Time{}, false
+		}
+		return end, true
+	}
+	// 跨午夜：now 在 start 之后或 end 之前都算免打扰。
+	if !now.Before(start) {
+		return end.AddDate(0, 0, 1), true
+	}
+	if now.Before(end) {
+		return end, true
+	}
+	return time.Time{}, false
 }
 
 // Normalize 修正越界/非法的配置值。供管理 API 直接解码后调用。
@@ -207,6 +291,16 @@ func (c *Config) Redacted() *Config {
 		Enabled:        c.Enabled,
 		MinSeverity:    c.MinSeverity,
 		RepeatInterval: c.RepeatInterval,
+		QuietStart:     c.QuietStart,
+		QuietEnd:       c.QuietEnd,
+		DigestMins:     c.DigestMins,
+		TitleFormat:    c.TitleFormat,
+		BodyFormat:     c.BodyFormat,
+		ExpiryDays:     c.ExpiryDays,
+		ReportDaily:    c.ReportDaily,
+		ReportWeek:     c.ReportWeek,
+		ReportMonth:    c.ReportMonth,
+		ReportHour:     c.ReportHour,
 		Channels:       make([]ChannelConfig, 0, len(c.Channels)),
 	}
 	for _, ch := range c.Channels {
@@ -395,7 +489,7 @@ func Send(cfg *Config, m Message) []Result {
 			Error: fmt.Sprintf("严重度 %s 低于阈值 %s，已跳过", m.Severity, cfg.MinSeverity)}}
 	}
 
-	subject, body := render(m)
+	subject, body := renderWith(cfg, m)
 	var out []Result
 	for _, ch := range cfg.Channels {
 		if !ch.Enabled {
@@ -427,6 +521,44 @@ func errStr(e error) string {
 		return string(r[:120]) + "…"
 	}
 	return s
+}
+
+// renderWith 在默认渲染基础上应用自定义模板。
+// 模板使用 {status}/{node}/{title}/{rule}/{value}/{detail}/{severity}/{time}/{link} 占位符。
+func renderWith(cfg *Config, m Message) (subject, body string) {
+	subject, body = render(m)
+	if cfg == nil {
+		return subject, body
+	}
+	if cfg.TitleFormat != "" {
+		subject = expandTemplate(cfg.TitleFormat, m)
+	}
+	if cfg.BodyFormat != "" {
+		body = expandTemplate(cfg.BodyFormat, m)
+	}
+	return subject, body
+}
+
+func expandTemplate(tpl string, m Message) string {
+	status := "告警"
+	if m.Resolved {
+		status = "恢复"
+	}
+	value := ""
+	if m.Value != 0 {
+		value = fmt.Sprintf("%.1f", m.Value)
+	}
+	return strings.NewReplacer(
+		"{status}", status,
+		"{node}", m.NodeName,
+		"{title}", m.Title,
+		"{rule}", m.RuleName,
+		"{value}", value,
+		"{detail}", m.Body,
+		"{severity}", m.Severity,
+		"{time}", time.Unix(m.TS, 0).Format("2006-01-02 15:04:05"),
+		"{link}", m.Link,
+	).Replace(tpl)
 }
 
 // render 把消息渲染为「主题 + 正文」两段式（对齐 certimate 的 Notify(subject, message)）。
@@ -475,7 +607,7 @@ func dispatch(ch ChannelConfig, subject, body string, m Message) error {
 	case "email":
 		return sendEmail(ch.Options, subject, body)
 	case "webhook":
-		return sendWebhook(ch.Options, m)
+		return sendWebhook(ch.Options, subject, body, m)
 	}
 	if p, ok := pluginOf(ch.Type); ok {
 		return runPlugin(p, ch, subject, body, m)
@@ -821,8 +953,13 @@ func sendGotify(o map[string]string, subject, body string) error {
 
 // ---------- 通用 Webhook ----------
 
-func sendWebhook(o map[string]string, m Message) error {
-	b, err := json.Marshal(m)
+func sendWebhook(o map[string]string, subject, body string, m Message) error {
+	// Webhook 也必须遵守自定义模板：Subject/Body 是 renderWith 的渲染结果，
+	// 直接原样序列化 m 会让模板对 Webhook 通道静默失效。
+	msg := m
+	msg.Title = subject
+	msg.Body = body
+	b, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}

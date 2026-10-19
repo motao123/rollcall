@@ -1,6 +1,6 @@
 # 运维手册
 
-面向已按 README 完成部署的 Rollcall 实例（v1.9+）。覆盖日常备份、升级回滚、签名自更新、账号/令牌管理、插件与故障排查。
+面向已按 README 完成部署的 Rollcall 实例（v1.10+）。覆盖日常备份、升级回滚、签名自更新、账号/令牌管理、插件与故障排查。
 
 ---
 
@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.9.7
+make linux VERSION=v1.10.0
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -57,6 +57,28 @@ curl -fsS http://127.0.0.1:19080/healthz
 
 服务端回滚：停服务，把 `/opt/rollcall/rollcall-server.prev` 装回原位后启动。
 若新版本已把快照写成更高 schema，还必须先恢复上面备份的 `state.json` / `history.json`（见下节）。
+
+### 一键升级/回滚脚本（v1.10+）
+
+`deploy/rollcall-server-upgrade.sh` 封装了「校验 → 备份 `.prev` → 原子替换 → 重启 → 健康检查 → 失败自动回滚」：
+
+```bash
+sudo sh deploy/rollcall-server-upgrade.sh upgrade \
+  --file /tmp/rollcall-server.new \
+  --sha256 "$(sha256sum /tmp/rollcall-server.new | awk '{print $1}')" \
+  --service rollcall-server \
+  --health http://127.0.0.1:19080/healthz
+
+sudo sh deploy/rollcall-server-upgrade.sh rollback \
+  --service rollcall-server --health http://127.0.0.1:19080/healthz
+```
+
+- `--sha256` 为必填；同时检查 ELF 魔数与架构，拒绝把脚本/损坏文件装成服务端
+- 当前二进制保存为 `rollcall-server.prev`；健康检查最多等待 20 秒
+- 新版本启动失败时自动换回 `.prev` 并再次重启，脚本返回非 0
+- 只操作二进制与 systemd 服务，不触碰 unit 文件和数据目录；
+  如果新版本已经写入更高 schema，回滚前仍需恢复数据备份
+- 执行期间持有 `/run/rollcall-upgrade.lock`，并发调用直接失败
 
 ### Agent 升级
 
@@ -101,7 +123,8 @@ sudo install -m 0755 dist/rollcall-agent-linux-amd64 \
 
 ### 快照版本与回滚
 
-`state.json` 带 `schemaVersion`（当前为 3；v3 仅提升版本号，历史聚合存放在独立的 `history.json`），
+`state.json` 带 `schemaVersion`（当前为 4；v4 新增续费记录、API 令牌摘要、活动事件、
+到期提醒记录与流量周期；v3 起历史聚合存放在独立的 `history.json`），
 `history.json` 自带独立版本号（当前为 2；schema 2 为聚合桶增加内存/磁盘绝对用量总和，
 v1.7 可直接读取 schema 1 并自动补齐）。旧程序遇到更高版本时会：
 
@@ -138,9 +161,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.9.7
-./rollsign sign -key /root/rollcall-update.key -version v1.9.7 \
-  -base-url https://updates.example.com/agent/v1.9.7 \
+make linux VERSION=v1.10.0
+./rollsign sign -key /root/rollcall-update.key -version v1.10.0 \
+  -base-url https://updates.example.com/agent/v1.10.0 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json
@@ -269,6 +292,32 @@ sudo systemctl start rollcall-server
 > 快照损坏时服务端不会以空库启动，而是把文件隔离为 `state.json.corrupt-<时间>`。
 > 确认备份可用后再删除隔离文件，否则会丢失全部节点与令牌。
 
+### 面板内加密配置备份（v1.10+）
+
+「设置 → 备份」导出配置级加密备份（格式 v2）：节点台账、服务、规则、通知通道、
+状态页、主题、续费记录与令牌摘要，不含指标历史。文件用 PBKDF2-SHA256 + AES-256-GCM
+加密，响应同时返回 `size` 与 `sha256`。建议在每次大改配置前导出一份并离线保存。
+
+恢复需要备份密码与显式确认，恢复后会保留节点上报令牌（Agent 无需改配置）：
+
+```bash
+TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
+# 导出
+curl -sS -X POST http://127.0.0.1:19080/api/admin/backup \
+  -H "X-Admin-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"password":"<备份密码>"}' -o backup.json
+# 恢复（confirm 必须是 true；data 为导出响应中的 base64 字符串）
+jq -n --arg pw '<备份密码>' --arg data "$(jq -r .data backup.json)" \
+  '{confirm:true, password:$pw, data:$data}' > /tmp/restore.json
+curl -sS -X POST http://127.0.0.1:19080/api/admin/restore \
+  -H "X-Admin-Token: $TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/restore.json
+rm -f /tmp/restore.json backup.json
+```
+
+备份密码至少 8 位且不会被保存；忘记密码只能重新导出。管理令牌、账号哈希与
+`session.key` 不在配置备份中，仍应随整目录备份一起保护。
+
 ### 历史数据分层
 
 | 分辨率 | 默认保留期 | 用途 |
@@ -350,6 +399,21 @@ sudo systemctl start rollcall-server
 
 忘记密码或无法登录时，仍按上面的 `-reset-admin-password` 流程在服务端重置。
 
+### 两步验证（TOTP，v1.10+）
+
+在「设置 → 管理员账号 → 两步验证」中：
+
+1. 输入当前密码生成密钥，用任意 TOTP 应用（Google Authenticator、1Password、
+   Aegis 等）扫描或手动录入；
+2. 输入应用生成的 6 位动态码完成启用；
+3. 停用时同样需要当前密码与有效动态码。
+
+启用后登录分两步：密码正确但未带动态码时返回 `totpRequired: true`，前端自动显示动态码输入框。
+服务端接受 ±1 个 30 秒窗口，抵御轻微时钟漂移。启用/停用都会提升会话版本，
+其他设备上的旧会话立即失效。丢失 TOTP 设备时，可停服后备份并编辑 `data/admin-user.json`，删除 `totpSecret`
+与 `totpEnabled` 两个字段（保持 0600 与其余字段不变），再启动服务即可恢复单因子登录；
+也可使用 `-reset-admin-password` 重置账号。
+
 ### 会话
 
 - 登录成功后签发 `rollcall_session` Cookie：HMAC-SHA256 签名，`HttpOnly`、`SameSite=Strict`，
@@ -373,6 +437,19 @@ sudo systemctl start rollcall-server
 ```
 
 轮换后需同步更新 Prometheus `basic_auth` 密码及所有脚本；面板登录不使用该令牌，无需改浏览器配置。**不要把令牌提交到仓库或贴进聊天记录。**
+
+### 范围化 API 令牌（v1.10+）
+
+固定管理令牌之外，可在「设置 → API 令牌」创建有独立 scope 与有效期的 `rct_` 令牌：
+
+- `read`：只读接口；`admin`：全部接口（含写操作）
+- 明文只在创建响应中出现一次，服务端仅保存 SHA-256 摘要；列表只显示前缀
+- `expiresDays` 范围 0–3650（0 表示不过期）；到期后请求返回 401
+- 使用 `Authorization: Bearer rct_...`；令牌摘要随快照持久化，**重启后仍然有效**
+- 怀疑泄露时立即删除对应令牌，删除即时生效
+
+自动化脚本建议使用 `read` 令牌；只有确实需要写配置时才创建 `admin` 令牌。
+Prometheus 仍使用固定的 `X-Admin-Token`/Basic Auth 路径，两者互不影响。
 
 ### 节点令牌
 
@@ -434,6 +511,22 @@ sudo systemctl restart rollcall-server
 - 设置页「通知队列」列出最近 100 条任务及最近错误；修复通道后可对失败/被拦截任务手动重试，
   重试会重置尝试次数并立即唤醒调度器。
 - 规则停用、删除或收紧定向范围时，被关闭的活跃告警会补发恢复通知（正文注明原因），不再静默消失。
+
+**降噪与报告参数（v1.10+）**
+
+| 配置 | 作用 |
+|---|---|
+| `quietStart` / `quietEnd` | 免打扰起止小时（`-1` 关闭，支持跨午夜）；窗口内仅 critical 与恢复通知立即发送 |
+| `digestMins` | 摘要聚合窗口（分钟），0 为逐条发送；critical 与恢复通知不聚合 |
+| `titleFormat` / `bodyFormat` | 自定义模板，占位符 `{title}` `{detail}` `{node}` `{rule}` `{value}` `{severity}` `{status}` `{time}` `{link}` |
+| `expiryDays` | 资产到期提前提醒天数，`-1` 关闭；到期当天另发一次 |
+| `reportDaily` / `reportWeekly` / `reportMonthly` | 运行报告开关 |
+| `reportHour` | 报告发送小时（0–23，本地时区） |
+
+- 模板对所有通道（含 Webhook）生效，测试通知也会应用当前模板
+- 摘要窗口与免打扰重叠时，任务推迟到两者中较晚的时间；实际发送时间可在通知队列中查看
+- 报告内容包括节点在线率、平均资源、活跃告警、服务异常、周期流量与月摊成本
+- 到期提醒的已发送记录持久化，重启不会重复提醒同一天的资产
 
 ### 通知插件（v1.7+，默认关闭）
 

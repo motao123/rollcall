@@ -27,6 +27,7 @@ import (
 	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/probe"
+	"github.com/motao/rollcall/internal/schedule"
 	"github.com/motao/rollcall/internal/store"
 	"github.com/motao/rollcall/internal/version"
 	"github.com/motao/rollcall/internal/web"
@@ -339,6 +340,9 @@ func main() {
 	}
 	ob.Start()
 	defer ob.Stop()
+	sched := schedule.New(st, ob, schedule.Config{PanelLink: *panelLink, CNYRate: *cnyRate})
+	sched.Start()
+	defer sched.Stop()
 	srv.Handler = ws.Handler()
 
 	scheme := "http"
@@ -365,7 +369,7 @@ func main() {
 			// 不能直接 log.Fatal：它走 os.Exit(1)，会跳过 main 里所有 defer
 			// （ob.Stop），退出前的最终落盘也永远不会执行 —— 丢掉的正是最近
 			// 一个快照周期内的状态（待投递通知、探测结果）。
-			if serr := shutdown(srv, ob, st, stopProducers, "HTTP 服务异常"); serr != nil {
+			if serr := shutdown(srv, ob, st, stopProducers, sched.Stop, "HTTP 服务异常"); serr != nil {
 				log.Printf("退出前保存失败: %v", serr)
 			}
 			log.Fatalf("%v", err)
@@ -373,7 +377,7 @@ func main() {
 	case <-ctx.Done():
 		// 最终快照写失败时以非零状态退出：调用方（systemd/容器）
 		// 需要能区分「干净关机」与「关机时丢数据」。
-		if serr := shutdown(srv, ob, st, stopProducers, "收到退出信号"); serr != nil {
+		if serr := shutdown(srv, ob, st, stopProducers, sched.Stop, "收到退出信号"); serr != nil {
 			log.Fatalf("退出前保存失败: %v", serr)
 		}
 	}
@@ -387,11 +391,15 @@ func main() {
 //  2. Shutdown 超时则 Close 强制断开剩余连接 —— 否则那些 handler 会被
 //     进程退出直接掐掉，正在提交的管理变更写一半；
 //  3. 排空通知队列；4. 最后落盘，让哨兵记录覆盖在途投递的最终状态。
-func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProducers func(), reason string) error {
+func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProducers, stopScheduler func(), reason string) error {
 	started := time.Now()
 	log.Printf("%s，正在关闭并保存状态…", reason)
 	if stopProducers != nil {
 		stopProducers()
+	}
+	// 定时任务会入队通知，必须在排空队列之前停掉。
+	if stopScheduler != nil {
+		stopScheduler()
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

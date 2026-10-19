@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/motao/rollcall/internal/alert"
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/store"
 )
@@ -12,8 +13,8 @@ import (
 func TestEnsureDefaultRulesDoesNotResurrect(t *testing.T) {
 	st := store.New(t.TempDir())
 	ensureDefaultRules(st)
-	if got := len(st.Rules()); got != 4 {
-		t.Fatalf("首次启动应播种 4 条默认规则，实际 %d", got)
+	if got, want := len(st.Rules()), len(alert.DefaultRules()); got != want {
+		t.Fatalf("首次启动应播种 %d 条默认规则，实际 %d", want, got)
 	}
 	if st.GetSetting("rulesInitialized") == "" {
 		t.Fatal("未写入初始化标记")
@@ -35,8 +36,8 @@ func TestEnsureDefaultRulesCompletesPartialSeed(t *testing.T) {
 	st.UpsertRule(&model.AlertRule{ID: "custom", Name: "自定义", Metric: "cpu", Enabled: true})
 	st.UpsertRule(&model.AlertRule{ID: "r_cpu", Name: "已存在", Metric: "cpu", Enabled: true})
 	ensureDefaultRules(st)
-	if got := len(st.Rules()); got != 5 {
-		t.Fatalf("1 条自定义 + 4 条默认规则应为 5 条，实际 %d 条", got)
+	if got, want := len(st.Rules()), len(alert.DefaultRules())+1; got != want {
+		t.Fatalf("1 条自定义 + %d 条默认规则应为 %d 条，实际 %d 条", len(alert.DefaultRules()), want, got)
 	}
 	var cpu *model.AlertRule
 	for _, r := range st.Rules() {

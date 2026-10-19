@@ -76,6 +76,7 @@ type statusNodePub struct {
 	Virt      string        `json:"virt,omitempty"`
 	Region    string        `json:"region,omitempty"`
 	Provider  string        `json:"provider,omitempty"`
+	Country   string        `json:"country,omitempty"`
 	// MaintenanceTitle 非空表示该节点正在计划维护中。
 	// 前端据此把状态点换成"维护中"并抑制"离线"措辞。
 	MaintenanceTitle string `json:"maintenanceTitle,omitempty"`

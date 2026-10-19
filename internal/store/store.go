@@ -145,6 +145,12 @@ type Store struct {
 	notifyStats  model.NotifyStats
 	notifySilent map[string]*model.Silence // scope(global|ruleID) -> 静默期
 
+	traffic    map[string]*model.TrafficCycle
+	renewals   []*model.Renewal
+	apiTokens  map[string]*model.APIToken // id -> token（只含摘要）
+	events     []model.Event
+	expirySent map[string]string // nodeID -> 最近一次到期提醒日期
+
 	history       map[string]*nodeHistory
 	historyPath   string
 	historyDirty  bool
@@ -183,6 +189,9 @@ func New(dataDir string) *Store {
 		settings:     map[string]string{},
 		notifyJobs:   map[string]*model.NotifyJob{},
 		notifySilent: map[string]*model.Silence{},
+		traffic:      map[string]*model.TrafficCycle{},
+		apiTokens:    map[string]*model.APIToken{},
+		expirySent:   map[string]string{},
 		history:      map[string]*nodeHistory{},
 		path:         filepath.Join(dataDir, "state.json"),
 		historyPath:  filepath.Join(dataDir, "history.json"),
@@ -244,8 +253,9 @@ func decodeSnapshot(b []byte) ([]byte, error) {
 // 旧版快照没有该字段（解析为 0），仍按兼容格式载入；
 // 高于当前版本的文件必须显式拒绝，避免新结构被旧程序静默读成零值。
 //
-// v3 仅提升版本号：历史聚合写入独立的 history.json，主快照结构未变。
-const SnapshotSchemaVersion = 3
+// v4 增加月度流量周期、续费记录、范围化令牌与活动流；
+// 旧快照中缺失的字段均为零值，可无缝载入。
+const SnapshotSchemaVersion = 4
 
 type snapshot struct {
 	SchemaVersion int                         `json:"schemaVersion"`
@@ -258,12 +268,20 @@ type snapshot struct {
 	Alerts        []*model.Alert              `json:"alerts"`
 	// Tokens 单独持久化：model.Node.Token 标了 json:"-"，
 	// 不会随节点一起写入，否则重启后 Agent 全部认证失败。
-	Tokens       map[string]string         `json:"tokens"`
-	Settings     map[string]string         `json:"settings"`
-	NotifyJobs   []*model.NotifyJob        `json:"notifyJobs,omitempty"`
-	NotifyStats  model.NotifyStats         `json:"notifyStats"`
-	NotifySilent map[string]*model.Silence `json:"notifySilences,omitempty"`
-	SavedAt      int64                     `json:"savedAt"`
+	Tokens       map[string]string              `json:"tokens"`
+	Settings     map[string]string              `json:"settings"`
+	NotifyJobs   []*model.NotifyJob             `json:"notifyJobs,omitempty"`
+	NotifyStats  model.NotifyStats              `json:"notifyStats"`
+	NotifySilent map[string]*model.Silence      `json:"notifySilences,omitempty"`
+	Traffic      map[string]*model.TrafficCycle `json:"traffic,omitempty"`
+	Renewals     []*model.Renewal               `json:"renewals,omitempty"`
+	APITokens    map[string]*model.APIToken     `json:"apiTokens,omitempty"`
+	// APITokenHashes 与节点令牌同理：APIToken.Hash 标了 json:"-"，不单独
+	// 持久化的话重启后所有自动化令牌都会变成无法匹配的幽灵记录。
+	APITokenHashes map[string]string `json:"apiTokenHashes,omitempty"`
+	Events         []model.Event     `json:"events,omitempty"`
+	ExpirySent     map[string]string `json:"expirySent,omitempty"`
+	SavedAt        int64             `json:"savedAt"`
 }
 
 func (s *Store) load() error {
@@ -358,6 +376,34 @@ func (s *Store) load() error {
 			s.notifySilent[scope] = sl
 		}
 	}
+	for k, v := range snap.Traffic {
+		if v != nil {
+			s.traffic[k] = v
+		}
+	}
+	for _, r := range snap.Renewals {
+		if r != nil && r.ID != "" {
+			s.renewals = append(s.renewals, r)
+		}
+	}
+	for k, v := range snap.APITokens {
+		if v == nil || v.ID == "" {
+			continue
+		}
+		v.Hash = snap.APITokenHashes[k]
+		// 早期 v4 构建没有保存摘要，这类令牌已无法再通过鉴权；
+		// 丢弃它们，避免面板里留下永远 401 的幽灵令牌。
+		if v.Hash == "" {
+			continue
+		}
+		s.apiTokens[k] = v
+	}
+	s.events = append(s.events, snap.Events...)
+	for k, v := range snap.ExpirySent {
+		if k != "" && v != "" {
+			s.expirySent[k] = v
+		}
+	}
 	if snap.Settings != nil {
 		s.settings = snap.Settings
 	}
@@ -388,20 +434,26 @@ func (s *Store) Save() (err error) {
 
 	s.mu.RLock()
 	snap := snapshot{
-		SchemaVersion: SnapshotSchemaVersion,
-		Nodes:         make(map[string]*model.Node, len(s.nodes)),
-		Hosts:         make(map[string]model.HostInfo, len(s.hosts)),
-		Services:      make(map[string]*model.Service, len(s.services)),
-		Rules:         make(map[string]*model.AlertRule, len(s.rules)),
-		Alerts:        make([]*model.Alert, 0, len(s.alerts)),
-		Series:        make(map[string][]model.Metrics, len(s.series)),
-		SvcRes:        make(map[string][]model.Metrics, len(s.svcRes)),
-		Tokens:        make(map[string]string, len(s.nodes)),
-		Settings:      make(map[string]string, len(s.settings)),
-		NotifyJobs:    make([]*model.NotifyJob, 0, len(s.notifyJobs)),
-		NotifyStats:   s.notifyStats,
-		NotifySilent:  make(map[string]*model.Silence, len(s.notifySilent)),
-		SavedAt:       time.Now().Unix(),
+		SchemaVersion:  SnapshotSchemaVersion,
+		Nodes:          make(map[string]*model.Node, len(s.nodes)),
+		Hosts:          make(map[string]model.HostInfo, len(s.hosts)),
+		Services:       make(map[string]*model.Service, len(s.services)),
+		Rules:          make(map[string]*model.AlertRule, len(s.rules)),
+		Alerts:         make([]*model.Alert, 0, len(s.alerts)),
+		Series:         make(map[string][]model.Metrics, len(s.series)),
+		SvcRes:         make(map[string][]model.Metrics, len(s.svcRes)),
+		Tokens:         make(map[string]string, len(s.nodes)),
+		Settings:       make(map[string]string, len(s.settings)),
+		NotifyJobs:     make([]*model.NotifyJob, 0, len(s.notifyJobs)),
+		NotifyStats:    s.notifyStats,
+		NotifySilent:   make(map[string]*model.Silence, len(s.notifySilent)),
+		Traffic:        make(map[string]*model.TrafficCycle, len(s.traffic)),
+		Renewals:       make([]*model.Renewal, 0, len(s.renewals)),
+		APITokens:      make(map[string]*model.APIToken, len(s.apiTokens)),
+		APITokenHashes: make(map[string]string, len(s.apiTokens)),
+		Events:         append([]model.Event(nil), s.events...),
+		ExpirySent:     make(map[string]string, len(s.expirySent)),
+		SavedAt:        time.Now().Unix(),
 	}
 	// 以下均为值类型或纯值字段结构体，解引用即得到独立副本
 	for k, n := range s.nodes {
@@ -442,6 +494,24 @@ func (s *Store) Save() (err error) {
 	for scope, sl := range s.notifySilent {
 		cp := *sl
 		snap.NotifySilent[scope] = &cp
+	}
+	for k, tc := range s.traffic {
+		cp := *tc
+		snap.Traffic[k] = &cp
+	}
+	for _, r := range s.renewals {
+		cp := *r
+		snap.Renewals = append(snap.Renewals, &cp)
+	}
+	for k, t := range s.apiTokens {
+		cp := *t
+		cp.Hash = "" // 摘要单独存放，避免意外出现在任何令牌 JSON 视图里
+		cp.Scopes = append([]string(nil), t.Scopes...)
+		snap.APITokens[k] = &cp
+		snap.APITokenHashes[k] = t.Hash
+	}
+	for k, v := range s.expirySent {
+		snap.ExpirySent[k] = v
 	}
 	for k, r := range s.series {
 		snap.Series[k] = r.Slice()
@@ -599,6 +669,8 @@ func (s *Store) DeleteNode(id string) bool {
 	delete(s.nodes, id)
 	delete(s.series, id)
 	delete(s.hosts, id)
+	delete(s.traffic, id)
+	delete(s.expirySent, id)
 	if _, ok := s.history[id]; ok {
 		delete(s.history, id)
 		s.historyDirty = true
@@ -711,6 +783,231 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 	}
 	r.Add(m)
 	s.addHistoryLocked(nodeID, m, &prev, hasPrev)
+	s.updateTrafficLocked(nodeID, m)
+}
+
+// updateTrafficLocked 在指标入库时累加流量周期用量。
+// m.TS 已被服务端校正为当前时间，因此重置日按服务端时区计算。
+func (s *Store) updateTrafficLocked(nodeID string, m model.Metrics) {
+	n := s.nodes[nodeID]
+	if n == nil {
+		return
+	}
+	start := trafficCycleStart(time.Unix(m.TS, 0), n.TrafficResetDay)
+	tc := s.traffic[nodeID]
+	if tc == nil {
+		s.traffic[nodeID] = &model.TrafficCycle{
+			Start: start, LastRx: m.NetRx, LastTx: m.NetTx,
+		}
+		return
+	}
+	if tc.Start != start || m.TS < tc.Start || (tc.LastRx > m.NetRx && tc.LastTx > m.NetTx) {
+		// 新周期，或计数器明显归零（Agent 重启/网卡重载）：
+		// 从当前值重新开始累计，避免把上一次开机的流量算进本周期。
+		*tc = model.TrafficCycle{Start: start, LastRx: m.NetRx, LastTx: m.NetTx}
+		if tc.Start != start {
+			tc.UsedRx, tc.UsedTx = 0, 0
+		}
+		return
+	}
+	if m.NetRx >= tc.LastRx {
+		tc.UsedRx += m.NetRx - tc.LastRx
+	} else {
+		// 只有下行计数器归零时不能丢掉上行增量：分别判断。
+		tc.UsedRx += m.NetRx
+	}
+	if m.NetTx >= tc.LastTx {
+		tc.UsedTx += m.NetTx - tc.LastTx
+	} else {
+		tc.UsedTx += m.NetTx
+	}
+	tc.LastRx, tc.LastTx = m.NetRx, m.NetTx
+}
+
+// trafficCycleStart 返回 ts 所在流量周期的起始时刻。
+// ResetDay 限定 1–28，避免 2 月没有 30 日导致周期漂移。
+func trafficCycleStart(ts time.Time, resetDay int) int64 {
+	if resetDay < 1 || resetDay > 28 {
+		resetDay = 1
+	}
+	t := ts.In(time.Local)
+	start := time.Date(t.Year(), t.Month(), resetDay, 0, 0, 0, 0, time.Local)
+	if t.Before(start) {
+		start = start.AddDate(0, -1, 0)
+	}
+	return start.Unix()
+}
+
+// TrafficUsage 返回节点当前周期的流量用量。
+func (s *Store) TrafficUsage(nodeID string) model.TrafficUsage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := model.TrafficUsage{}
+	if n := s.nodes[nodeID]; n != nil {
+		out.QuotaGB = n.TrafficQuotaGB
+		out.ResetDay = n.TrafficResetDay
+	}
+	if tc := s.traffic[nodeID]; tc != nil {
+		out.UsedRx, out.UsedTx = tc.UsedRx, tc.UsedTx
+		out.CycleStart = tc.Start
+	}
+	return out
+}
+
+// ---------- 活动流 ----------
+
+const maxEvents = 200
+
+// AddEvent 追加一条公开活动流事件。
+func (s *Store) AddEvent(e model.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addEventLocked(e)
+}
+
+func (s *Store) addEventLocked(e model.Event) {
+	if e.Text == "" {
+		return
+	}
+	if e.TS <= 0 {
+		e.TS = time.Now().Unix()
+	}
+	if e.ID == "" {
+		e.ID = NewID("ev")
+	}
+	s.events = append(s.events, e)
+	if len(s.events) > maxEvents {
+		s.events = append([]model.Event(nil), s.events[len(s.events)-maxEvents:]...)
+	}
+}
+
+// Events 返回最近的事件（新的在前）。
+func (s *Store) Events(limit int) []model.Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]model.Event, 0, len(s.events))
+	for i := len(s.events) - 1; i >= 0; i-- {
+		out = append(out, s.events[i])
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// ---------- 续费记录 ----------
+
+func (s *Store) Renewals(nodeID string) []*model.Renewal {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.Renewal, 0, len(s.renewals))
+	for _, r := range s.renewals {
+		if nodeID != "" && r.NodeID != nodeID {
+			continue
+		}
+		cp := *r
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At > out[j].At })
+	return out
+}
+
+func (s *Store) AddRenewal(r *model.Renewal) {
+	s.mu.Lock()
+	cp := *r
+	s.renewals = append(s.renewals, &cp)
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
+func (s *Store) DeleteRenewal(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, r := range s.renewals {
+		if r.ID == id {
+			s.renewals = append(s.renewals[:i], s.renewals[i+1:]...)
+			s.RequestSave()
+			return true
+		}
+	}
+	return false
+}
+
+// MarkExpirySent 原子地标记「今天已为这个节点发过到期提醒」。
+// 返回 false 表示今天已经发过，调用方应跳过。
+func (s *Store) MarkExpirySent(nodeID, day string) bool {
+	s.mu.Lock()
+	if s.expirySent[nodeID] == day {
+		s.mu.Unlock()
+		return false
+	}
+	s.expirySent[nodeID] = day
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// ---------- 范围化 API 令牌 ----------
+
+// AddAPIToken 保存令牌摘要。明文由调用方生成并只返回一次。
+func (s *Store) AddAPIToken(t *model.APIToken) {
+	s.mu.Lock()
+	cp := *t
+	cp.Scopes = append([]string(nil), t.Scopes...)
+	s.apiTokens[cp.ID] = &cp
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
+// APITokens 返回不含摘要的令牌列表。
+func (s *Store) APITokens() []*model.APIToken {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.APIToken, 0, len(s.apiTokens))
+	for _, t := range s.apiTokens {
+		cp := *t
+		cp.Hash = ""
+		cp.Scopes = append([]string(nil), t.Scopes...)
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	return out
+}
+
+// DeleteAPIToken 删除令牌。
+func (s *Store) DeleteAPIToken(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.apiTokens[id]; !ok {
+		return false
+	}
+	delete(s.apiTokens, id)
+	s.RequestSave()
+	return true
+}
+
+// MatchAPIToken 按摘要查找令牌并更新最近使用时间。
+func (s *Store) MatchAPIToken(hash string, now int64) (*model.APIToken, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.apiTokens {
+		if subtle.ConstantTimeCompare([]byte(t.Hash), []byte(hash)) != 1 {
+			continue
+		}
+		if t.ExpiresAt > 0 && now >= t.ExpiresAt {
+			return nil, false
+		}
+		// 最近使用时间每分钟最多落盘一次，避免高频抓取导致持续快照。
+		// 先更新时间再复制，确保调用方拿到的也是本次使用后的状态。
+		if now-t.LastUsedAt >= 60 {
+			t.LastUsedAt = now
+			s.RequestSave()
+		}
+		cp := *t
+		cp.Scopes = append([]string(nil), t.Scopes...)
+		return &cp, true
+	}
+	return nil, false
 }
 
 // SetAgentVersion 记录 Agent 最近一次上报的版本。
@@ -861,6 +1158,52 @@ func (s *Store) ServiceLastFull(id string) (ts int64, latency int, ok bool, cert
 	return p.TS, int(p.CPUPct), p.TCPConn == 1, p.Procs, true
 }
 
+// ServiceStats 是对最近一段时间探测结果的抖动/丢包统计。
+// 丢包率按失败点数占比计算；抖动按相邻成功探测延迟差的绝对值均值计算。
+type ServiceStats struct {
+	LossPct  float64 `json:"lossPct"`
+	JitterMs float64 `json:"jitterMs"`
+	Samples  int     `json:"samples"`
+	Has      bool    `json:"has"`
+}
+
+func (s *Store) ServiceStats(id string, since int64) ServiceStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r := s.svcRes[id]
+	if r == nil {
+		return ServiceStats{}
+	}
+	pts := r.Since(since)
+	if len(pts) == 0 {
+		return ServiceStats{}
+	}
+	var fail, okCount int
+	var prevLat float64
+	var hasPrev bool
+	var jitterSum float64
+	for _, p := range pts {
+		if p.TCPConn != 1 {
+			fail++
+			continue
+		}
+		okCount++
+		if hasPrev {
+			d := p.CPUPct - prevLat
+			if d < 0 {
+				d = -d
+			}
+			jitterSum += d
+		}
+		prevLat, hasPrev = p.CPUPct, true
+	}
+	st := ServiceStats{LossPct: float64(fail) / float64(len(pts)) * 100, Samples: len(pts), Has: true}
+	if okCount > 1 {
+		st.JitterMs = jitterSum / float64(okCount-1)
+	}
+	return st
+}
+
 // ---------- 告警 ----------
 
 func (s *Store) UpsertRule(r *model.AlertRule) {
@@ -926,6 +1269,21 @@ func (s *Store) ActiveAlertsByRule(ruleID string) []*model.Alert {
 	return out
 }
 
+// ActiveAlertsByService 返回某个服务名下未恢复告警的副本。
+// 删除服务前先取快照，删除后再补发恢复通知。
+func (s *Store) ActiveAlertsByService(serviceID string) []*model.Alert {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*model.Alert, 0)
+	for _, a := range s.alerts {
+		if a.ServiceID == serviceID && a.ResolvedAt == 0 {
+			cp := *a
+			out = append(out, &cp)
+		}
+	}
+	return out
+}
+
 // OpenAlert 断言/维持一条告警；返回是否为新建、以及节点与规则是否仍然存在。
 //
 // 存在性必须与写入在同一把锁内确认：否则「评估时节点还在、写入前被删除」
@@ -933,16 +1291,21 @@ func (s *Store) ActiveAlertsByRule(ruleID string) []*model.Alert {
 func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if a.ResolvedAt == 0 {
-		if _, exists := s.nodes[a.NodeID]; !exists {
-			return false, false
-		}
-		if _, exists := s.rules[a.RuleID]; !exists {
+	if _, exists := s.nodes[a.NodeID]; !exists {
+		return false, false
+	}
+	if _, exists := s.rules[a.RuleID]; !exists {
+		return false, false
+	}
+	if a.ServiceID != "" {
+		sv, exists := s.services[a.ServiceID]
+		if !exists || sv.NodeID != a.NodeID {
 			return false, false
 		}
 	}
 	for _, ex := range s.alerts {
-		if ex.RuleID == a.RuleID && ex.NodeID == a.NodeID && ex.ResolvedAt == 0 {
+		if ex.RuleID == a.RuleID && ex.NodeID == a.NodeID &&
+			ex.ServiceID == a.ServiceID && ex.ResolvedAt == 0 {
 			// 回填持久化告警的真实 ID，通知任务据此关联告警记录。
 			a.ID = ex.ID
 			// 只在值/文案真的变化时请求落盘：引擎每 15 秒评估一次，
@@ -986,15 +1349,29 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 // 返回值用于区分「内存追踪状态丢失」与「持久化告警仍在进行中」，
 // 让重启后的恢复通知也能正常发出。
 func (s *Store) ResolveAlert(ruleID, nodeID string) bool {
+	return s.resolveAlert(ruleID, nodeID, "")
+}
+
+// ResolveServiceAlert 关闭服务类告警（唯一键包含 ServiceID）。
+func (s *Store) ResolveServiceAlert(ruleID, serviceID string) bool {
+	return s.resolveAlert(ruleID, "", serviceID)
+}
+
+func (s *Store) resolveAlert(ruleID, nodeID, serviceID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
 	resolved := false
 	for _, a := range s.alerts {
-		if a.RuleID == ruleID && a.NodeID == nodeID && a.ResolvedAt == 0 {
-			a.ResolvedAt = now
-			resolved = true
+		if a.RuleID != ruleID || a.ServiceID != serviceID || a.ResolvedAt != 0 {
+			continue
 		}
+		// nodeID 为空表示只按服务 ID 匹配；否则必须同时匹配节点。
+		if nodeID != "" && a.NodeID != nodeID {
+			continue
+		}
+		a.ResolvedAt = now
+		resolved = true
 	}
 	if resolved {
 		// 恢复状态必须落盘，否则重启后已恢复的告警会「复活」。
@@ -1040,6 +1417,12 @@ func (s *Store) DeleteService(id string) bool {
 	}
 	delete(s.services, id)
 	delete(s.svcRes, id)
+	now := time.Now().Unix()
+	for _, a := range s.alerts {
+		if a.ServiceID == id && a.ResolvedAt == 0 {
+			a.ResolvedAt = now
+		}
+	}
 	s.mu.Unlock()
 	// 变更已进入内存，必须请求落盘：否则重启后删除的服务会「复活」。
 	s.RequestSave()
@@ -1266,6 +1649,22 @@ func (s *Store) NotifyJobRetry(id, lastError string, nextAt int64) bool {
 	j.NextAttemptAt = nextAt
 	j.Status = model.NotifyPending
 	s.notifyStats.Retries++
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
+// NotifyJobDefer 把待投递任务推迟到 nextAt，且不计入尝试次数。
+// 用于免打扰窗口：在窗口内反复“重试”会很快耗尽 MaxAttempts，
+// 导致告警在窗口结束后被直接丢弃。
+func (s *Store) NotifyJobDefer(id string, nextAt int64) bool {
+	s.mu.Lock()
+	j, ok := s.notifyJobs[id]
+	if !ok || j.Status != model.NotifyPending {
+		s.mu.Unlock()
+		return false
+	}
+	j.NextAttemptAt = nextAt
 	s.mu.Unlock()
 	s.RequestSave()
 	return true

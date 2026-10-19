@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,6 +36,10 @@ type User struct {
 	Email        string `json:"email,omitempty"`
 	PasswordHash string `json:"passwordHash"`
 	UpdatedAt    int64  `json:"updatedAt"` // 秒级时间戳；改密后旧会话立即失效
+	// TOTPSecret 是 base32 编码的 TOTP 密钥；TOTPEnabled 为 true 时登录必须验证动态码。
+	// 未确认的密钥也会保存，但 TOTPEnabled 保持 false 不影响登录。
+	TOTPSecret  string `json:"totpSecret,omitempty"`
+	TOTPEnabled bool   `json:"totpEnabled,omitempty"`
 }
 
 // ValidateUsername 校验登录用户名。
@@ -62,7 +67,11 @@ func ValidateEmail(email string) error {
 
 // PublicInfo 返回可安全下发给前端的字段。
 func (u *User) PublicInfo() map[string]string {
-	return map[string]string{"username": u.Username, "email": u.Email}
+	return map[string]string{
+		"username":    u.Username,
+		"email":       u.Email,
+		"totpEnabled": strconv.FormatBool(u.TOTPEnabled),
+	}
 }
 
 // SessionVersion 用于绑定会话与当前密码版本。
@@ -147,6 +156,12 @@ func (u *User) validate() error {
 	}
 	if u.UpdatedAt < 0 {
 		return errors.New("管理员配置更新时间无效")
+	}
+	u.TOTPSecret = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(u.TOTPSecret), " ", ""))
+	if u.TOTPEnabled {
+		if _, err := decodeTOTPSecret(u.TOTPSecret); err != nil {
+			return errors.New("已启用 TOTP 但密钥无效")
+		}
 	}
 	return nil
 }

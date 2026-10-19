@@ -103,6 +103,11 @@ func parseHash(encoded string) (int, []byte, []byte, error) {
 	return iter, salt, key, nil
 }
 
+// DeriveKey 导出 PBKDF2-HMAC-SHA256，供备份加密等场景复用。
+func DeriveKey(password, salt []byte, iter, keyLen int) []byte {
+	return deriveKey(password, salt, iter, keyLen)
+}
+
 // deriveKey 是 PBKDF2-HMAC-SHA256（RFC 8018），用标准库实现以避免外部依赖。
 func deriveKey(password, salt []byte, iter, keyLen int) []byte {
 	prf := hmac.New(sha256.New, password)

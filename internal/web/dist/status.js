@@ -89,6 +89,31 @@
 
   var LEVEL_CLS = { critical: 'crit', warn: 'warn', info: 'info' };
   var LEVEL_NAME = { critical: '严重', warn: '警告', info: '信息' };
+
+  // 国家/地区分布：常用 ISO 3166-1 alpha-2 代码的中文名。
+  // 未收录的代码直接显示原代码，不阻断渲染。
+  var COUNTRY_NAMES = {
+    CN: '中国', HK: '中国香港', TW: '中国台湾', MO: '中国澳门',
+    US: '美国', CA: '加拿大', MX: '墨西哥', BR: '巴西', AR: '阿根廷', CL: '智利',
+    JP: '日本', KR: '韩国', SG: '新加坡', MY: '马来西亚', TH: '泰国', VN: '越南',
+    ID: '印度尼西亚', PH: '菲律宾', IN: '印度', PK: '巴基斯坦', BD: '孟加拉国',
+    GB: '英国', IE: '爱尔兰', FR: '法国', DE: '德国', NL: '荷兰', BE: '比利时',
+    LU: '卢森堡', CH: '瑞士', AT: '奥地利', IT: '意大利', ES: '西班牙', PT: '葡萄牙',
+    SE: '瑞典', NO: '挪威', DK: '丹麦', FI: '芬兰', IS: '冰岛', PL: '波兰',
+    CZ: '捷克', SK: '斯洛伐克', HU: '匈牙利', RO: '罗马尼亚', BG: '保加利亚',
+    GR: '希腊', UA: '乌克兰', RU: '俄罗斯', TR: '土耳其', IL: '以色列',
+    AE: '阿联酋', SA: '沙特阿拉伯', QA: '卡塔尔', EG: '埃及', ZA: '南非',
+    NG: '尼日利亚', KE: '肯尼亚', AU: '澳大利亚', NZ: '新西兰'
+  };
+  function countryName(code) {
+    var c = String(code || '').toUpperCase();
+    return COUNTRY_NAMES[c] || c || '未知';
+  }
+  function countryFlag(code) {
+    var c = String(code || '').toUpperCase();
+    if (!/^[A-Z]{2}$/.test(c)) return '🌐';
+    return String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65, 0x1F1E6 + c.charCodeAt(1) - 65);
+  }
   var STATE_NAME = { online: '在线', stale: '数据延迟', offline: '离线', no_data: '待接入' };
   var STATE_DOT = { online: 'ok', stale: 'warn', offline: 'bad', no_data: 'off' };
   var STATE_BADGE = { online: 'ok', stale: 'warn', offline: 'bad', no_data: '' };
@@ -788,7 +813,7 @@
     var show = list.length > 0;
     return '<section class="card" id="servicesWrap"' + (show ? '' : ' hidden') + '>' +
       '<div class="card-h"><h2>服务探测</h2>' +
-      '<span class="hint">HTTP / TCP 可用率与延迟</span></div>' +
+      '<span class="hint">HTTP / TCP / DNS 可用率、延迟与网络质量</span></div>' +
       '<div class="svc-list" id="svcList">' + serviceListHTML(list) + '</div></section>';
   }
 
@@ -796,6 +821,34 @@
     return (list || []).map(function (s, i) {
       return serviceHTML(s, i);
     }).join('');
+  }
+
+  // 地区分布：按国家代码聚合的横向条形图。
+  // 不加载第三方地图瓦片，公开页保持零外部请求。
+  function mapHTML(counts) {
+    var keys = Object.keys(counts || {}).filter(function (k) { return counts[k] > 0; });
+    if (!keys.length) return '';
+    keys.sort(function (a, b) { return counts[b] - counts[a] || a.localeCompare(b); });
+    var total = 0, max = 0;
+    keys.forEach(function (k) { total += counts[k]; if (counts[k] > max) max = counts[k]; });
+    return keys.map(function (k) {
+      var n = counts[k];
+      var pct = total ? n / total * 100 : 0;
+      var w = max ? Math.max(4, n / max * 100) : 0;
+      return '<div class="map-row" title="' + esc(countryName(k)) + '：' + n + ' 台">' +
+        '<span class="map-flag">' + countryFlag(k) + '</span>' +
+        '<span class="map-name">' + esc(countryName(k)) + '</span>' +
+        '<span class="map-bar"><i style="width:' + w.toFixed(1) + '%"></i></span>' +
+        '<span class="map-count"><b>' + n + '</b> 台 · ' + fixed(pct, 0) + '%</span></div>';
+    }).join('');
+  }
+
+  function mapSection() {
+    var counts = block('map') && DATA.map ? DATA.map : {};
+    var html = mapHTML(counts);
+    return '<section class="card" id="mapWrap"' + (html ? '' : ' hidden') + '>' +
+      '<div class="card-h"><h2>地区分布</h2><span class="hint">按国家/地区统计节点</span></div>' +
+      '<div class="map-list" id="mapList">' + html + '</div></section>';
   }
 
   function serviceHTML(s, i) {
@@ -809,6 +862,8 @@
     var foot = [];
     foot.push(s.uptime != null ? fixed(s.uptime, 1) + '% 可用' : '暂无数据');
     if (s.failRate) foot.push('失败 ' + fixed(s.failRate, 2) + '%');
+    if (s.lossPct) foot.push('丢包 ' + fixed(s.lossPct, 1) + '%');
+    if (s.jitterMs) foot.push('抖动 ' + fixed(s.jitterMs, 1) + 'ms');
     return '<div class="svc" data-svc="' + i + '">' +
       '<span class="svc-dot ' + dot + '" data-f="svc-dot"></span>' +
       '<span class="svc-name">' + esc(s.name) + '</span>' +
@@ -849,6 +904,33 @@
       incidentsBody(show ? (DATA.incidents || []) : []) + '</section>';
   }
 
+  var ACTIVITY_KIND = {
+    node_online: { label: '上线', cls: 'ok' },
+    node_offline: { label: '离线', cls: 'crit' },
+    alert_opened: { label: '告警', cls: 'crit' },
+    alert_resolved: { label: '恢复', cls: 'ok' }
+  };
+
+  function activityHTML(items) {
+    if (!items || !items.length) return '<div class="empty">暂无活动记录</div>';
+    return '<div class="act-list">' + items.map(function (ev) {
+      var meta = ACTIVITY_KIND[ev.kind] || { label: '动态', cls: 'info' };
+      return '<div class="act-item">' +
+        '<span class="act-dot ' + meta.cls + '"></span>' +
+        '<div class="act-main"><div class="act-text">' + esc(ev.text) + '</div>' +
+          '<div class="act-meta"><span class="act-badge ' + meta.cls + '">' + esc(meta.label) + '</span>' +
+            '<span>' + esc(timeAgo(ev.ts)) + '</span>' +
+            '<span class="act-time">' + esc(fullTime(ev.ts)) + '</span></div></div></div>';
+    }).join('') + '</div>';
+  }
+
+  function activitySection() {
+    var show = block('activity');
+    return '<section class="card" id="activityWrap"' + (show ? '' : ' hidden') + '>' +
+      '<div class="card-h"><h2>最近活动</h2><span class="hint">节点上下线与告警动态</span></div>' +
+      '<div id="actList">' + (show ? activityHTML(DATA.activity || []) : '') + '</div></section>';
+  }
+
   function timelineHTML(items) {
     if (!items.length) return '<div class="empty">过去一段时间没有记录到事件</div>';
     var byDay = {}, order = [];
@@ -885,8 +967,10 @@
       toolbarHTML() +
       '<section class="node-grid" id="nodeGrid" aria-live="polite">' + gridHTML(nodes) + '</section>' +
       servicesSection() +
+      mapSection() +
       historySection() +
-      incidentsSection();
+      incidentsSection() +
+      activitySection();
   }
 
   function renderList() {
@@ -1175,8 +1259,10 @@
       syncGroupSelect(groups);
     }
     updateServices();
+    updateMap();
     updateHistory();
     updateIncidents();
+    updateActivity();
     updateToolbarCounts();
   }
 
@@ -1221,6 +1307,8 @@
       var foot = [];
       foot.push(s.uptime != null ? fixed(s.uptime, 1) + '% 可用' : '暂无数据');
       if (s.failRate) foot.push('失败 ' + fixed(s.failRate, 2) + '%');
+      if (s.lossPct) foot.push('丢包 ' + fixed(s.lossPct, 1) + '%');
+      if (s.jitterMs) foot.push('抖动 ' + fixed(s.jitterMs, 1) + 'ms');
       var footEl = el.querySelector('[data-f="svc-foot"]');
       if (footEl) footEl.textContent = foot.join(' · ');
       var sp = el.querySelector('[data-f="svc-spark"]');
@@ -1274,6 +1362,36 @@
     if (wrap.getAttribute('data-sig') === sig) return;
     wrap.setAttribute('data-sig', sig);
     wrap.innerHTML = incidentsBody(items);
+  }
+
+  function updateMap() {
+    var wrap = document.getElementById('mapWrap');
+    if (!wrap) return;
+    var counts = block('map') && DATA.map ? DATA.map : {};
+    var html = mapHTML(counts);
+    wrap.hidden = !html;
+    if (!html) return;
+    var sig = JSON.stringify(counts);
+    if (wrap.getAttribute('data-sig') === sig) return;
+    wrap.setAttribute('data-sig', sig);
+    var list = document.getElementById('mapList');
+    if (list) list.innerHTML = html;
+  }
+
+  function updateActivity() {
+    var wrap = document.getElementById('activityWrap');
+    if (!wrap) return;
+    if (!block('activity')) {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+    var items = DATA.activity || [];
+    var sig = items.length + '|' + (items[0] ? items[0].ts + '|' + items[0].text : '');
+    if (wrap.getAttribute('data-sig') === sig) return;
+    wrap.setAttribute('data-sig', sig);
+    var list = document.getElementById('actList');
+    if (list) list.innerHTML = activityHTML(items);
   }
 
   /* ---------------- 详情 ---------------- */

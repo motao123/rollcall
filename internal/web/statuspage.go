@@ -401,6 +401,39 @@ h1{font-size:21px;line-height:1.2;font-weight:700;letter-spacing:-.02em;margin:0
 .tl-meta{font-size:10.5px;color:var(--fg3);margin-top:2px;font-family:var(--mono)}
 .tl-body{font-size:12px;color:var(--fg2);margin-top:4px;white-space:pre-wrap}
 
+/* ---------- 地区分布 ---------- */
+.map-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px 18px}
+.map-row{display:grid;grid-template-columns:auto minmax(70px,auto) minmax(40px,1fr) auto;
+  align-items:center;gap:9px;padding:7px 10px;border:1px solid var(--line-2);
+  border-radius:9px;background:var(--panel-2)}
+.map-flag{font-size:17px;line-height:1}
+.map-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.map-bar{display:block;height:5px;border-radius:3px;background:var(--line-2);
+  overflow:hidden;min-width:40px}
+.map-bar i{display:block;height:100%;border-radius:3px;background:var(--accent);
+  transition:width .4s ease}
+.map-count{font-size:10.5px;color:var(--fg3);white-space:nowrap;font-family:var(--mono)}
+.map-count b{color:var(--fg2);font-size:11.5px}
+
+/* ---------- 最近活动 ---------- */
+.act-list{display:flex;flex-direction:column}
+.act-item{display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line)}
+.act-item:last-child{border-bottom:0;padding-bottom:2px}
+.act-item:first-child{padding-top:2px}
+.act-dot{width:8px;height:8px;border-radius:50%;background:var(--fg3);flex:none;margin-top:5px}
+.act-dot.ok{background:var(--ok)} .act-dot.crit{background:var(--crit)}
+.act-dot.warn{background:var(--warn)} .act-dot.info{background:var(--info)}
+.act-main{min-width:0;flex:1}
+.act-text{font-size:12.5px;color:var(--fg2);line-height:1.45;word-break:break-word}
+.act-meta{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--fg3);
+  margin-top:3px;flex-wrap:wrap}
+.act-badge{font-size:9.5px;padding:1px 5px;border-radius:4px;background:var(--line-2);
+  color:var(--fg2);font-weight:600}
+.act-badge.ok{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
+.act-badge.crit{background:color-mix(in srgb,var(--crit) 15%,transparent);color:var(--crit)}
+.act-time{font-family:var(--mono);opacity:.75}
+
 /* ---------- 详情 ---------- */
 .back{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
   background:var(--panel);color:var(--fg2);border-radius:9px;padding:6px 11px;

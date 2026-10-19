@@ -139,6 +139,19 @@ func (m *Manager) Enqueue(msg notify.Message) {
 	if eventTS <= 0 {
 		eventTS = now
 	}
+	next := now
+	// 免打扰与摘要只在「非紧急、未恢复」时生效：
+	// 恢复通知和 critical 告警延迟到窗口结束后可能已经失去意义。
+	if !msg.Resolved && msg.Severity != "critical" {
+		if end, quiet := cfg.QuietWindow(time.Now()); quiet {
+			next = end.Unix()
+		}
+		if cfg.DigestMins > 0 {
+			if slot := nextDigestSlot(time.Now(), cfg.DigestMins); slot > next {
+				next = slot
+			}
+		}
+	}
 	job := &model.NotifyJob{
 		ID:            store.NewID("nj"),
 		AlertID:       msg.AlertID,
@@ -154,7 +167,7 @@ func (m *Manager) Enqueue(msg notify.Message) {
 		Link:          msg.Link,
 		EventTS:       eventTS,
 		CreatedAt:     now,
-		NextAttemptAt: now,
+		NextAttemptAt: next,
 		Status:        model.NotifyPending,
 	}
 	if scope, reason, ok := m.st.SilenceFor(msg.RuleID, now); ok {
@@ -306,14 +319,52 @@ func (m *Manager) dispatch() {
 	if free <= 0 {
 		return
 	}
-	jobs := m.st.ClaimNotifyJobs(time.Now().Unix(), free)
+	now := time.Now().Unix()
+	jobs := m.st.ClaimNotifyJobs(now, free)
+	cfg := m.notifyCfg.Load()
+
+	var digest []*model.NotifyJob
 	for _, j := range jobs {
+		// 同一轮领取到的多条非紧急告警合并为一条摘要，
+		// 避免一次故障引发几十个通道消息刷屏。
+		if cfg != nil && cfg.DigestMins > 0 && !j.Resolved && j.Severity != "critical" {
+			if _, _, silenced := m.st.SilenceFor(j.RuleID, now); !silenced {
+				digest = append(digest, j)
+				continue
+			}
+		}
 		m.mu.Lock()
 		m.inFlight++
 		m.workWG.Add(1)
 		m.mu.Unlock()
 		go m.work(j)
 	}
+	if len(digest) == 1 {
+		j := digest[0]
+		m.mu.Lock()
+		m.inFlight++
+		m.workWG.Add(1)
+		m.mu.Unlock()
+		go m.work(j)
+		return
+	}
+	if len(digest) > 1 {
+		m.mu.Lock()
+		m.inFlight++
+		m.workWG.Add(1)
+		m.mu.Unlock()
+		go m.workDigest(digest)
+	}
+}
+
+// nextDigestSlot 返回下一个摘要窗口的整点（按 DigestMins 对齐）。
+func nextDigestSlot(now time.Time, mins int) int64 {
+	step := int64(mins) * 60
+	if step <= 0 {
+		return now.Unix()
+	}
+	t := now.Unix()
+	return ((t + step - 1) / step) * step
 }
 
 func (m *Manager) work(job *model.NotifyJob) {
@@ -356,7 +407,25 @@ func (m *Manager) work(job *model.NotifyJob) {
 		return
 	}
 
-	results := m.send(cfg, notify.Message{
+	// 免打扰：配置可能在入队后变更，投递前再检查一次。
+	// 用 Defer 而非 Retry：推迟不应消耗重试次数。
+	if !job.Resolved && job.Severity != "critical" {
+		if end, quiet := cfg.QuietWindow(time.Now()); quiet {
+			m.st.NotifyJobDefer(job.ID, end.Unix())
+			return
+		}
+	}
+
+	results := m.send(cfg, jobMessage(job))
+	okAny, errs := resultSummary(results)
+	// 发送可能耗时数十秒：状态时间戳与退避基准都要用发送结束后的时间，
+	// 否则 NextAttemptAt 会偏早、LastAttempt 也不准。
+	now = time.Now().Unix()
+	m.finish(job, okAny, errs, now)
+}
+
+func jobMessage(job *model.NotifyJob) notify.Message {
+	return notify.Message{
 		Title:    job.Title,
 		Body:     job.Body,
 		Severity: job.Severity,
@@ -369,11 +438,11 @@ func (m *Manager) work(job *model.NotifyJob) {
 		Resolved: job.Resolved,
 		TS:       job.EventTS,
 		Link:     job.Link,
-	})
-	okAny, errs := resultSummary(results)
-	// 发送可能耗时数十秒：状态时间戳与退避基准都要用发送结束后的时间，
-	// 否则 NextAttemptAt 会偏早、LastAttempt 也不准。
-	now = time.Now().Unix()
+	}
+}
+
+// finish 根据发送结果更新任务状态。
+func (m *Manager) finish(job *model.NotifyJob, okAny bool, errs string, now int64) {
 	if okAny {
 		if errs != "" {
 			log.Printf("通知部分通道失败（已至少送达一个通道）: %s", errs)
@@ -393,6 +462,118 @@ func (m *Manager) work(job *model.NotifyJob) {
 	log.Printf("通知投递失败，%s 后重试（第 %d/%d 次）: %s (%s)",
 		backoff, attempts, m.cfg.MaxAttempts, job.Title, errs)
 	m.st.NotifyJobRetry(job.ID, errs, now+int64(backoff/time.Second))
+}
+
+// workDigest 把同一窗口内到期的多条告警合并为一条摘要投递。
+func (m *Manager) workDigest(jobs []*model.NotifyJob) {
+	defer func() {
+		m.mu.Lock()
+		m.inFlight--
+		m.mu.Unlock()
+		m.workWG.Done()
+		m.signal()
+	}()
+
+	cfg := m.notifyCfg.Load()
+	if cfg == nil {
+		return
+	}
+	if !cfg.Enabled {
+		now := time.Now().Unix()
+		for _, j := range jobs {
+			m.st.NotifyJobSuppressed(j.ID, "config", "通知已停用", now)
+		}
+		return
+	}
+	if len(cfg.EnabledChannels()) == 0 {
+		return
+	}
+
+	// 投递前重新校验每条任务；期间配置可能变化，也可能被静默。
+	sendable := make([]*model.NotifyJob, 0, len(jobs))
+	for _, j := range jobs {
+		now := time.Now().Unix()
+		if !cfg.ShouldSend(j.Severity) {
+			m.st.NotifyJobSuppressed(j.ID, "config", "严重度低于当前通知阈值", now)
+			continue
+		}
+		if scope, reason, ok := m.st.SilenceFor(j.RuleID, now); ok {
+			msg := "通知静默中"
+			if reason != "" {
+				msg += "：" + reason
+			}
+			m.st.NotifyJobSuppressed(j.ID, scope, msg, now)
+			continue
+		}
+		if end, quiet := cfg.QuietWindow(time.Now()); quiet {
+			m.st.NotifyJobDefer(j.ID, end.Unix())
+			continue
+		}
+		sendable = append(sendable, j)
+	}
+	if len(sendable) == 0 {
+		return
+	}
+
+	var results []notify.Result
+	if len(sendable) == 1 {
+		results = m.send(cfg, jobMessage(sendable[0]))
+	} else {
+		results = m.send(cfg, digestMessage(sendable))
+	}
+	okAny, errs := resultSummary(results)
+	now := time.Now().Unix()
+	for _, j := range sendable {
+		m.finish(j, okAny, errs, now)
+	}
+}
+
+func digestMessage(jobs []*model.NotifyJob) notify.Message {
+	rank := 0
+	sev := "info"
+	var b strings.Builder
+	var link string
+	for i, j := range jobs {
+		if r := notify.SeverityRank(j.Severity); r > rank {
+			rank, sev = r, j.Severity
+		}
+		if link == "" {
+			link = j.Link
+		}
+		if i >= 50 {
+			fmt.Fprintf(&b, "…另有 %d 条告警未展开\n", len(jobs)-50)
+			break
+		}
+		fmt.Fprintf(&b, "- [%s] %s · %s", j.Severity, j.NodeName, j.Title)
+		if j.Value != 0 {
+			fmt.Fprintf(&b, "（%.1f）", j.Value)
+		}
+		b.WriteString("\n")
+	}
+	names := make([]string, 0, len(jobs))
+	seen := map[string]bool{}
+	for _, j := range jobs {
+		if j.NodeName != "" && !seen[j.NodeName] {
+			seen[j.NodeName] = true
+			names = append(names, j.NodeName)
+		}
+	}
+	nodeLabel := "多个节点"
+	if len(names) == 1 {
+		nodeLabel = names[0]
+	}
+	if len(names) > 1 {
+		nodeLabel = fmt.Sprintf("%s 等 %d 个节点", names[0], len(names))
+	}
+	return notify.Message{
+		Title:    fmt.Sprintf("%d 条告警汇总", len(jobs)),
+		Body:     strings.TrimRight(b.String(), "\n"),
+		Severity: sev,
+		NodeName: nodeLabel,
+		RuleName: "聚合摘要",
+		TS:       time.Now().Unix(),
+		Link:     link,
+	}
 }
 
 // resultSummary 汇总逐通道结果。任一通道成功即视为已送达，

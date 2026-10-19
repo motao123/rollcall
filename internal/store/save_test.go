@@ -119,6 +119,10 @@ func TestSavePersistsAllSections(t *testing.T) {
 	s.UpsertRule(&model.AlertRule{ID: "r1", Name: "规则一", Metric: "cpu", Op: "gt", Threshold: 90, Enabled: true})
 	s.OpenAlert(&model.Alert{ID: "a1", RuleID: "r1", NodeID: "n1", Severity: "warn", StartedAt: 1000})
 	s.SetSetting("notify", `{"enabled":true}`)
+	// APIToken.Hash 也是 json:"-"，必须像节点令牌一样单独持久化，
+	// 否则重启后 scoped 令牌全部变成永远 401 的幽灵记录。
+	s.AddAPIToken(&model.APIToken{ID: "tk1", Name: "自动化", Hash: "hash-secret",
+		Scopes: []string{"read"}, CreatedAt: 1000})
 
 	if err := s.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -130,10 +134,17 @@ func TestSavePersistsAllSections(t *testing.T) {
 		t.Fatalf("解析快照: %v", err)
 	}
 
-	for _, key := range []string{"nodes", "hosts", "series", "services", "svcRes", "rules", "alerts", "tokens", "settings"} {
+	for _, key := range []string{"nodes", "hosts", "series", "services", "svcRes", "rules", "alerts", "tokens", "settings", "apiTokens", "apiTokenHashes"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("快照缺少字段 %q", key)
 		}
+	}
+	// 摘要只能出现在专用字段里，不能混进令牌元数据视图。
+	if strings.Contains(string(raw["apiTokens"]), "hash-secret") {
+		t.Error("API 令牌摘要泄露到 apiTokens 快照")
+	}
+	if !strings.Contains(string(raw["apiTokenHashes"]), "hash-secret") {
+		t.Error("API 令牌摘要未落盘")
 	}
 
 	// 重新加载，验证内容完整（尤其 tokens 回填）
@@ -165,6 +176,16 @@ func TestSavePersistsAllSections(t *testing.T) {
 	}
 	if s2.GetSetting("notify") != `{"enabled":true}` {
 		t.Errorf("settings 丢失: %q", s2.GetSetting("notify"))
+	}
+	if _, ok := s2.MatchAPIToken("hash-secret", 2000); !ok {
+		t.Error("重启后 API 令牌无法匹配")
+	}
+	toks := s2.APITokens()
+	if len(toks) != 1 || len(toks[0].Scopes) != 1 || toks[0].Scopes[0] != "read" {
+		t.Errorf("API 令牌元数据丢失: %+v", toks)
+	}
+	if len(toks) == 1 && toks[0].Hash != "" {
+		t.Error("APITokens 视图泄露摘要")
 	}
 
 	// 令牌不得出现在公开视图（Nodes() 走 json:"-"）

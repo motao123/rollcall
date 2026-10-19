@@ -95,8 +95,22 @@ func (r *Runner) ValidateService(sv model.Service) error {
 		}
 		host, _, _ := net.SplitHostPort(addr)
 		return r.policy.CheckHost(host)
+	case "dns":
+		host, server, err := parseDNSTarget(sv.Target)
+		if err != nil {
+			return err
+		}
+		_ = host
+		if server != "" {
+			h, _, err := net.SplitHostPort(server)
+			if err != nil {
+				return err
+			}
+			return r.policy.CheckHost(h)
+		}
+		return nil
 	default:
-		return fmt.Errorf("不支持的类型 %q，可选 http/https/tcp", sv.Type)
+		return fmt.Errorf("不支持的类型 %q，可选 http/https/tcp/dns", sv.Type)
 	}
 }
 
@@ -122,11 +136,87 @@ func (r *Runner) Do(sv model.Service) model.ServiceResult {
 		r.doHTTP(sv, &res)
 	case "tcp":
 		r.doTCP(sv, &res)
+	case "dns":
+		r.doDNS(sv, &res)
 	default:
 		res.OK = false
 		res.Detail = "unsupported type: " + sv.Type
 	}
 	return res
+}
+
+// parseDNSTarget 解析 DNS 探测目标：域名，或 域名@解析服务器[:端口]。
+func parseDNSTarget(target string) (host, server string, err error) {
+	s := strings.TrimSpace(target)
+	if s == "" {
+		return "", "", errors.New("DNS 目标不能为空")
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		host = strings.TrimSpace(s[:i])
+		server = strings.TrimSpace(s[i+1:])
+		if server != "" {
+			if _, _, e := net.SplitHostPort(server); e != nil {
+				server = net.JoinHostPort(server, "53")
+			}
+			if _, _, e := net.SplitHostPort(server); e != nil {
+				return "", "", errors.New("DNS 服务器格式应为 host 或 host:port")
+			}
+		}
+	} else {
+		host = s
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if len(host) == 0 || len(host) > 253 || strings.ContainsAny(host, "/\\ :") {
+		return "", "", errors.New("DNS 目标需为域名，例如 example.com 或 example.com@1.1.1.1")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return "", "", errors.New("DNS 域名格式无效")
+		}
+		for _, c := range label {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+				return "", "", errors.New("DNS 域名包含非法字符")
+			}
+		}
+	}
+	return host, server, nil
+}
+
+func (r *Runner) doDNS(sv model.Service, res *model.ServiceResult) {
+	host, server, err := parseDNSTarget(sv.Target)
+	if err != nil {
+		res.Detail = err.Error()
+		return
+	}
+	resolver := net.DefaultResolver
+	if server != "" {
+		h, _, _ := net.SplitHostPort(server)
+		if err := r.policy.CheckHost(h); err != nil {
+			res.Detail = "blocked: " + trimErr(err)
+			return
+		}
+		resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return r.policy.DialContext(ctx, network, server)
+			},
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	start := time.Now()
+	addrs, err := resolver.LookupHost(ctx, host)
+	res.LatencyMs = int(time.Since(start).Milliseconds())
+	if err != nil {
+		res.Detail = trimErr(err)
+		return
+	}
+	res.OK = len(addrs) > 0
+	detail := strings.Join(addrs, ", ")
+	if r := []rune(detail); len(r) > 200 {
+		detail = string(r[:200]) + "…"
+	}
+	res.Detail = detail
 }
 
 func (r *Runner) doHTTP(sv model.Service, res *model.ServiceResult) {

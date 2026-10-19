@@ -21,6 +21,7 @@ const revokedSessionsKey = "revoked_sessions"
 type loginRequest struct {
 	Identifier string `json:"identifier"`
 	Password   string `json:"password"`
+	TOTP       string `json:"totp"`
 }
 
 // handleAuthSession 返回当前登录态。未登录时返回 200，避免把正常的
@@ -80,6 +81,21 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if !u.Authenticate(in.Identifier, in.Password) {
 		fail(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
+	}
+	// 密码通过后再要求动态码：一次性把「缺少动态码」返回给前端，
+	// 由前端切换到验证码输入步骤；不存在的账号不会走到这里。
+	if u.TOTPEnabled {
+		if strings.TrimSpace(in.TOTP) == "" {
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error": "请输入动态验证码", "totpRequired": true,
+			})
+			return
+		}
+		if !auth.VerifyTOTP(u.TOTPSecret, in.TOTP, time.Now()) {
+			fail(w, http.StatusUnauthorized, "动态验证码错误")
+			return
+		}
 	}
 
 	token, exp, err := s.sessions.Issue(u.Username, u.SessionVersion())
