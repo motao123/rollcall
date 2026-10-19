@@ -367,7 +367,7 @@ async function viewOverview() {
         <thead><tr>
           <th>状态</th><th>节点</th><th>位置</th><th>系统</th>
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
-          <th class="num">负载</th><th class="num">流量 ↓ / ↑</th><th class="num">在线</th><th style="width:96px">24h CPU</th>
+          <th class="num">负载</th><th class="num">流量 ↓ / ↑</th><th class="num">在线</th><th>24h CPU</th>
         </tr></thead>
         <tbody>
           ${providerRows.map((r) => `
@@ -436,7 +436,7 @@ async function viewNodes() {
         <button class="btn tiny" data-batch="currency">改币种</button>
         <button class="btn tiny danger" data-batch="delete">删除</button>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="nodes-table">
         <thead><tr>
           <th style="width:26px"><input type="checkbox" id="selAll" aria-label="全选"></th>
           <th>状态</th><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
@@ -671,7 +671,7 @@ async function viewServices() {
         <h2 class="section-title">服务探测</h2>
         <span class="section-meta">${svcs.length} 个目标 · 由服务端主动探测</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="services-table">
         <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th>
           <th class="num">延迟</th><th class="num">证书</th><th class="num">24h 可用率</th><th>最近 2 小时</th></tr></thead>
         <tbody>${svcs.map((s) => {
@@ -751,7 +751,7 @@ async function viewAlerts() {
         <h2 class="section-title">告警规则</h2>
         <span class="section-meta">阈值、持续时间与级别均可在此调整</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="alerts-table">
         <thead><tr><th>规则</th><th>条件</th><th class="num">持续</th><th>级别</th><th class="num">启用</th><th class="num">操作</th></tr></thead>
         <tbody>${(rules || []).map((r) => {
           const m = metricMap[r.metric];
@@ -1092,7 +1092,7 @@ async function viewAssets() {
         <h2 class="section-title">资产台账</h2>
         <span class="section-meta">按到期时间排序</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="assets-table">
         <thead><tr><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
           <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th></tr></thead>
         <tbody>${rows.map((r) => {
@@ -1330,7 +1330,7 @@ async function viewSettings() {
         <h2 class="section-title">节点管理</h2>
         <span class="section-meta">${nodes.length} 台${serverVersion ? ' · 控制端 ' + esc(serverVersion) : ''}</span>
       </div>
-      <div class="table-wrap" style="margin-bottom:12px"><table>
+      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-nodes-table">
         <thead><tr><th>名称</th><th>服务商</th><th>位置</th><th>分组</th><th>到期</th><th>Agent</th><th class="num">操作</th></tr></thead>
         <tbody>${nodes.map((n) => `<tr>
           <td class="strong">${esc(n.name)}</td>
@@ -1373,7 +1373,7 @@ async function viewSettings() {
         <h2 class="section-title">服务探测</h2>
         <span class="section-meta">${services.length} 个目标</span>
       </div>
-      <div class="table-wrap" style="margin-bottom:12px"><table>
+      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-services-table">
         <thead><tr><th>名称</th><th>类型</th><th>目标</th><th class="num">间隔</th><th class="num">操作</th></tr></thead>
         <tbody>${services.map((s) => `<tr>
           <td class="strong">${esc(s.name)}</td>
@@ -1433,7 +1433,7 @@ async function viewSettings() {
         <h2 class="section-title">通知队列</h2>
         <span class="section-meta">待投递 ${qStats.pending || 0} · 失败 ${qStats.failed || 0} · 已送达 ${qStats.sent || 0} · 重试 ${qStats.retries || 0} · 拒收 ${qStats.rejected || 0}</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="queue-table">
         <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
         <tbody>${qJobs.map((j) => {
           const [cls, label] = qBadge[j.status] || ['mute', j.status];
@@ -2011,7 +2011,7 @@ async function viewStatusPage() {
         <span class="section-meta">窗口内不产生新告警，公开页显示"维护中"</span>
         <button class="btn primary" id="mtAdd" style="padding:6px 14px;font-size:12.5px">＋ 新建维护窗口</button>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="maint-table">
         <thead><tr><th>标题</th><th>范围</th><th>起止</th><th>状态</th><th class="num">操作</th></tr></thead>
         <tbody>${mtRows || '<tr><td colspan="5"><div class="empty">没有维护窗口</div></td></tr>'}</tbody>
       </table></div>
@@ -2023,7 +2023,7 @@ async function viewStatusPage() {
         <span class="section-meta">与告警一起出现在公开页时间线</span>
         <button class="btn primary" id="incAdd" style="padding:6px 14px;font-size:12.5px">＋ 登记事件</button>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="maint-table">
         <thead><tr><th>标题</th><th>级别</th><th>影响范围</th><th>时间</th><th class="num">操作</th></tr></thead>
         <tbody>${incRows || '<tr><td colspan="5"><div class="empty">没有人工事件</div></td></tr>'}</tbody>
       </table></div>

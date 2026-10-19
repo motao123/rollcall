@@ -55,11 +55,19 @@ html[data-theme="dark"] {
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
+}
+
+/* 文档自身作为唯一滚动容器并始终预留滚动条位置：
+   body 上的 overflow-x:hidden 会额外创建滚动容器，令 gutter 失效，
+   长短页面切换时居中的内容会相差半个滚动条宽度。 */
+html {
   overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
 body {
+  min-height: 100vh;
+  overflow-x: clip;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
                "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 13.5px;
@@ -187,13 +195,19 @@ body {
   position: sticky;
   top: 0;
   z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 14px 26px;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
+}
+/* 与 .view 使用同一宽度容器，宽屏下标题/操作与正文左右边缘对齐 */
+.topbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 14px 26px;
 }
 
 .page-title {
@@ -385,6 +399,7 @@ body {
   padding: 22px 26px 60px;
   max-width: 1440px;
   width: 100%;
+  margin: 0 auto; /* 宽屏居中，避免右侧留下大片空白 */
   min-width: 0; /* 允许在窄屏收缩，避免表格撑破布局 */
 }
 
@@ -632,7 +647,7 @@ tbody tr:last-child td { border-bottom: none; }
 tbody tr { transition: background 0.12s ease; }
 tbody tr:hover { background: var(--panel-2); }
 td.strong { color: var(--fg); font-weight: 550; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .badge {
   display: inline-flex;
@@ -866,8 +881,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     text-align: center;
   }
   .view { padding: 16px 14px 84px; }
-  .topbar { padding: 11px 14px; gap: 8px; flex-wrap: nowrap; }
-  .topbar > div:first-child { min-width: 0; flex: 1; }
+  .topbar-inner { padding: 11px 14px; gap: 8px; flex-wrap: nowrap; }
+  .topbar-inner > div:first-child { min-width: 0; flex: 1; }
   .page-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search { display: none; }
   .live { padding: 4px 8px; font-size: 10.5px; }
@@ -1309,7 +1324,33 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
 
 /* ---------- 首页紧凑节点表 ---------- */
 
-.node-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+/* 固定列宽 + 最小宽度：数字列不会被压到换行，窄屏由 .table-wrap 横向滚动。 */
+.node-table {
+  width: 100%;
+  min-width: 1180px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.node-table th:nth-child(1), .node-table td:nth-child(1) { width: 84px; }
+.node-table th:nth-child(2), .node-table td:nth-child(2) { width: 168px; }
+.node-table th:nth-child(3), .node-table td:nth-child(3) { width: 74px; }
+.node-table th:nth-child(5), .node-table td:nth-child(5),
+.node-table th:nth-child(6), .node-table td:nth-child(6),
+.node-table th:nth-child(7), .node-table td:nth-child(7) { width: 104px; }
+.node-table th:nth-child(8), .node-table td:nth-child(8) { width: 66px; }
+.node-table th:nth-child(9), .node-table td:nth-child(9) { width: 136px; }
+.node-table th:nth-child(10), .node-table td:nth-child(10) { width: 92px; }
+.node-table th:nth-child(11), .node-table td:nth-child(11) { width: 116px; }
+.node-table td:nth-child(1),
+.node-table td:nth-child(3),
+.node-table td.num { white-space: nowrap; }
+.node-table td:nth-child(2),
+.node-table td:nth-child(4) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .node-table thead th {
   font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em;
   color: var(--fg-3); text-transform: uppercase;
@@ -1330,6 +1371,20 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
   border-top: 1px solid var(--line);
 }
 .prov-row .prov-meta { margin-left: 10px; }
+
+/* 节点页列多，窄屏下不再挤压换行，改为容器横向滚动。 */
+.nodes-table { min-width: 980px; }
+
+/* 其余页面的多列表格同样保底宽度，避免手机上被压成逐字换行。 */
+.services-table { min-width: 900px; }
+.alerts-table { min-width: 880px; }
+.assets-table { min-width: 860px; }
+.settings-nodes-table { min-width: 860px; }
+.settings-services-table { min-width: 720px; }
+.queue-table { min-width: 900px; }
+.maint-table { min-width: 680px; }
+/* 空表不横向滚动，否则空状态文案会被最小宽度推到屏幕外。 */
+.table-wrap table:has(tbody .empty) { min-width: 0; }
 
 .tbar {
   display: inline-block;

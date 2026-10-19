@@ -92,6 +92,13 @@ func (s *Sessions) Verify(token string) (Session, bool) {
 	if err != nil {
 		return Session{}, false
 	}
+	// 只接受规范编码：RawURLEncoding 的最后一位可能带有未使用比特，
+	// Go 的解码器会忽略它们，导致同一签名存在多个字符串写法。
+	// 吊销表按令牌原文做指纹，若放行非规范写法，登出后的旧 Cookie
+	// 只需改写末位字符即可绕过吊销。
+	if sessionB64.EncodeToString(raw) != parts[0] || sessionB64.EncodeToString(sig) != parts[1] {
+		return Session{}, false
+	}
 	if subtle.ConstantTimeCompare(sig, signSession(s.key, raw)) != 1 {
 		return Session{}, false
 	}

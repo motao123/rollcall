@@ -69,34 +69,36 @@
 
   <main class="main">
     <header class="topbar">
-      <div>
-        <h1 class="page-title" id="pageTitle">概览</h1>
-        <p class="page-sub" id="pageSub">机群健康状态与关键指标</p>
-      </div>
-      <div class="topbar-right">
-        <div class="search">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-          <input id="searchInput" type="search" placeholder="搜索节点 / 服务…" autocomplete="off">
+      <div class="topbar-inner">
+        <div>
+          <h1 class="page-title" id="pageTitle">概览</h1>
+          <p class="page-sub" id="pageSub">机群健康状态与关键指标</p>
         </div>
-        <div class="live" id="liveBadge">
-          <span class="live-dot"></span><span id="liveText">实时</span>
-        </div>
-        <button class="icon-btn" id="refreshBtn" title="刷新 (R)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
-        </button>
-        <div class="user-menu" id="userMenu">
-          <button class="user-btn" id="userBtn" type="button" aria-haspopup="menu" aria-expanded="false" title="账号">
-            <span class="user-avatar" id="userAvatar">A</span>
-            <span class="user-name" id="userName">管理员</span>
-            <svg class="user-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        <div class="topbar-right">
+          <div class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input id="searchInput" type="search" placeholder="搜索节点 / 服务…" autocomplete="off">
+          </div>
+          <div class="live" id="liveBadge">
+            <span class="live-dot"></span><span id="liveText">实时</span>
+          </div>
+          <button class="icon-btn" id="refreshBtn" title="刷新 (R)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
           </button>
-          <div class="user-pop" id="userPop" role="menu">
-            <div class="user-pop-head">
-              <div class="user-pop-name" id="userPopName">admin</div>
-              <div class="user-pop-mail" id="userPopEmail">未设置邮箱</div>
+          <div class="user-menu" id="userMenu">
+            <button class="user-btn" id="userBtn" type="button" aria-haspopup="menu" aria-expanded="false" title="账号">
+              <span class="user-avatar" id="userAvatar">A</span>
+              <span class="user-name" id="userName">管理员</span>
+              <svg class="user-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div class="user-pop" id="userPop" role="menu">
+              <div class="user-pop-head">
+                <div class="user-pop-name" id="userPopName">admin</div>
+                <div class="user-pop-mail" id="userPopEmail">未设置邮箱</div>
+              </div>
+              <a class="user-item" href="/status" target="_blank" rel="noopener" role="menuitem">公开状态页 ↗</a>
+              <button class="user-item danger" id="userLogoutBtn" type="button" role="menuitem">退出登录</button>
             </div>
-            <a class="user-item" href="/status" target="_blank" rel="noopener" role="menuitem">公开状态页 ↗</a>
-            <button class="user-item danger" id="userLogoutBtn" type="button" role="menuitem">退出登录</button>
           </div>
         </div>
       </div>

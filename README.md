@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.9.4**（`./rollcall-server -version` 可查）。
+当前版本 **v1.9.5**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -377,7 +377,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.4`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.9.5`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -748,7 +748,7 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 构建机
-make linux VERSION=v1.9.4
+make linux VERSION=v1.9.5
 scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
 ```
 
@@ -980,15 +980,15 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十一、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.4）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.9.5）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.4、active + enabled |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.9.5、active + enabled |
 | 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过 |
-| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.3 → v1.9.4，配置未改动，`.prev` 保留 v1.9.3；分发目录同步更新 amd64/arm64 二进制 |
-| Agent 版本上报 | `X-Agent-Version` 上报后管理 API 显示 v1.9.4 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion` |
-| 会话吊销 | 退出登录后旧 Cookie 访问会话接口返回未登录、管理 API 401；重启控制端后旧 Cookie 仍处于吊销状态（吊销列表已持久化） |
+| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.9.4 → v1.9.5，配置未改动，`.prev` 保留 v1.9.4；分发目录同步更新 amd64/arm64 二进制 |
+| Agent 版本上报 | `X-Agent-Version` 上报后管理 API 显示 v1.9.5 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion` |
+| 会话吊销 | 退出登录后旧 Cookie 访问会话接口返回未登录、管理 API 401；重启控制端后旧 Cookie 仍处于吊销状态（吊销列表已持久化）；仅接受规范 base64 令牌，改写末位字符无法绕过吊销 |
 | 升级提示 UI | 概览、节点列表、设置页与详情页均显示「可升级」（临时实例模拟旧 Agent）；636px 宽无横向溢出，浏览器控制台无错误 |
 | 公开状态页 | `/status` 匿名可访问；13 个节点实测在线；1440px 三列 / 390px 单列均无横向溢出；浅色、深色、跟随系统切换正常 |
 | 公开 API | `/api/status`、`/api/status/node/<hid>`、`/api/theme` 匿名 200；用内部节点 ID 访问详情返回 404；匿名 `/api/nodes` 401；`/metrics` 凭管理令牌 200 |
@@ -998,6 +998,7 @@ certificate_days_remaining,uptime_percent_24h}`
 | 增量刷新 | 15 秒轮询保持搜索输入焦点与筛选状态；页面隐藏时暂停；详情切换区间不再整页闪烁 |
 | 面板登录 | 用户名与邮箱（大小写不敏感）均可登录；错误密码 401；会话跨刷新与服务重启保持；退出后 Cookie 立即失效 |
 | 面板布局 | 640px 移动端概览：区块标题的元信息与按钮右对齐、奇数 KPI 卡片补满整行、告警角标无告警时隐藏且不挤占导航项高度 |
+| 管理端宽度 | 2000px 宽屏下顶栏与正文同宽（上限 1440px）居中，长短页面切换无滚动条横向跳动；1280px 概览/节点表按列宽横向滚动，390px 下服务、告警、台账、设置、状态页表格均保持单行并由容器横向滚动 |
 | 鉴权边界 | 未登录读写接口 401；会话写请求缺 `X-Requested-With` 返回 403；管理令牌 API 与 `/metrics` 仍可用 |
 | 凭据存储 | `admin-user.json` 仅存 PBKDF2-SHA256 哈希（600,000 次迭代），无明文密码；`session.key` 0600 |
 | 上报频率 | 30 秒一报，在线/数据延迟/离线状态判定正确 |

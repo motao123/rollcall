@@ -209,6 +209,31 @@ func TestSessionIssueVerifyTamperAndExpiry(t *testing.T) {
 	if _, ok := sm.Verify(tampered); ok {
 		t.Fatal("篡改后的令牌不应通过")
 	}
+	// base64 末位的未使用比特：换一种写法解码结果相同，但令牌原文不同。
+	// 必须拒绝，否则按原文指纹记录的吊销列表会被绕过。
+	parts := strings.Split(token, ".")
+	sig, err := sessionB64.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("解码签名: %v", err)
+	}
+	var nonCanonical string
+	for _, c := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" {
+		cand := parts[1][:len(parts[1])-1] + string(c)
+		if cand == parts[1] {
+			continue
+		}
+		dec, err := sessionB64.DecodeString(cand)
+		if err == nil && string(dec) == string(sig) {
+			nonCanonical = parts[0] + "." + cand
+			break
+		}
+	}
+	if nonCanonical == "" {
+		t.Fatal("未构造出非规范 base64 写法")
+	}
+	if _, ok := sm.Verify(nonCanonical); ok {
+		t.Fatal("非规范 base64 令牌不应通过")
+	}
 	other, _ := NewSessions([]byte(strings.Repeat("x", 32)), time.Hour)
 	other.now = sm.now
 	if _, ok := other.Verify(token); ok {
