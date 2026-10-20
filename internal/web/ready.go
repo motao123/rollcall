@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/motao/rollcall/internal/version"
+	"github.com/motao123/rollcall/internal/version"
 )
 
 // readyProbeTTL 限制数据目录可写探测的频率：/readyz 是公开端点，

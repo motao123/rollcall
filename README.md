@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.10.4**（`./rollcall-server -version` 可查）。
+当前版本 **v1.10.5**（`./rollcall-server -version` 可查）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -448,15 +448,45 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 > 请使用官方二进制包或更新的发行版仓库；构建机为 arm64 时把 `linux-amd64` 换成 `linux-arm64`：
 >
 > ```bash
-> GO_VERSION=1.27.2
+> GO_VERSION=1.27.3
 > curl -fsSLO "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 > sudo rm -rf /usr/local/go
 > sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
+>
+> # /usr/local/go/bin 默认不在非交互 shell 的 PATH 里：export 只对当前会话有效，
+> # 下次 ssh 进去（或 systemctl 拉起的构建任务）又会变成 "go: command not found"。
+> echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
 > export PATH=$PATH:/usr/local/go/bin
 > go version   # 确认 >= 1.24
 > ```
+>
+> 不想装 Go 也可以直接用发布包里的预编译二进制，见下一节的「方式 0」。
 
 ### 1. 获取源码并构建
+
+**方式 0：不装 Go，直接用发布包**（推荐，`v1.10.5` 起 CI 会随 tag 发布预编译二进制）
+
+```bash
+VERSION=v1.10.5
+ARCH=amd64          # amd64 / arm64 / arm / 386
+BASE="https://github.com/motao123/rollcall/releases/download/${VERSION}"
+
+curl -fsSLO "$BASE/rollcall-server-linux-$ARCH"
+curl -fsSLO "$BASE/rollcall-agent-linux-$ARCH"
+curl -fsSLO "$BASE/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS      # 必须先校验再用
+
+sudo install -d -m 0755 /opt/rollcall
+sudo install -m 0755 "rollcall-server-linux-$ARCH" /opt/rollcall/rollcall-server
+sudo install -m 0755 "rollcall-agent-linux-$ARCH" /usr/local/bin/rollcall-agent
+/opt/rollcall/rollcall-server -version        # 应输出 $VERSION
+```
+
+发布包由 CI 用 `make linux` 构建（`CGO_ENABLED=0 -trimpath -buildvcs=false`，静态链接，无 glibc 版本要求），
+`SHA256SUMS` 覆盖全部 12 个产物（server / agent / rollsign × 4 架构）。
+`v1.10.5` 之前的 tag 没有发布资产，只能走下面的源码构建。
+
+**方式 1：从源码构建**
 
 ```bash
 git clone https://github.com/motao123/rollcall.git
@@ -478,7 +508,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 在任意目录（包括 git 工作区与非 git 目录）都能得到字节一致的二进制。
 > 发布时先用 `cd dist && sha256sum -c SHA256SUMS` 自检，再把校验和与版本号一起记录。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.4`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.5`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -911,10 +941,18 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 因此升级控制端只需要换二进制：
 
 ```bash
-# 构建机
-make linux VERSION=v1.10.4
+# 方式 A：自己构建（注意产物名带 -linux-<arch> 后缀，dist/rollcall-server 并不存在）
+make linux VERSION=v1.10.5
 (cd dist && sha256sum -c SHA256SUMS)
-scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
+scp dist/rollcall-server-linux-amd64 root@<控制端>:/tmp/rollcall-server.new
+```
+
+```bash
+# 方式 B：直接用发布包（v1.10.5 起 CI 随 tag 发布，无需构建机）
+curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.10.5/rollcall-server-linux-amd64"
+curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.10.5/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
+mv rollcall-server-linux-amd64 /tmp/rollcall-server.new
 ```
 
 ```bash
@@ -943,10 +981,12 @@ unit 文件只有在该版本明确要求时才需要同步替换；替换后执
 适合脚本化发布：
 
 ```bash
-# 在控制端本机执行；--sha256 为必填，防止传输损坏或拉错文件
+# 在控制端本机执行；--sha256 为必填，防止传输损坏或拉错文件。
+# 注意：--sha256 要填「发布方给出的」校验和（dist/SHA256SUMS 或 Release 页面），
+# 不要在目标机上现算刚下载的那个文件——那样两边永远相等，等于没校验。
 sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file /tmp/rollcall-server.new \
-  --sha256 "$(sha256sum /tmp/rollcall-server.new | awk '{print $1}')" \
+  --sha256 <发布记录里的 64 位 hex> \
   --service rollcall-server \
   --health http://127.0.0.1:19080/readyz
 
@@ -956,8 +996,12 @@ sudo sh deploy/rollcall-server-upgrade.sh rollback --service rollcall-server \
 ```
 
 - 升级前校验 ELF 魔数、架构与 SHA-256；当前二进制备份为 `rollcall-server.prev`
+- **替换路径默认从 `--service` 单元的 `ExecStart` 推导**，不是写死的 `/opt/rollcall/...`：
+  否则多实例主机上 `--service B` 配默认路径会替换掉 A 的二进制、再重启 B，
+  A 悄悄跑在旧文件上而脚本报告成功。显式 `--bin` 与单元 ExecStart 不一致时直接拒绝
 - 原子替换后重启 systemd 单元，最多等待 20 秒；只有 `/readyz` 返回 200 且
   版本号与目标二进制一致才算成功，否则自动恢复 `.prev` 并再次重启
+- 健康检查需要 `curl` 或 `wget`，都没有时报错退出；确实要跳过请显式传 `--health ""`
 - 使用 `/run/rollcall-upgrade.lock` 防止并发执行；仅支持 Linux
 - 脚本不会修改 unit 文件与数据目录；schema 升级后的数据回滚仍需按下方说明恢复备份
 
@@ -1197,9 +1241,12 @@ rollcall/
 
 ```bash
 go build -o /tmp/rollcall-bench ./cmd/server
-python bench/bench_steady.py --binary /tmp/rollcall-bench --nodes 20 40 100 --settle 75
-python bench/bench_capacity.py --binary /tmp/rollcall-bench --nodes 40 100 200   # 动态负载/延迟
+python3 bench/bench_steady.py --binary /tmp/rollcall-bench --nodes 20 40 100 --settle 75
+python3 bench/bench_capacity.py --binary /tmp/rollcall-bench --nodes 40 100 200   # 动态负载/延迟
 ```
+
+> 用 `python3` 而不是 `python`：Debian/Ubuntu 默认不装 `python` 这个名字的软链，
+> 照抄 `python ...` 会直接 `command not found`。
 
 > 说明：`bench_capacity.py` 用短时高频率上报压接口（环不会跑满），
 > 适合看"上报吞吐与接口延迟"；`bench_steady.py` 用预填满环的快照，
@@ -1274,7 +1321,26 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十二、实际部署验证
 
-已在 Debian 13 / AMD EPYC 16 核 / 32GB 环境完成控制端 + 被控端同机部署验证（v1.10.4）：
+已在 Debian 13 / AMD EPYC 16 核 / 32GB 环境（Go 1.27.3）完成控制端 + 被控端同机部署验证（v1.10.5）：
+
+| 项目 | 结果 |
+|---|---|
+| 构建与测试 | `gofmt -l` 干净、`go vet ./...`、`go test ./...`（18/18 包）、`CGO_ENABLED=1 go test -race ./...`（18/18 包）全部通过 |
+| 模块路径 | 模块名与仓库地址对齐为 `github.com/motao123/rollcall`（81 个文件），旧路径在源码与部署模板中已无残留；`go install …/cmd/server@latest` 与 `/agent/install.sh` 里的 `Documentation=` 从此指向真实仓库 |
+| 发布产物完整性 | `make linux VERSION=v1.10.5` 产出 12 个二进制，`SHA256SUMS` 恰好 12 行且含 4 个 `rollsign-linux-*`（此前 `rollcall-*` 通配会漏掉签发工具本身），`sha256sum -c` 全过 |
+| 升级脚本路径解析 | 隔离实例上只传 `--service` 时，二进制路径由单元 `ExecStart` 推导（`/opt/rcwalk/rollcall-server`），v1.10.4 → v1.10.5 升级、`.prev` 备份、`/readyz` 版本核对、回滚 v1.10.5 → v1.10.4 全部成功 |
+| 升级脚本拒绝路径 | `--bin` 与 `--service` 的 ExecStart 不一致 → 退出 1 且不触碰任何文件（生产二进制哈希前后一致）；单元不存在 → upgrade/rollback 均退出 1；缺 curl/wget 且未显式 `--health ""` → 退出 1；`--health ""` 正常跳过检查；`--help` 只输出注释头，不再漏出 `set -eu` |
+| 会话用户对象 | `/api/auth/login` 与 `/api/auth/session` 的 `user.totpEnabled` 是 JSON 布尔（曾为字符串 `"false"`，会让集成方的 `if (user.totpEnabled)` 恒为真）；`user` 只含 `username`/`email`/`totpEnabled`，无 `passwordHash`/`totpSecret`/`updatedAt`/`lastTotpStep` |
+| Agent 单元一致性 | 新增回归测试逐项比对 `/agent/install.sh` 生成的单元与 `deploy/rollcall-agent.service` 的 14 条沙箱指令；人为删掉任一侧的 `RestrictSUIDSGID` / `MemoryDenyWriteExecute` 均能让测试失败（双向验证过），两处 `Documentation=` 一致 |
+| 生产升级 | 用 `deploy/rollcall-server-upgrade.sh` 将控制端 v1.10.4 → v1.10.5：sha256 取自 `dist/SHA256SUMS`，升级后哈希 `7a9d0000…`、`/readyz` 返回 `{"ready":true,"version":"v1.10.5"}`、`/healthz` ok、服务 active + enabled、`.prev` 保留 v1.10.4 作为回滚点 |
+| 升级后回归 | 13/13 节点在线，0 stale / 0 offline / 0 noData；`admin.token`、`admin-user.json`、`session.key` 均 0600；无 `initial-admin-password.txt` 残留；`/app.js` gzip + `Vary` + 弱 ETag，`If-None-Match` 命中 304；`/agent/install.sh` 从不压缩；未登录 `/api/admin/nodes` 401；`/agent/download.sha256?arch=amd64` 与分发文件、下载内容三者哈希一致（`dcf60967…`）；公开 `/api/status` 不含主机名/IP/价格 |
+| CI 发布任务 | `.github/workflows/ci.yml` YAML 解析通过；新增 `release` job 仅在 tag 上运行、`needs: [test, race]`、`permissions: contents: write`、钉死 Go 1.27.3、校验 `SHA256SUMS` 为 12 行后用 `gh release create --verify-tag` 发布 |
+
+> 本版**没有 Agent 侧行为变更**（唯一涉及 agent 源码的改动是 import 路径字符串，不进二进制），
+> 因此 12 台远端节点与分发目录刻意保留在 v1.10.4，避免一轮没有收益的机群升级，
+> 面板也不会因此出现「可升级」标记。
+
+以下为 v1.10.4 及更早版本的验证记录：
 
 | 项目 | 结果 |
 |---|---|
@@ -1294,7 +1360,7 @@ certificate_days_remaining,uptime_percent_24h}`
 |---|---|
 | 服务状态 | rollcall-server / rollcall-agent 均 v1.10.3、active + enabled；13/13 节点在线 |
 | 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过；staticcheck 与 govulncheck 无发现；gosec 仅剩已逐项复核的演示随机数/插件路径类误报；Node 20 对 `app.js`/`status.js` 语法检查通过 |
-| 端到端脚本 | `rollcall-e2e.sh` 隔离实例 116/116 通过：P0–P3 全部新功能、通知模板、摘要/免打扰、证书/服务/流量告警、DNS/抖动/丢包、TOTP、范围化令牌、加密备份、报告、升级/回滚 |
+| 端到端走查 | 隔离实例手工走通 116 项检查：P0–P3 全部新功能、通知模板、摘要/免打扰、证书/服务/流量告警、DNS/抖动/丢包、TOTP、范围化令牌、加密备份、报告、升级/回滚（当时的检查脚本未随仓库发布，无法一键复现；可执行的清单见 `docs/operations.md` §10） |
 | 面板账号 | 设置页可直接修改用户名/邮箱与密码，均需当前密码确认；改后当前浏览器续签、其他设备旧会话立即失效；旧用户名/旧密码登录 401，新凭据可登录；`admin-user.json` 仍仅存 PBKDF2 哈希 |
 | 服务端升级脚本 | 生产机用 `deploy/rollcall-server-upgrade.sh`：v1.10.2 → v1.10.3，强制 sha256 校验、`.prev` 保留、健康检查失败自动回滚；升级后 `/healthz` ok、登录 200/未登录 401 |
 | Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.10.2 → v1.10.3，配置未改动，`.prev` 保留 v1.10.2；分发目录同步更新 amd64/arm64 二进制 |
@@ -1338,7 +1404,9 @@ certificate_days_remaining,uptime_percent_24h}`
 | 内存占用 | server 14.3 MB / agent 7.9 MB |
 
 完整操作步骤与升级/回滚方法见 `docs/operations.md`；初次部署的完整测试记录见
-`docs/部署与验证报告-20261017.txt`，界面截图见 `docs/screenshots/`。
+`docs/部署与验证报告-20261017.txt`，界面截图见 `docs/screenshots/`
+（截图取自 2026-10-17/18 的 v1.9.x 界面，v1.10 的控件统一与模块顺序调整尚未重新出图，
+以实际运行效果为准）。
 
 ---
 

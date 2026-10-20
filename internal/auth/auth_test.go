@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -353,5 +354,45 @@ func TestUpdateProfileAndPassword(t *testing.T) {
 		if fi.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("账号文件权限过宽: %v", fi.Mode().Perm())
 		}
+	}
+}
+
+func TestPublicInfoJSONTypes(t *testing.T) {
+	u := &User{Username: "admin", Email: "a@example.com"}
+
+	decode := func(t *testing.T, u *User) (map[string]any, string) {
+		t.Helper()
+		raw, err := json.Marshal(u.PublicInfo())
+		if err != nil {
+			t.Fatalf("序列化 PublicInfo: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("反序列化 PublicInfo: %v", err)
+		}
+		return got, string(raw)
+	}
+
+	got, raw := decode(t, u)
+	// totpEnabled 必须是 JSON 布尔。下发字符串 "false" 时，
+	// 集成方的 if (user.totpEnabled) 恒为真，等于永远要求动态码。
+	if v, ok := got["totpEnabled"].(bool); !ok || v {
+		t.Fatalf("未启用时 totpEnabled 应为布尔 false，实际 %#v（JSON: %s）", got["totpEnabled"], raw)
+	}
+
+	u.TOTPEnabled = true
+	u.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	got, raw = decode(t, u)
+	if v, ok := got["totpEnabled"].(bool); !ok || !v {
+		t.Fatalf("启用后 totpEnabled 应为布尔 true，实际 %#v（JSON: %s）", got["totpEnabled"], raw)
+	}
+
+	for _, k := range []string{"passwordHash", "totpSecret", "updatedAt", "lastTotpStep"} {
+		if _, ok := got[k]; ok {
+			t.Fatalf("PublicInfo 不应下发 %s（JSON: %s）", k, raw)
+		}
+	}
+	if got["username"] != "admin" || got["email"] != "a@example.com" {
+		t.Fatalf("公开字段缺失或错误: %s", raw)
 	}
 }

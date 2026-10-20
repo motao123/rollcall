@@ -30,15 +30,15 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/motao/rollcall/internal/agentwire"
+	"github.com/motao123/rollcall/internal/agentwire"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/motao/rollcall/internal/collect"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/selfupdate"
-	"github.com/motao/rollcall/internal/version"
+	"github.com/motao123/rollcall/internal/collect"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/selfupdate"
+	"github.com/motao123/rollcall/internal/version"
 )
 
 type updateConfig struct {

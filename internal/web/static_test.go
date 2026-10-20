@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 func staticReq(h http.Handler, path, accept, inm string) *httptest.ResponseRecorder {

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestSeedDemoMarksOfflineNode 防止「离线演示节点其实在线」。

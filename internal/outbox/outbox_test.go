@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 func testNotifyConfig() *notify.Config {

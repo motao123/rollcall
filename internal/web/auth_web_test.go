@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/auth"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 const testAdminPassword = "correct-horse-battery-staple"
@@ -94,11 +94,20 @@ func findSessionCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie 
 	return nil
 }
 
-func decodeSession(t *testing.T, w *httptest.ResponseRecorder) (bool, map[string]string) {
+// sessionUser 是 /api/auth/session、/api/auth/login 与 /api/admin/account 下发的用户对象。
+// 字段类型即断言：totpEnabled 必须是 JSON 布尔，用 map[string]string 解码会
+// 把「服务端下发字符串 false」这种回归悄悄放过去。
+type sessionUser struct {
+	Username    string `json:"username"`
+	Email       string `json:"email"`
+	TOTPEnabled bool   `json:"totpEnabled"`
+}
+
+func decodeSession(t *testing.T, w *httptest.ResponseRecorder) (bool, sessionUser) {
 	t.Helper()
 	var got struct {
-		Authenticated bool              `json:"authenticated"`
-		User          map[string]string `json:"user"`
+		Authenticated bool        `json:"authenticated"`
+		User          sessionUser `json:"user"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("解析会话响应失败: %v (%s)", err, w.Body.String())
@@ -152,8 +161,11 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 		t.Error("HTTPS 请求下会话 Cookie 必须标记 Secure")
 	}
 	authed, user := decodeSession(t, w)
-	if !authed || user["username"] != "imotao" || user["email"] != "login@example.com" {
-		t.Fatalf("登录响应用户信息不符: %v", user)
+	if !authed || user.Username != "imotao" || user.Email != "login@example.com" {
+		t.Fatalf("登录响应用户信息不符: %+v", user)
+	}
+	if user.TOTPEnabled {
+		t.Fatalf("未启用两步验证时 totpEnabled 应为 false: %+v", user)
 	}
 
 	w = doAuthReq(h, http.MethodGet, "/api/auth/session", "10.10.0.5", "", nil, cookie)
@@ -373,13 +385,13 @@ func TestAdminAccountUpdateFlow(t *testing.T) {
 		t.Fatal("账号响应不应包含密码哈希")
 	}
 	var updated struct {
-		User map[string]string `json:"user"`
+		User sessionUser `json:"user"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil {
-		t.Fatalf("解析响应: %v", err)
+		t.Fatalf("解析响应: %v (%s)", err, w.Body.String())
 	}
-	if updated.User["username"] != "operator" || updated.User["email"] != "ops@example.com" {
-		t.Fatalf("更新后的账号信息不符: %v", updated.User)
+	if updated.User.Username != "operator" || updated.User.Email != "ops@example.com" {
+		t.Fatalf("更新后的账号信息不符: %+v", updated.User)
 	}
 	newCookie := findSessionCookie(t, w)
 
@@ -394,8 +406,8 @@ func TestAdminAccountUpdateFlow(t *testing.T) {
 	}
 	if w := doAuthReq(h, http.MethodGet, "/api/auth/session", "10.20.0.10", "", nil, newCookie); w.Code != http.StatusOK {
 		t.Fatalf("续签会话应可用，实际 %d", w.Code)
-	} else if authed, user := decodeSession(t, w); !authed || user["username"] != "operator" {
-		t.Fatalf("续签会话信息不符: authed=%v user=%v", authed, user)
+	} else if authed, user := decodeSession(t, w); !authed || user.Username != "operator" {
+		t.Fatalf("续签会话信息不符: authed=%v user=%+v", authed, user)
 	}
 	if w := loginReq(h, "10.20.0.11", "imotao", testAdminPassword); w.Code != http.StatusUnauthorized {
 		t.Fatalf("旧用户名不应再能登录，实际 %d", w.Code)

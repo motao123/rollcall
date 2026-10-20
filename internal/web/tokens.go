@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // APITokenPrefix 是范围化令牌的固定前缀，便于在日志与密钥扫描中识别。

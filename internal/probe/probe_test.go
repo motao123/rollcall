@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 func TestParseTCPTarget(t *testing.T) {

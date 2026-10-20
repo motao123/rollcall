@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // TestAgentVersionPersists 验证 Agent 上报的版本随节点落盘：

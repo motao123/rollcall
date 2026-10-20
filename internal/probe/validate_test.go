@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // TestValidateServicePortAndScheme 防止端口越界与 https 类型配 http 目标。

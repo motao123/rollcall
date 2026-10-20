@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestAgentInstallScriptIsSafeAndPublic 是「一条命令接入」的回归测试。
@@ -127,6 +127,71 @@ func TestAgentInstallScriptIsSafeAndPublic(t *testing.T) {
 	configWrite := strings.Index(body, "cat > /etc/rollcall/agent.json")
 	if upgradeExit < 0 || configWrite < 0 || upgradeExit > configWrite {
 		t.Fatal("升级分支必须先于配置写入退出")
+	}
+}
+
+// systemdHardeningKeys 是 Agent 单元里代表沙箱姿态的指令。
+// 只比对这一组：User/ExecStart 之类本来就随安装方式变化，不该进断言。
+var systemdHardeningKeys = map[string]bool{
+	"NoNewPrivileges": true, "ProtectSystem": true, "ProtectHome": true,
+	"PrivateTmp": true, "PrivateDevices": true, "ProtectKernelTunables": true,
+	"ProtectKernelModules": true, "ProtectControlGroups": true,
+	"RestrictAddressFamilies": true, "RestrictNamespaces": true,
+	"RestrictSUIDSGID": true, "LockPersonality": true,
+	"MemoryDenyWriteExecute": true, "ReadOnlyPaths": true,
+	"ProtectKernelLogs": true, "ProtectClock": true, "ProtectHostname": true,
+	"CapabilityBoundingSet": true, "SystemCallFilter": true,
+}
+
+// hardeningDirectives 抽出单元里的沙箱指令（含取值），忽略顺序与注释。
+func hardeningDirectives(text string) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, _, ok := strings.Cut(line, "=")
+		if ok && systemdHardeningKeys[strings.TrimSpace(key)] {
+			out[line] = true
+		}
+	}
+	return out
+}
+
+// TestAgentUnitHardeningMatchesDeployFile 防止两种接入方式的安全姿态分叉：
+// 面板「一条命令接入」生成的单元必须与仓库里的 deploy/rollcall-agent.service
+// 逐项一致。少一条沙箱指令不会让安装失败，只会让节点悄悄跑在更宽的权限下，
+// 而运维看的是仓库里那份文件。
+func TestAgentUnitHardeningMatchesDeployFile(t *testing.T) {
+	srv := New(store.New(t.TempDir()), nil, nil, Config{})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/install.sh", nil))
+	if rec.Code != 200 {
+		t.Fatalf("install.sh = %d", rec.Code)
+	}
+	generated := hardeningDirectives(rec.Body.String())
+
+	deployPath := filepath.Join("..", "..", "deploy", "rollcall-agent.service")
+	raw, err := os.ReadFile(deployPath)
+	if err != nil {
+		t.Fatalf("读取 %s: %v", deployPath, err)
+	}
+	committed := hardeningDirectives(string(raw))
+
+	// 解析规则本身也要有断言：正则/键名写错时两边同为空集，测试会假通过。
+	if len(committed) < 10 {
+		t.Fatalf("%s 只解析出 %d 条沙箱指令，解析规则可能已失效", deployPath, len(committed))
+	}
+	for d := range committed {
+		if !generated[d] {
+			t.Errorf("install.sh 生成的单元缺少 %q（%s 里有）", d, deployPath)
+		}
+	}
+	for d := range generated {
+		if !committed[d] {
+			t.Errorf("%s 缺少 %q（install.sh 生成的单元里有）", deployPath, d)
+		}
 	}
 }
 

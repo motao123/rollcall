@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/outbox"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/outbox"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // Config 是定时任务的运行参数。

@@ -13,11 +13,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/motao/rollcall/internal/alert"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/store"
-	"github.com/motao/rollcall/internal/version"
+	"github.com/motao123/rollcall/internal/alert"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/version"
 )
 
 // TestUptime24UsesDurationNotSampleCount 是回归测试：

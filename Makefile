@@ -32,7 +32,7 @@ ifneq ($(findstring \,$(VERSION)),)
 $(error VERSION 不能包含反斜杠: $(VERSION))
 endif
 # 单引号供链接器的 quoted.Split 使用：值里有空格时也不会被拆成多个参数。
-VERSION_FLAG := -X 'github.com/motao/rollcall/internal/version.Version=$(VERSION)'
+VERSION_FLAG := -X 'github.com/motao123/rollcall/internal/version.Version=$(VERSION)'
 
 # 交叉编译的统一参数（静态链接，无 CGO 依赖）
 LDFLAGS_CROSS := -s -w $(VERSION_FLAG)
@@ -61,6 +61,9 @@ rollsign:
 # 先清空 dist：否则上一轮/其它目标的旧产物会混进发布包。
 # 所有架构都由 cross_build 生成，避免手写多行时漏掉某个组合
 # （此前 rollsign 只出了 amd64，arm64 节点上无法签发清单）。
+# SHA256SUMS 必须逐个列出三类产物：写成 rollcall-* 会漏掉 rollsign-linux-*，
+# 而 rollsign 正是签发 Agent 更新清单的工具 —— 分发渠道被篡改时，
+# 最先该被校验和发现的恰恰是它。
 linux:
 	rm -rf dist
 	mkdir -p dist
@@ -76,7 +79,7 @@ linux:
 	$(call cross_build,rollsign,rollsign,arm64)
 	$(call cross_build,rollsign,rollsign,arm)
 	$(call cross_build,rollsign,rollsign,386)
-	@cd dist && sha256sum rollcall-* > SHA256SUMS
+	@cd dist && sha256sum rollcall-server-linux-* rollcall-agent-linux-* rollsign-linux-* > SHA256SUMS
 	@ls -lh dist/
 	@cat dist/SHA256SUMS
 

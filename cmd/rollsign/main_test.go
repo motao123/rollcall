@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/selfupdate"
+	"github.com/motao123/rollcall/internal/selfupdate"
 )
 
 func writeAsset(t *testing.T, dir, name string) string {

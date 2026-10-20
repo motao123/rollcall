@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/selfupdate"
+	"github.com/motao123/rollcall/internal/selfupdate"
 )
 
 func main() {

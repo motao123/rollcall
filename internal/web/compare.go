@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // compareNode 是多节点对比的单个数据行。

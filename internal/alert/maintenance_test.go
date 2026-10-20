@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // maintenanceEnv 构造一个含离线规则与两台节点的引擎。

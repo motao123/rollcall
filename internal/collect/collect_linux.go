@@ -42,7 +42,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // Collector 持有上一次 CPU 采样，用于计算区间使用率。

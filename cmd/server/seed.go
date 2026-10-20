@@ -5,8 +5,8 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // seedDemo 生成一组贴近真实的演示数据，用于预览 UI 而不必先部署 Agent。

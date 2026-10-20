@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/netguard"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/netguard"
 )
 
 // Config 控制探测的出站行为。

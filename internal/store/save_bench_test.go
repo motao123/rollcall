@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // buildStore 构造贴近生产规模的 Store：nodes 个节点，每个填满 24h 环形缓冲（2880 点）。

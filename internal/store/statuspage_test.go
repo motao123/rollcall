@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 func statusStore(t *testing.T) *Store {

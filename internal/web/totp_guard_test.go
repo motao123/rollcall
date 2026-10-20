@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/auth"
 )
 
 // enableTOTP 在测试环境里把两步验证打开，返回密钥与换发后的 Cookie。

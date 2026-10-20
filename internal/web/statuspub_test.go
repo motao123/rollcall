@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // statusTestEnv 起一个带单个节点的服务端并返回 Handler。

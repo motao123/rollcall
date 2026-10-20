@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/motao/rollcall/internal/netguard"
+	"github.com/motao123/rollcall/internal/netguard"
 )
 
 // sevRank 用于 MinSeverity 过滤。

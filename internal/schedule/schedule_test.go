@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/outbox"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/outbox"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // testWebhookChannel 让通知配置拥有一个可用通道：

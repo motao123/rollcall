@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // 历史分层：24h 原始点仍在 state.json；更长时间跨度由三级聚合支撑，

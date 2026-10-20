@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 func newHealthServer(t *testing.T) http.Handler {

@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/motao/rollcall/internal/agentwire"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
-	"github.com/motao/rollcall/internal/version"
+	"github.com/motao123/rollcall/internal/agentwire"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/version"
 )
 
 // reportCounter 是上报次数的 60 秒滑动窗口。

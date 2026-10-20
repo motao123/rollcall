@@ -13,7 +13,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/motao/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/auth"
 )
 
 const (

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestNodeStateEmitsZeroForOtherStates 是回归测试。

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // TestImportIgnoresRevokedSessionsInBackup 是 P1 回归：

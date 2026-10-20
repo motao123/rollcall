@@ -3,9 +3,9 @@ package main
 import (
 	"testing"
 
-	"github.com/motao/rollcall/internal/alert"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/alert"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestEnsureDefaultRulesDoesNotResurrect 回归测试：

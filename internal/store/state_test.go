@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 func TestNodeStateBoundaries(t *testing.T) {

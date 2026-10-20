@@ -19,18 +19,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/motao/rollcall/internal/alert"
-	"github.com/motao/rollcall/internal/auth"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/outbox"
-	"github.com/motao/rollcall/internal/probe"
-	"github.com/motao/rollcall/internal/selfupdate"
-	"github.com/motao/rollcall/internal/store"
-	"github.com/motao/rollcall/internal/version"
+	"github.com/motao123/rollcall/internal/alert"
+	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/outbox"
+	"github.com/motao123/rollcall/internal/probe"
+	"github.com/motao123/rollcall/internal/selfupdate"
+	"github.com/motao123/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/version"
 	// 包内已有一个同名函数 sanitize（清理 Content-Disposition 文件名），
 	// 故此处带别名引入。
-	sanitizetext "github.com/motao/rollcall/internal/sanitize"
+	sanitizetext "github.com/motao123/rollcall/internal/sanitize"
 )
 
 //go:embed dist

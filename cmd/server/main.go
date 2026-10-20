@@ -21,16 +21,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/motao/rollcall/internal/alert"
-	"github.com/motao/rollcall/internal/auth"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/outbox"
-	"github.com/motao/rollcall/internal/probe"
-	"github.com/motao/rollcall/internal/schedule"
-	"github.com/motao/rollcall/internal/store"
-	"github.com/motao/rollcall/internal/version"
-	"github.com/motao/rollcall/internal/web"
+	"github.com/motao123/rollcall/internal/alert"
+	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/outbox"
+	"github.com/motao123/rollcall/internal/probe"
+	"github.com/motao123/rollcall/internal/schedule"
+	"github.com/motao123/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/version"
+	"github.com/motao123/rollcall/internal/web"
 )
 
 func main() {

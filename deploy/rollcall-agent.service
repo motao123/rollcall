@@ -1,6 +1,6 @@
 [Unit]
 Description=Rollcall Agent (read-only metrics reporter)
-Documentation=https://github.com/motao/rollcall
+Documentation=https://github.com/motao123/rollcall
 After=network-online.target
 Wants=network-online.target
 
@@ -26,6 +26,8 @@ RestartSec=10s
 # 详见 docs/operations.md「Agent 签名自更新」。
 
 # ---- 最小权限加固：Agent 只需要读 /proc ----
+# 这一段必须与 /agent/install.sh 生成的单元逐项一致（internal/web/agent_install.go）：
+# 两种接入方式的安全姿态一旦分叉，用户以为自己在跑最小权限，实际未必。
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -36,6 +38,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=true
+RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 # /proc 读取是唯一需要的权限

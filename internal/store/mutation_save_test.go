@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // TestDeleteServiceRequestsSave 防止删除只改内存不落盘，重启后服务「复活」。

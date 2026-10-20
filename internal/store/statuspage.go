@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/sanitize"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/sanitize"
 )
 
 // 配置持久化键。内容都是 JSON 字符串，存在 settings map 里，

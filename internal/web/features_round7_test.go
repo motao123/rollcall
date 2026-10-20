@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/auth"
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/notify"
-	"github.com/motao/rollcall/internal/probe"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/probe"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 const testAdminToken = "test-admin-token-1234567890"

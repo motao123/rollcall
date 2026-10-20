@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/sanitize"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/sanitize"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // 本文件实现公开状态页的管理接口：

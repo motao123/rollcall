@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -75,11 +74,13 @@ func ValidateEmail(email string) error {
 }
 
 // PublicInfo 返回可安全下发给前端的字段。
-func (u *User) PublicInfo() map[string]string {
-	return map[string]string{
+// totpEnabled 必须是 JSON 布尔：写成 strconv.FormatBool 会下发字符串 "false"，
+// 集成方 if (user.totpEnabled) 恒为真，等于永远要求动态码。
+func (u *User) PublicInfo() map[string]any {
+	return map[string]any{
 		"username":    u.Username,
 		"email":       u.Email,
-		"totpEnabled": strconv.FormatBool(u.TOTPEnabled),
+		"totpEnabled": u.TOTPEnabled,
 	}
 }
 

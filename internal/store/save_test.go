@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // TestSaveRacesWithWrites 是回归测试：Save() 必须在持锁期间完成深拷贝。

@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 type Collector struct {

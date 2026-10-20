@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/backup"
-	"github.com/motao/rollcall/internal/notify"
+	"github.com/motao123/rollcall/internal/backup"
+	"github.com/motao123/rollcall/internal/notify"
 )
 
 type backupRequest struct {

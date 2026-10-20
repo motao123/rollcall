@@ -425,7 +425,7 @@ fi
 cat > /etc/systemd/system/rollcall-agent.service <<UNIT
 [Unit]
 Description=Rollcall Agent (read-only metrics reporter)
-Documentation=https://github.com/motao/rollcall
+Documentation=https://github.com/motao123/rollcall
 After=network-online.target
 Wants=network-online.target
 

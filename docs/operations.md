@@ -44,11 +44,22 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.10.4
+make linux VERSION=v1.10.5
 (cd dist && sha256sum -c SHA256SUMS)
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
+```
+
+不想在目标机上装 Go，也可以直接取 CI 随 tag 发布的预编译产物（`v1.10.5` 起）：
+
+```bash
+VERSION=v1.10.5; ARCH=amd64
+BASE="https://github.com/motao123/rollcall/releases/download/${VERSION}"
+curl -fsSLO "$BASE/rollcall-server-linux-$ARCH"
+curl -fsSLO "$BASE/rollcall-agent-linux-$ARCH"
+curl -fsSLO "$BASE/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
 ```
 
 构建统一带 `-trimpath -buildvcs=false`：同一份源码 + 相同 Go 版本，在 git 工作区、
@@ -83,9 +94,11 @@ curl -fsS http://127.0.0.1:19080/readyz
 `deploy/rollcall-server-upgrade.sh` 封装了「校验 → 备份 `.prev` → 原子替换 → 重启 → 健康检查 → 失败自动回滚」：
 
 ```bash
+# --sha256 必须填「发布方给出的」校验和（dist/SHA256SUMS 或 Release 页面），
+# 不要在目标机上现算刚下载的那个文件：那样两边永远相等，等于没校验。
 sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file /tmp/rollcall-server.new \
-  --sha256 "$(sha256sum /tmp/rollcall-server.new | awk '{print $1}')" \
+  --sha256 <发布记录里的 64 位 hex> \
   --service rollcall-server \
   --health http://127.0.0.1:19080/readyz
 
@@ -94,6 +107,11 @@ sudo sh deploy/rollcall-server-upgrade.sh rollback \
 ```
 
 - `--sha256` 为必填；同时检查 ELF 魔数与架构，拒绝把脚本/损坏文件装成服务端
+- **二进制路径默认从 `--service` 单元的 `ExecStart` 推导**，不是写死的 `/opt/rollcall/...`：
+  否则在多实例主机上，`--service B` 配默认路径会替换掉 A 的二进制、再重启 B，
+  A 悄悄跑在旧文件上而脚本报告成功。显式传 `--bin` 且与单元 ExecStart 不一致时脚本直接拒绝
+- 健康检查需要 `curl` 或 `wget`；两者都没有时脚本报错退出，确实要跳过请显式传 `--health ""`
+  （不传就是"跳过检查也算升级成功"，正是脚本要避免的那种假成功）
 - 当前二进制保存为 `rollcall-server.prev`；最多等待 20 秒，要求 `/readyz`
   返回 200 且版本号与目标二进制一致（防止 systemd 仍拉起旧文件）
 - 新版本启动失败时自动换回 `.prev` 并再次重启，脚本返回非 0
@@ -184,9 +202,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.10.4
-./rollsign sign -key /root/rollcall-update.key -version v1.10.4 \
-  -base-url https://updates.example.com/agent/v1.10.4 \
+make linux VERSION=v1.10.5
+./rollsign sign -key /root/rollcall-update.key -version v1.10.5 \
+  -base-url https://updates.example.com/agent/v1.10.5 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json
@@ -689,6 +707,8 @@ curl -fsS http://127.0.0.1:19080/metrics \
 ## 10. 上线后检查清单
 
 - [ ] `rollcall-server -version` / `rollcall-agent -version` 与发布版本一致，产物的 SHA-256 与发布记录一致
+- [ ] `dist/SHA256SUMS` 恰好 12 行（server/agent/rollsign × amd64/arm64/arm/386）；
+      少了 `rollsign-linux-*` 就等于发布包里留了一个没人核对的二进制，而它正是签发 Agent 更新清单的工具
 - [ ] 面板节点列表的 Agent 版本与 `rollcall-agent -version` 一致，无意外「可升级」标记
 - [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`；无 systemd 时确认 `runuser` 后台进程与日志
 - [ ] `/healthz` 返回 `ok`、`/readyz` 返回 200 且版本号与目标版本一致，`/status` 可匿名访问且不含主机名/IP/价格
@@ -699,6 +719,8 @@ curl -fsS http://127.0.0.1:19080/metrics \
 - [ ] 已配置备份任务，且实际恢复演练过一次
 - [ ] 管理员密码已存入密码管理器，非默认/弱口令；`admin-user.json` 中只有哈希
 - [ ] 管理令牌、节点令牌、`admin-user.json`、`session.key` 均未进入仓库、日志或截图
+- [ ] 一台主机跑多个实例时，确认 `rollcall-server-upgrade.sh` 的 `--service` 与 `--bin`
+      指向同一个实例（脚本会用单元 ExecStart 交叉校验并拒绝不一致的组合）
 - [ ] 如启用自更新：`update.manifestUrl` 为 HTTPS、公钥正确、二进制目录可写且 systemd 已放行
 - [ ] 如启用通知插件：目录与清单非全局可写，逐通道测试通过
 - [ ] 如修改主题：管理页与 `/status` 均按预期显示，重置后恢复默认
@@ -710,6 +732,10 @@ curl -fsS http://127.0.0.1:19080/metrics \
 卸载前先备份 `data/`（账号、令牌、历史都在其中），并确认没有其他系统依赖该实例的 API。
 删除数据目录不可恢复。
 
+> `/etc/rollcall` 同时被控制端（`server.env`、TLS 证书）和被控端（`agent.json`）使用。
+> 同机部署时**不要**在卸载其中一个组件时删掉这个目录——里面有另一组件的凭据。
+> 只有确认这台机器上不再运行任何 Rollcall 组件时，才执行最后那条 `rm -rf /etc/rollcall`。
+
 ```bash
 # 控制端
 sudo systemctl disable --now rollcall-server
@@ -717,6 +743,7 @@ sudo rm -f /etc/systemd/system/rollcall-server.service
 sudo rm -rf /etc/systemd/system/rollcall-server.service.d
 sudo systemctl daemon-reload
 sudo rm -rf /opt/rollcall                 # 确认备份完成后再执行
+sudo rm -f /etc/rollcall/server.env       # 可能仍留有明文初始密码行
 sudo userdel rollcall 2>/dev/null || true
 ```
 
@@ -725,11 +752,19 @@ sudo userdel rollcall 2>/dev/null || true
 sudo systemctl disable --now rollcall-agent 2>/dev/null || true
 # 无 systemd 的容器改为：sudo pkill -f /usr/local/bin/rollcall-agent
 sudo rm -f /etc/systemd/system/rollcall-agent.service
-sudo rm -f /etc/systemd/system/rollcall-agent.service.d/*.conf
+sudo rm -rf /etc/systemd/system/rollcall-agent.service.d   # 空目录也要删，否则 daemon-reload 后仍是一个残留单元目录
 sudo rm -f /usr/local/bin/rollcall-agent /usr/local/bin/rollcall-agent.prev
+sudo rm -rf /opt/rollcall-agent           # 仅启用签名自更新时存在（含旧版本副本）
 sudo rm -f /etc/rollcall/agent.json /var/log/rollcall-agent.log
 sudo systemctl daemon-reload
 sudo userdel rollcall-agent 2>/dev/null || true
 ```
 
+```bash
+# 这台机器上不再有任何 Rollcall 组件时才执行
+sudo rm -rf /etc/rollcall                 # 内含 TLS 私钥等敏感文件
+```
+
 最后删除反向代理站点、DNS 记录，并在密码管理器/CI 中吊销不再使用的管理令牌。
+控制端数据目录里的节点令牌一旦删除就无法再吊销对应 Agent，
+如果这些 Agent 还会连到别处，请先在面板里逐个吊销。

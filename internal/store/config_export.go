@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/model"
 )
 
 // ConfigBackupVersion 是配置备份格式版本。

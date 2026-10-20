@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/auth"
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestAccountSaveFailureDoesNotLeakPath 回归：

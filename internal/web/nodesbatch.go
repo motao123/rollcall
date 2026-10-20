@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/motao/rollcall/internal/model"
-	"github.com/motao/rollcall/internal/sanitize"
+	"github.com/motao123/rollcall/internal/model"
+	"github.com/motao123/rollcall/internal/sanitize"
 )
 
 // handleAdminNodesBatch 节点批量操作。

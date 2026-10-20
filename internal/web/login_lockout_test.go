@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motao/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/auth"
 )
 
 // TestLoginClearsBlockedReadonlyScope 是 P1 回归：

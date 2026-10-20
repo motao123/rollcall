@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/motao/rollcall/internal/store"
+	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestStatusPageHasCSSOnlyScriptFallback 是回归测试。
