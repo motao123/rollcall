@@ -1,6 +1,7 @@
 package store
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/motao/rollcall/internal/model"
@@ -17,7 +18,8 @@ func TestStatusPageDefaultsWhenUnset(t *testing.T) {
 	s := statusStore(t)
 	cfg := s.StatusPage()
 	def := model.DefaultStatusPage()
-	if cfg != def {
+	// 结构体含切片（Sections），不能再用 == 比较，改用 DeepEqual
+	if !reflect.DeepEqual(cfg, def) {
 		t.Errorf("未配置应返回默认值\n got: %+v\nwant: %+v", cfg, def)
 	}
 }

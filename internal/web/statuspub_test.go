@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -509,5 +510,72 @@ func TestPublicNodeHandleIsOpaque(t *testing.T) {
 	b := store.New(dir)
 	if after := b.PublicHandle("n1"); after != before {
 		t.Errorf("重启后句柄变了（公开链接会全部失效）：%s → %s", before, after)
+	}
+}
+
+// TestStatusPageSectionOrderRoundTrip 覆盖区块排序的完整链路：
+// 保存顺序 → 公开页 payload 按该顺序下发 → 非法键被丢弃、缺失键补齐。
+func TestStatusPageSectionOrderRoundTrip(t *testing.T) {
+	st := store.New(t.TempDir())
+	srv := New(st, nil, nil, Config{AdminToken: "sections-test-token-123456"})
+	h := srv.Handler()
+
+	// 1) 保存一个自定义顺序：把可用率（history）提到最前
+	body := `{"sections":["history","nodes","services","map","incidents","activity"]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/status-page", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Token", "sections-test-token-123456")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("保存顺序失败: %d %s", w.Code, w.Body.String())
+	}
+
+	// 2) 公开页必须按保存的顺序下发
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("公开页接口失败: %d", w.Code)
+	}
+	var payload struct {
+		Sections []string `json:"sections"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 payload 失败: %v", err)
+	}
+	want := []string{"history", "nodes", "services", "map", "incidents", "activity"}
+	if !reflect.DeepEqual(payload.Sections, want) {
+		t.Fatalf("顺序未生效\n got: %v\nwant: %v", payload.Sections, want)
+	}
+
+	// 3) 非法/重复键被丢弃，缺失键按默认顺序补齐
+	body = `{"sections":["activity","nope","activity"]}`
+	req = httptest.NewRequest(http.MethodPut, "/api/admin/status-page", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Token", "sections-test-token-123456")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("保存异常顺序失败: %d %s", w.Code, w.Body.String())
+	}
+	got := st.StatusPage().Sections
+	if len(got) != len(model.StatusSectionKeys) {
+		t.Fatalf("区块数量应为 %d，实际 %d: %v", len(model.StatusSectionKeys), len(got), got)
+	}
+	if got[0] != "activity" {
+		t.Errorf("合法项应保持在前: %v", got)
+	}
+	for _, k := range got {
+		if k == "nope" {
+			t.Errorf("非法键不应保留: %v", got)
+		}
+	}
+	seen := map[string]bool{}
+	for _, k := range got {
+		if seen[k] {
+			t.Errorf("出现重复键 %q: %v", k, got)
+		}
+		seen[k] = true
 	}
 }

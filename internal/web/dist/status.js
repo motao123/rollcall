@@ -416,6 +416,20 @@
   var searchTimer = null;
   var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
+  // 区块顺序：服务端下发（管理员配置），缺失时回退默认顺序。
+  // 这里必须自己再补一遍缺失项：老服务端不认识 sections 时页面仍要完整。
+  var DEFAULT_SEC_ORDER = ['nodes', 'services', 'map', 'history', 'incidents', 'activity'];
+  var SEC_LABEL = {
+    nodes: '节点列表', services: '服务探测', map: '地区分布',
+    history: '可用率', incidents: '事件', activity: '最近活动',
+  };
+  // ADMIN 为 true 时才渲染拖拽手柄：公开页是匿名可访问的，
+  // 排序属于"对所有访客生效"的配置，不能由任意访客改动。
+  var ADMIN = false;
+  var SEC_HINTED = false;
+  var secToastEl = null;
+  var secToastTimer = null;
+
   function block(name) {
     if (!DATA || !DATA.blocks) return true;
     return !!DATA.blocks[name];
@@ -960,17 +974,163 @@
     return html + '</div>';
   }
 
+  function sectionOrder() {
+    var raw = (DATA && DATA.sections) || [];
+    var out = [];
+    raw.forEach(function (k) {
+      if (DEFAULT_SEC_ORDER.indexOf(k) >= 0 && out.indexOf(k) < 0) out.push(k);
+    });
+    DEFAULT_SEC_ORDER.forEach(function (k) {
+      if (out.indexOf(k) < 0) out.push(k);
+    });
+    return out;
+  }
+
+  function secWrap(key, inner) {
+    var label = SEC_LABEL[key] || key;
+    var handle = ADMIN
+      ? '<button class="sec-handle" type="button" data-handle="' + key +
+        '" aria-label="拖动调整「' + label + '」模块位置，或按 Alt+上下方向键移动" title="拖动调整位置">⠿</button>'
+      : '';
+    return '<div class="sec" data-sec="' + key + '">' + handle + inner + '</div>';
+  }
+
+  function secToast(msg, bad) {
+    if (!secToastEl) {
+      secToastEl = document.createElement('div');
+      secToastEl.className = 'sec-toast';
+      document.body.appendChild(secToastEl);
+    }
+    secToastEl.textContent = msg;
+    secToastEl.className = 'sec-toast' + (bad ? ' bad' : '');
+    clearTimeout(secToastTimer);
+    secToastTimer = setTimeout(function () { secToastEl.className = 'sec-toast hidden'; }, 2400);
+  }
+
+  function currentOrder() {
+    return Array.prototype.map.call(app.querySelectorAll('.sec'), function (el) {
+      return el.getAttribute('data-sec');
+    });
+  }
+
+  // saveSectionOrder 把顺序写回服务端配置：对所有访客生效，刷新/换设备都保持。
+  // 只存 localStorage 会让"换台电脑就变回去"，看起来像没保存。
+  function saveSectionOrder(order) {
+    secToast('正在保存排序…');
+    fetch('/api/admin/status-page', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        var cfg = (d && d.config) || {};
+        cfg.sections = order;
+        return fetch('/api/admin/status-page', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify(cfg),
+        });
+      })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        var saved = (d && d.config && d.config.sections) || order;
+        DATA.sections = saved;
+        secToast('排序已保存，对所有访客生效');
+      })
+      .catch(function (e) {
+        secToast('保存失败：' + e.message, true);
+        // 回滚：重新按服务端顺序渲染，避免界面显示的和实际保存的不一致
+        render();
+      });
+  }
+
+  // bindSectionDrag 用 Pointer Events 实现拖动（鼠标/触屏通用），
+  // 不做 placeholder：直接移动元素本身，松手后按 DOM 顺序落库。
+  function bindSectionDrag() {
+    var dragging = null;
+    var moved = false;
+
+    function finish() {
+      if (!dragging) return null;
+      var el = dragging;
+      dragging = null;
+      el.classList.remove('sec-dragging');
+      document.body.classList.remove('sec-sorting');
+      return el;
+    }
+
+    app.querySelectorAll('.sec-handle').forEach(function (h) {
+      h.addEventListener('pointerdown', function (e) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        dragging = h.closest('.sec');
+        moved = false;
+        try { h.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器忽略 */ }
+        dragging.classList.add('sec-dragging');
+        document.body.classList.add('sec-sorting');
+      });
+
+      h.addEventListener('pointermove', function (e) {
+        if (!dragging) return;
+        moved = true;
+        var after = null;
+        var secs = Array.prototype.slice.call(app.querySelectorAll('.sec'));
+        for (var i = 0; i < secs.length; i++) {
+          var s = secs[i];
+          if (s === dragging) continue;
+          var r = s.getBoundingClientRect();
+          if (e.clientY < r.top + r.height / 2) { after = s; break; }
+        }
+        if (after) app.insertBefore(dragging, after);
+        else app.appendChild(dragging);
+      });
+
+      h.addEventListener('pointerup', function () {
+        if (!finish()) return;
+        if (moved) saveSectionOrder(currentOrder());
+      });
+
+      h.addEventListener('pointercancel', function () {
+        finish();
+      });
+
+      // 键盘可达：聚焦手柄后 Alt+↑/↓ 移动一格
+      h.addEventListener('keydown', function (e) {
+        if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+        e.preventDefault();
+        var sec = h.closest('.sec');
+        if (e.key === 'ArrowUp' && sec.previousElementSibling) {
+          app.insertBefore(sec, sec.previousElementSibling);
+        } else if (e.key === 'ArrowDown' && sec.nextElementSibling) {
+          app.insertBefore(sec.nextElementSibling, sec);
+        } else {
+          return;
+        }
+        sec.focus();
+        saveSectionOrder(currentOrder());
+      });
+    });
+  }
+
   function listHTML() {
     var nodes = filteredNodes();
-    return '<div id="banners">' + bannerHTML(DATA) + '</div>' +
-      heroHTML(DATA) +
-      toolbarHTML() +
-      '<section class="node-grid" id="nodeGrid" aria-live="polite">' + gridHTML(nodes) + '</section>' +
-      servicesSection() +
-      mapSection() +
-      historySection() +
-      incidentsSection() +
-      activitySection();
+    // 工具栏跟随节点列表一起移动：它只作用于节点网格，
+    // 若固定在顶部而网格被拖到下面，筛选器会指向看不见的内容。
+    var blocks = {
+      nodes: toolbarHTML() +
+        '<section class="node-grid" id="nodeGrid" aria-live="polite">' + gridHTML(nodes) + '</section>',
+      services: servicesSection(),
+      map: mapSection(),
+      history: historySection(),
+      incidents: incidentsSection(),
+      activity: activitySection(),
+    };
+    return '<div id="banners">' + bannerHTML(DATA) + '</div>' + heroHTML(DATA) +
+      sectionOrder().map(function (k) { return secWrap(k, blocks[k] || ''); }).join('');
   }
 
   function renderList() {
@@ -978,6 +1138,15 @@
     app.setAttribute('data-view', 'list');
     app.removeAttribute('data-detail-id');
     app.removeAttribute('aria-busy');
+    document.body.classList.toggle('sec-admin', ADMIN);
+    if (ADMIN) {
+      bindSectionDrag();
+      // 只在本次会话第一次渲染时提示，避免每次轮询都弹
+      if (!SEC_HINTED) {
+        SEC_HINTED = true;
+        setTimeout(function () { secToast('可拖动区块右上角的手柄调整模块顺序'); }, 900);
+      }
+    }
     var grid = document.getElementById('nodeGrid');
     if (grid) grid.setAttribute('data-sig', gridSignature(filteredNodes()));
     lastGroupsKey = groupsOf((DATA && DATA.nodes) || []).join('|');
@@ -1763,6 +1932,19 @@ function detailTitle(n) {
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) tick();
   });
+
+  // 只有已登录管理员才拿到拖拽手柄：公开页匿名可访问，
+  // 排序会写进服务端配置并对所有访客生效，不能由访客改动。
+  // 用同源会话探测（不发送任何凭证，浏览器自动带 Cookie）。
+  fetch('/api/auth/session', { credentials: 'same-origin', cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (d && d.authenticated) {
+        ADMIN = true;
+        if (rendered) render();   // 已渲染则重绘一次，让手柄出现
+      }
+    })
+    .catch(function () { /* 匿名访客：保持只读 */ });
 
   loadTheme();
   fetchList();

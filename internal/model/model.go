@@ -2,6 +2,8 @@
 // 设计约束：只包含数据结构与纯函数，不引入任何外部依赖。
 package model
 
+import "strings"
+
 // Node 是一个被监控节点的台账条目。
 // 它同时承担两个职责：监控节点的元信息、以及资产台账（服务商/到期/价格）。
 type Node struct {
@@ -343,6 +345,40 @@ type StatusPage struct {
 	Visibility   StatusVisibility   `json:"visibility"`
 	Blocks       StatusBlocks       `json:"blocks"`
 	HistoryDays  int                `json:"historyDays"` // 可用率日柱天数：30 / 60 / 90
+	// Sections 是公开页区块的展示顺序（从上到下）。
+	// 未知键被丢弃、重复键去重、缺失键按默认顺序补在末尾 ——
+	// 这样"新增区块"不会因为老配置里没有该键就从页面上消失。
+	Sections []string `json:"sections"`
+}
+
+// StatusSectionKeys 是所有可排序区块的标识，顺序即默认展示顺序。
+// 与前端 status.js 的区块渲染一一对应；改名会让已保存的顺序失效
+// （NormalizeSections 会丢弃未知键并补齐默认项，页面仍可用）。
+var StatusSectionKeys = []string{"nodes", "services", "map", "history", "incidents", "activity"}
+
+// NormalizeSections 把任意输入修正为合法、无重复、覆盖全部区块的顺序。
+func NormalizeSections(in []string) []string {
+	known := make(map[string]bool, len(StatusSectionKeys))
+	for _, k := range StatusSectionKeys {
+		known[k] = true
+	}
+	seen := make(map[string]bool, len(StatusSectionKeys))
+	out := make([]string, 0, len(StatusSectionKeys))
+	for _, k := range in {
+		k = strings.TrimSpace(k)
+		if !known[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	// 补齐缺失区块：老配置升级后不会丢模块
+	for _, k := range StatusSectionKeys {
+		if !seen[k] {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // DefaultStatusPage 返回默认配置。
@@ -365,6 +401,7 @@ func DefaultStatusPage() StatusPage {
 			History: true, NodeDetail: true, Map: true, Activity: true,
 		},
 		HistoryDays: 90,
+		Sections:    append([]string(nil), StatusSectionKeys...),
 	}
 }
 
@@ -392,6 +429,7 @@ func (c *StatusPage) Normalize() {
 	default:
 		c.HistoryDays = 90
 	}
+	c.Sections = NormalizeSections(c.Sections)
 }
 
 // Maintenance 是一段计划维护窗口。

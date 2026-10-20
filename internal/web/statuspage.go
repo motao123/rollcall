@@ -155,6 +155,30 @@ h1{font-size:21px;line-height:1.2;font-weight:700;letter-spacing:-.02em;margin:0
 @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
   .card,.node-card,.hdr-btn,.icon-btn,.seg,.search{background:var(--panel-solid)}
 }
+/* ---- 区块拖拽排序（仅管理员可见手柄） ---- */
+.sec{position:relative}
+/* 悬浮在区块右上角**外侧**：卡片头部右侧本来就有"平均 x%"之类的摘要，
+   放在里面会压住文字；放外面还能一眼看出它是"整块的抓手"。 */
+.sec-handle{position:absolute;top:-11px;right:6px;width:24px;height:24px;
+  display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);border-radius:50%;background:var(--panel-solid);
+  color:var(--fg3);font-size:12px;line-height:1;padding:0;cursor:grab;
+  opacity:0;transition:opacity .15s,color .15s,border-color .15s,box-shadow .15s;
+  box-shadow:0 2px 6px rgba(15,23,42,.12);touch-action:none;z-index:6}
+.sec:hover .sec-handle,.sec-handle:focus-visible{opacity:1}
+.sec-handle:hover{color:var(--accent);border-color:var(--accent);box-shadow:0 4px 12px rgba(37,99,235,.25)}
+.sec-handle:active{cursor:grabbing}
+@media (hover:none){.sec-handle{opacity:.7}}
+/* 管理员：淡显而非完全隐藏，否则没人知道这里能拖 */
+body.sec-admin .sec-handle{opacity:.32}
+.sec-dragging{opacity:.7;outline:2px dashed var(--accent);outline-offset:3px;border-radius:12px}
+body.sec-sorting{user-select:none;cursor:grabbing}
+.sec-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+  padding:8px 14px;border-radius:9px;background:var(--fg);color:var(--on-accent);
+  font-size:12.5px;z-index:99;box-shadow:0 10px 28px rgba(15,23,42,.22);
+  transition:opacity .18s,transform .18s}
+.sec-toast.bad{background:var(--crit)}
+.sec-toast.hidden{opacity:0;transform:translateX(-50%) translateY(6px);pointer-events:none}
 .card{padding:18px 20px;margin-bottom:14px}
 .card-h{display:flex;align-items:center;gap:10px;margin:0 0 13px;flex-wrap:wrap}
 .card-h h2{font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;

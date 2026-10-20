@@ -229,6 +229,14 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
     （按 75%/90% 变色）、实时上下行与累计流量、CPU 迷你趋势、**48 段 24h 可用性色块**
   - **国家/地区分布图**与**最近活动流**（告警开启/恢复、节点上下线）可在展示配置中开关；
     只使用显式开启的国家字段，未设置国家的节点不会出现在地图上
+  - **模块顺序可拖拽调整**：六个区块（节点列表 / 服务探测 / 地区分布 / 可用率 / 事件 / 最近活动）
+    都能整体上下拖动，例如把最下方的「可用率」直接拖到最上方
+    - 交互：区块右上角悬浮手柄（管理员登录后淡显），拖动松手即生效；
+      触屏可拖、键盘可聚焦手柄后 `Alt+↑/↓` 移动一格
+    - 布局自适应：区块按新顺序重排，节点列表连同搜索/筛选栏一起移动；
+      窄屏（<720px）仍为单列堆叠，顺序不变
+    - 持久化：顺序写入服务端配置（`sections`），**刷新、换设备、重启进程都保持**；
+      匿名访客看不到手柄，只读浏览按管理员设定的顺序显示
 - **节点详情**（`#/n/<hid>`）
   - 资源环（CPU/内存/磁盘）、24h 可用率、负载/运行时间/进程/TCP/Swap/实时网速
   - 主机信息（按开关展示主机名、系统、内核、架构、CPU 型号、核心数、虚拟化）
@@ -698,7 +706,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | PUT/DELETE | `/api/admin/silences/{global\|ruleId}` | 设置（`{"minutes":60,"reason":"..."}`）/ 取消静默 |
 | GET | `/api/admin/notify/jobs` | 通知队列最近 100 条任务与累计统计 |
 | POST | `/api/admin/notify/jobs/{id}/retry` | 手动重试失败/被拦截任务（重置尝试次数） |
-| GET/PUT | `/api/admin/status-page` | 读取 / 保存公开页配置（标题、公告、展示天数、字段可见性、区块开关） |
+| GET/PUT | `/api/admin/status-page` | 读取 / 保存公开页配置（标题、公告、展示天数、字段可见性、区块开关、区块顺序 `sections`） |
 | GET/POST | `/api/admin/maintenance` | 列出 / 新建维护窗口（`{title,reason,nodeIds,startAt,endAt}`，省略时间为「现在起 60 分钟」） |
 | DELETE | `/api/admin/maintenance/{id}` | 删除维护窗口；窗口内该节点的告警自动抑制并在窗口结束后恢复评估 |
 | GET/POST | `/api/admin/incidents` | 列出 / 新建人工事件（`{title,body,level,nodeIds,startAt,endAt}`） |

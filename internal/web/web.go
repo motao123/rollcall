@@ -1188,14 +1188,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"site":    cfg.Title,
-		"nodes":   out,
-		"online":  counts[model.NodeStateOnline],
-		"stale":   counts[model.NodeStateStale],
-		"offline": counts[model.NodeStateOffline],
-		"noData":  counts[model.NodeStateNoData],
-		"total":   len(out),
-		"svcDown": svcDown,
+		"site": cfg.Title,
+		// 区块顺序由管理员配置，访客端按此渲染（缺失时前端回退默认顺序）
+		"sections": cfg.Sections,
+		"nodes":    out,
+		"online":   counts[model.NodeStateOnline],
+		"stale":    counts[model.NodeStateStale],
+		"offline":  counts[model.NodeStateOffline],
+		"noData":   counts[model.NodeStateNoData],
+		"total":    len(out),
+		"svcDown":  svcDown,
 	}
 	if cfg.Blocks.Services {
 		resp["services"] = svcOut
