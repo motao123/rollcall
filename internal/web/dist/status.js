@@ -497,12 +497,17 @@
   function fetchList() {
     if (listLoading) return;
     listLoading = true;
-    fetch('/api/status', { headers: { Accept: 'application/json' }, cache: 'no-store' })
+    // 没有超时的请求会让 listLoading 永远为 true，
+    // 之后所有轮询都被 if (listLoading) return 挡掉 —— 页面看起来"不再刷新"。
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, 12000);
+    fetch('/api/status', { headers: { Accept: 'application/json' }, cache: 'no-store', signal: ctl.signal })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
       .then(function (d) {
+        clearTimeout(timer);
         listLoading = false;
         DATA = d;
         setConnection('on', '实时连接');
@@ -517,6 +522,7 @@
         }
       })
       .catch(function (e) {
+        clearTimeout(timer);
         listLoading = false;
         markOffline();
         if (!DATA) {
@@ -1948,5 +1954,5 @@ function detailTitle(n) {
 
   loadTheme();
   fetchList();
-  pollTimer = setInterval(tick, 15000);
+  pollTimer = setInterval(tick, 10000);
 })();

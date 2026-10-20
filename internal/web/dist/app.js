@@ -106,10 +106,21 @@ function tone(v, warnAt, critAt) {
 /* ---------------- 请求 ---------------- */
 
 async function api(path) {
-  const r = await fetch(path, {
-    headers: { Accept: 'application/json' },
-    credentials: 'same-origin',
-  });
+  // 没有超时的 fetch 会永久挂起：轮询回调 await 住之后再也不返回，
+  // 表现为"页面卡在旧数据上，手动刷新才恢复"。
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 12000);
+  let r;
+  try {
+    r = await fetch(path, {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (r.status === 401) {
     authLost();
     const e = new Error('登录状态已失效');
@@ -294,6 +305,9 @@ function setAlertBadge(n) {
 async function viewOverview() {
   const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
   state.data.nodes = nodes;
+  // 静默轮询用它判断"数据是否真的变了"，避免每次轮询都整体重绘：
+  // 重绘会重建搜索框、打断输入，也会让 KPI 数字闪一下。
+  state.liveSig = JSON.stringify([ov, nodes]);
   setAlertBadge(ov.activeAlert || 0);
 
   const expiring = ov.expiring || [];
@@ -3380,11 +3394,13 @@ async function doLogout() {
 }
 
 async function render() {
+  if (state.rendering) return;
   if (state.authRequired) {
     showLoginGate();
     return;
   }
   // 任何一次成功渲染都意味着鉴权已通过：确保登录层退场。
+  state.rendering = true;
   closeLoginLayer();
   const hash = location.hash.replace(/^#\/?/, '') || 'overview';
   const [route, param] = hash.split('/');
@@ -3421,6 +3437,8 @@ async function render() {
       <div style="font-size:11.5px;color:var(--fg-3);margin-top:10px">请确认服务端已启动（默认 :19080）</div>
     </div>`;
     $('#liveText').textContent = '离线';
+  } finally {
+    state.rendering = false;
   }
 }
 
@@ -3595,15 +3613,54 @@ async function boot() {
   document.body.classList.remove('auth-checking');
   render();
 
-  // 每 20 秒静默刷新当前视图（节点详情页刷新频率更高以体现实时）
-  // 未登录时停止轮询，避免把无效会话放大成持续的 401。
+  // ---- 数据页静默轮询 ----
+  // 概览/节点列表每 5 秒比对一次数据：只有内容变化才重绘。
+  // Agent 默认 30 秒上报一次，30 秒轮询会让"刚上报的数据"最多等一分钟才出现，
+  // 看起来就像没在刷新。
+  const LIVE_ROUTES = ['overview', 'nodes'];
+  const busy = () => {
+    // 有弹窗、或正在输入时不打断用户
+    if (document.querySelector('dialog[open], .modal, .modal-backdrop')) return true;
+    const el = document.activeElement;
+    return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+  };
+  const tickLive = async () => {
+    if (document.hidden || state.authRequired || !state.authenticated) return;
+    if (LIVE_ROUTES.indexOf(state.route) < 0) return;
+    if (state.route === 'nodes' && state.param) return; // 详情页单独节奏
+    if (busy() || state.rendering) return;
+    try {
+      const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
+      const sig = JSON.stringify([ov, nodes]);
+      if (sig === state.liveSig) return; // 数据没变，不重绘
+      render();
+    } catch (e) {
+      // 轮询失败保持旧数据，等下一轮；真正的会话失效由 api() 内的 401 分支处理
+    }
+  };
+  setInterval(tickLive, 5000);
+
+  // 切回标签页/窗口获得焦点时立即刷新一次，不用等下一个 5 秒
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) tickLive();
+  });
+  window.addEventListener('focus', tickLive);
+
+  // 节点详情页：图表较重，15 秒一次整体重绘（原来 20 秒）。
+  // 注意它不能用上面的 tickLive —— 那条路径会跳过详情页。
+  setInterval(() => {
+    if (document.hidden || state.authRequired || !state.authenticated) return;
+    if (!(state.route === 'nodes' && state.param)) return;
+    if (busy() || state.rendering) return;
+    render();
+  }, 15000);
+
+  // 其它页面（设置、规则、令牌等含表单）保持 30 秒整体重绘，避免打断编辑
   setInterval(() => {
     if (document.hidden || state.authRequired) return;
-    if (state.route === 'nodes' && state.param) render();
-  }, 20000);
-  setInterval(() => {
-    if (document.hidden || state.authRequired) return;
-    if (!(state.route === 'nodes' && state.param)) render();
+    if (LIVE_ROUTES.indexOf(state.route) >= 0) return;
+    if (busy()) return;
+    render();
   }, 30000);
 }
 
