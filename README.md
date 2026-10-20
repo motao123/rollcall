@@ -1011,7 +1011,10 @@ sudo sh deploy/rollcall-server-upgrade.sh rollback --service rollcall-server \
 - 原子替换后重启 systemd 单元，最多等待 20 秒；只有 `/readyz` 返回 200 且
   版本号与目标二进制一致才算成功，否则自动恢复 `.prev` 并再次重启
 - 健康检查需要 `curl` 或 `wget`，都没有时报错退出；确实要跳过请显式传 `--health ""`
-- 使用 `/run/rollcall-upgrade.lock` 防止并发执行；仅支持 Linux
+- 使用 `/run/rollcall-upgrade.lock` 防止并发执行；锁里记录 pid 与进程启动时间，
+  **上一个进程被 `kill -9` / 断电后遗留的锁会被自动回收**（并打印被回收的 pid），
+  不会把后续升级永久锁死；锁目录刚创建、还没有 pid 文件时按「可能正在初始化」拒绝，
+  超过 10 分钟才视为遗留；仅支持 Linux systemd 部署
 - 脚本不会修改 unit 文件与数据目录；schema 升级后的数据回滚仍需按下方说明恢复备份
 
 ### 2. 被控端 Agent

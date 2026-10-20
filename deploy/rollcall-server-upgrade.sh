@@ -44,7 +44,9 @@ usage() {
 cleanup() {
   [ -n "$TMP" ] && rm -rf "$TMP"
   [ -n "$PREV" ] && rm -f "$PREV"
-  rmdir "$LOCK" 2>/dev/null || true
+  # 锁目录里现在有 pid 文件，rmdir 会失败（目录非空），必须整目录删。
+  # $LOCK 是本脚本创建的固定路径，不会误删别的东西。
+  rm -rf "$LOCK"
 }
 trap cleanup EXIT INT TERM
 
@@ -101,8 +103,51 @@ need_http_client() {
   die "健康检查需要 curl 或 wget；确实要跳过请用 --health \"\""
 }
 
+# proc_starttime 取进程启动时间（/proc/<pid>/stat 第 22 字段）。
+# 只判 kill -0 不够：升级进程被 kill -9 后 PID 可能被系统复用给别的进程，
+# 那样"锁还有人持有"会永远成立，升级再也做不了。
+# comm 里可能有空格与括号，先把 "pid (comm) " 整段剥掉，再取第 20 列
+# （原始第 3 列 state 变成第 1 列，故 22-2=20）。
+proc_starttime() {
+  sed 's/^[0-9]* (.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+}
+
+# lock_holder_alive 判断锁是否仍被活着的进程持有。
+lock_holder_alive() {
+  [ -f "$LOCK/pid" ] || return 1
+  pid=
+  started=
+  read -r pid started <"$LOCK/pid" 2>/dev/null || true
+  [ -n "$pid" ] || return 1
+  now_started=$(proc_starttime "$pid")
+  # 进程不存在，或 PID 已被复用成别的进程（启动时间对不上）→ 锁已失效
+  [ -n "$now_started" ] && [ "$now_started" = "$started" ]
+}
+
+# take_lock 用目录做互斥，并回收「上一个进程被强杀后遗留」的锁。
+# 只 mkdir 不回收的话，一次 kill -9 或断电就能把升级永久锁死，
+# 而报错文案只会说"另一个升级正在进行"，运维很难判断是假锁。
 take_lock() {
-  mkdir "$LOCK" 2>/dev/null || die "另一个升级/回滚正在进行（$LOCK）"
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s %s\n' "$$" "$(proc_starttime $$)" >"$LOCK/pid"
+    return 0
+  fi
+  if lock_holder_alive; then
+    die "另一个升级/回滚正在进行（$LOCK，pid=$(cut -d' ' -f1 "$LOCK/pid" 2>/dev/null)）"
+  fi
+  # 没有 pid 文件 = 上个进程刚创建锁就被杀；按陈旧时间兜底，
+  # 避免把"正在写 pid"的窗口误判成遗留锁。
+  if [ ! -f "$LOCK/pid" ]; then
+    if [ -z "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+      die "另一个升级/回滚正在进行（$LOCK 刚被创建，尚无 pid 文件）"
+    fi
+    log "⚠ 回收遗留锁（无 pid 文件且已超过 10 分钟）: $LOCK"
+  else
+    log "⚠ 回收遗留锁（原进程已退出）: $LOCK"
+  fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || die "无法获取升级锁（$LOCK）"
+  printf '%s %s\n' "$$" "$(proc_starttime $$)" >"$LOCK/pid"
 }
 
 hash_file() {
