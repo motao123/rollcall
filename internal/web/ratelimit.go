@@ -366,6 +366,15 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 // 全部失效（Go 1.20+ 的标准探测方式就是 Unwrap）。
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
+// Flush 透传：SSE 需要立即把事件推给客户端，而不是等缓冲区满。
+// 少了这个方法，handleStream 里的 `w.(http.Flusher)` 断言会失败，
+// 事件流直接返回 500 —— 中间件对 ResponseWriter 的包装很容易忘掉这几个接口。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // withAuthGuard 在路由外层执行失败限速与审计日志。
 // levelOf 由路由表反查，只有受保护级别的 2xx 才会清零失败计数。
 func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authLevel) http.Handler {

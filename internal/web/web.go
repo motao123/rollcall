@@ -82,6 +82,9 @@ type Server struct {
 	revokedMu sync.Mutex
 	revoked   map[string]int64
 
+	// events 是 SSE 推送的变更广播器（见 stream.go）。
+	events *eventHub
+
 	// startedAt 用于「实例健康」卡片显示运行时长。
 	startedAt time.Time
 	// reports 统计最近 60 秒的上报次数（滑窗），用于看采集是否正常。
@@ -131,6 +134,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		trustedProxies: trusted,
 		dataDir:        cfg.DataDir,
 		saveInterval:   cfg.SaveInterval,
+		events:         newEventHub(),
 		startedAt:      time.Now()}
 	srv.loadRevokedSessions()
 	// 载入已保存的通知配置并挂到告警引擎
@@ -258,6 +262,8 @@ func (s *Server) routes(static http.Handler) []route {
 		// 仪表盘只读数据包含主机名、内核、服务商、价格等资产信息，
 		// 不能像公开状态页那样匿名下发。
 		{"/api/overview", authReadonly, http.HandlerFunc(s.handleOverview)},
+		{"/api/live", authReadonly, http.HandlerFunc(s.handleLive)},
+		{"/api/stream", authAdmin, http.HandlerFunc(s.handleStream)},
 		{"/api/nodes", authReadonly, http.HandlerFunc(s.handleNodes)},
 		{"/api/nodes/", authReadonly, http.HandlerFunc(s.handleNodeDetail)},
 		{"/api/services", authReadonly, http.HandlerFunc(s.handleServices)},
@@ -533,6 +539,21 @@ type gzipResponseWriter struct {
 	gz          *gzip.Writer
 }
 
+// Unwrap 让 http.ResponseController 拿到下层 ResponseWriter，
+// 这样 SetWriteDeadline 之类的连接级操作能穿透中间件。
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
+// Flush 透传：即使某条路径被 gzip 包装，也应能把已写内容立即推出，
+// 而不是等缓冲区满。SSE 路径已在 gzipPath 里排除，这里是防御性的。
+func (g *gzipResponseWriter) Flush() {
+	if g.gz != nil {
+		_ = g.gz.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (g *gzipResponseWriter) WriteHeader(code int) {
 	if g.wroteHeader {
 		return
@@ -641,6 +662,9 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
 	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics))
+
+	// 唤醒 SSE 订阅者：面板不必再等下一次轮询，上报落地即可刷新。
+	s.publishChange()
 
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -1666,6 +1690,7 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		updated.TrafficResetDay = in.TrafficResetDay
 		// ID 与 Token 来自原节点，避免一次台账编辑静默换掉 Agent 凭据。
 		s.st.UpsertNode(&updated)
+		s.publishChange()
 		writeJSON(w, 200, adminNode(&updated))
 	case http.MethodDelete:
 		if _, ok := s.st.Node(id); !ok {
@@ -1673,6 +1698,8 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.st.DeleteNode(id)
+		// 删除也要唤醒面板：否则要等下一次上报周期（最长 30 秒）才消失。
+		s.publishChange()
 		writeJSON(w, 200, map[string]any{"deleted": id})
 	default:
 		fail(w, 405, "method not allowed")

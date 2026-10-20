@@ -2105,6 +2105,9 @@ function showRawToken(token, meta) {
 
 let healthTimer = null;
 
+// SSE 连接（见 tickLive 附近的 __ensureStream）
+let liveStream = null;
+
 // healthBody 渲染卡片主体。所有数值都可缺省：老服务端没有该接口时
 // 前端不应整页报错，只是不显示这块。
 function healthBody(h) {
@@ -3617,6 +3620,7 @@ function closeLoginLayer() {
 // showLoginGate 渲染全屏账号密码登录页。
 // 会话 Cookie 由服务端签发（HttpOnly），前端不保存任何凭证。
 function showLoginGate() {
+  if (window.__closeStream) window.__closeStream();
   state.authRequired = true;
   const layer = document.getElementById('loginLayer');
   if (!layer) return;
@@ -3809,6 +3813,8 @@ async function render() {
   // 任何一次成功渲染都意味着鉴权已通过：确保登录层退场。
   state.rendering = true;
   closeLoginLayer();
+  // 幂等：连接已存在时内部直接返回，不会重复建连。
+  if (window.__ensureStream) window.__ensureStream();
   const hash = location.hash.replace(/^#\/?/, '') || 'overview';
   const [route, param] = hash.split('/');
   state.route = route;
@@ -4098,8 +4104,51 @@ async function boot() {
     }
   };
 
-  setInterval(tickLive, 5000);
+  // SSE 负责"变更即推"，这里的兜底轮询只处理"时间流逝型"状态变化
+  // （在线 → 掉线，没有任何写操作，无法被事件触发），30 秒足够。
+  setInterval(tickLive, 30000);
   setInterval(tickDetail, 5000);
+
+  // ---- SSE：服务端主动通知"数据变了" ----
+  // 为什么不是 WebSocket：EventSource 是浏览器原生能力，自动重连、
+  // 带同源 Cookie、穿透反代，服务端用标准库就能实现（零依赖）。
+  // 收到 change 后复用 tickLive 的签名比对逻辑，数据没变不会重绘，
+  // 因此不会出现"每次上报都闪一下"。
+  window.__ensureStream = function () {
+    if (typeof EventSource === 'undefined') return;
+    if (liveStream && liveStream.readyState !== 2) return;
+    try {
+      liveStream = new EventSource('/api/stream');
+    } catch (e) {
+      liveStream = null;
+      return;
+    }
+    liveStream.addEventListener('change', function () { tickLive(); });
+    liveStream.addEventListener('hello', function () { state.streamAlive = true; });
+    liveStream.addEventListener('ping', function () { state.streamAlive = true; });
+    liveStream.onerror = function () {
+      // readyState=2 表示浏览器已放弃重连（例如 401/服务端不支持）。
+      // 这种情况下不要死循环重连，等下一次成功渲染再重建。
+      state.streamAlive = false;
+      if (liveStream && liveStream.readyState === 2) {
+        liveStream.close();
+        liveStream = null;
+      }
+    };
+  };
+  window.__closeStream = function () {
+    if (liveStream) {
+      liveStream.close();
+      liveStream = null;
+    }
+    state.streamAlive = false;
+  };
+  // 暴露给运维/调试：不开 DevTools 也能从控制台手动触发一次刷新。
+  window.__tickLive = tickLive;
+  // 启动时就尝试建连。不能只依赖 render()：render 是异步的，
+  // 若它先于本段定义执行（脚本尚未跑到这里），那一次调用会被跳过，
+  // 而之后没有数据变化就不会再 render —— SSE 整场都不会建立。
+  setTimeout(function () { if (window.__ensureStream) window.__ensureStream(); }, 0);
 
   // 切回标签页/窗口获得焦点时立即刷新一次，不用等下一个 5 秒
   const tickNow = () => { tickLive(); tickDetail(); };

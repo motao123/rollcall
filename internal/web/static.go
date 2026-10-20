@@ -75,6 +75,11 @@ func etagMatches(header, etag string) bool {
 // 刻意不压缩 /agent/install.sh：curl 默认不带 Accept-Encoding，
 // 但代理或客户端声明 gzip 时，未解压的脚本会被直接交给 sh。
 func gzipPath(p string) bool {
+	// 事件流必须排除：gzip 会攒够一块才输出，实时推送会被缓冲成"批量下发"；
+	// 而且压缩包装会遮住 http.Flusher，SSE 直接不可用。
+	if p == "/api/stream" {
+		return false
+	}
 	if strings.HasPrefix(p, "/api/") {
 		return true
 	}
