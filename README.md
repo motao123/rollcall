@@ -102,10 +102,13 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 - 告警自动恢复（指标回落即置为已恢复）
 - **服务类规则可按服务定向**：`serviceIds` 留空表示全部服务；证书临期、服务宕机、丢包、抖动
   都可只对指定探测目标生效
-- **流量配额告警**：节点可设置每周期配额（GB）与周期起始日（1–28），
-  跨月自动重置，使用率超过默认规则阈值（100%）即告警
+- **流量配额告警**：节点可设置每周期配额（GB）、周期起始日（1–28）与**计费口径**
+  （收发合计 / 只计下行 / 只计上行 / 取较大者），跨月自动重置，
+  使用率超过默认规则阈值（100%）即告警。口径随商家计费方式设置，切换后当前周期用量立即按新口径重算
 - 默认规则开箱即用：失联 3 分钟、CPU>90% 持续 5 分钟、内存>90%、磁盘>85%、
   服务探测失败、证书剩余不足 14 天、流量配额超限
+- **规则模板一键套用**：告警页「规则模板」内置上述 7 类预设（带阈值说明），
+  可单条创建或「一键补齐缺失」；模板用固定 ID，重复套用不会产生同名规则
 - **规则可在界面增删改**：阈值、持续时间、级别、启停全部可调
   （`offline` 规则自动隐藏阈值输入框）；服务端做完整校验
   （metric 白名单、阈值区间 1–100、duration 0–86400、severity 白名单）
@@ -780,7 +783,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | GET | `/api/admin/nodes` | 列出节点（含上报令牌） |
 | POST | `/api/admin/nodes` | 创建节点，服务端生成 id 与令牌 |
 | GET | `/api/admin/nodes/{id}` | 查看单个节点（含上报令牌，用于重新接入） |
-| PUT | `/api/admin/nodes/{id}` | 编辑台账字段（保留 ID 与上报令牌） |
+| PUT | `/api/admin/nodes/{id}` | 编辑台账字段（保留 ID 与上报令牌）。**整表替换**：未提交的字段会回到零值，脚本改单个字段也要带全台账（含 `trafficMode`） |
 | POST | `/api/admin/nodes/{id}/rotate-token` | 轮换上报令牌（旧令牌立即失效） |
 | DELETE | `/api/admin/nodes/{id}` | 删除节点 |
 | GET/POST | `/api/admin/services` | 列出 / 创建探测目标（`enabled` 默认 true） |
@@ -795,7 +798,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | POST | `/api/admin/test-notify` | 发送测试通知，可带 `{"channelId":"..."}` 只测单个 |
 | GET/POST | `/api/admin/rules` | 列出 / 创建告警规则 |
 | GET/PUT/DELETE | `/api/admin/rules/{id}` | 查看 / 修改 / 删除单条规则 |
-| GET | `/api/admin/rule-meta` | 规则表单元数据（指标/级别/时长选项，需令牌） |
+| GET | `/api/admin/rule-meta` | 规则表单元数据（指标/级别/时长选项 + 内置规则模板及其「已应用」状态，需令牌） |
 | GET | `/api/admin/silences` | 当前生效的通知静默 |
 | PUT/DELETE | `/api/admin/silences/{global\|ruleId}` | 设置（`{"minutes":60,"reason":"..."}`）/ 取消静默 |
 | GET | `/api/admin/notify/jobs` | 通知队列最近 100 条任务与累计统计 |

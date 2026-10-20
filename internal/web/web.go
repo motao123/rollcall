@@ -1558,6 +1558,10 @@ func validateNodeMeta(n *model.Node) string {
 	if n.TrafficResetDay < 0 || n.TrafficResetDay > 28 {
 		return "trafficResetDay 必须在 0–28 之间"
 	}
+	n.TrafficMode = strings.ToLower(strings.TrimSpace(n.TrafficMode))
+	if !model.ValidTrafficMode(n.TrafficMode) {
+		return "trafficMode 只能是 sum / rx / tx / max（留空按 sum）"
+	}
 	if n.Currency == "" {
 		n.Currency = "USD"
 	}
@@ -1688,6 +1692,7 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		updated.Favorite = in.Favorite
 		updated.TrafficQuotaGB = in.TrafficQuotaGB
 		updated.TrafficResetDay = in.TrafficResetDay
+		updated.TrafficMode = in.TrafficMode
 		// ID 与 Token 来自原节点，避免一次台账编辑静默换掉 Agent 凭据。
 		s.st.UpsertNode(&updated)
 		s.publishChange()
@@ -2078,7 +2083,18 @@ func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
 	for _, sv := range services {
 		svcOpts = append(svcOpts, serviceOption{ID: sv.ID, Name: sv.Name, NodeID: sv.NodeID})
 	}
+	// 模板的「已应用」状态按下发时刻的规则列表计算：
+	// 面板可能被多个浏览器同时操作，静态标记会过期。
+	applied := make(map[string]bool, 8)
+	for _, r := range s.st.Rules() {
+		applied[r.ID] = true
+	}
+	templates := alert.RuleTemplates()
+	for i := range templates {
+		templates[i].Applied = applied[templates[i].ID]
+	}
 	writeJSON(w, 200, map[string]any{
+		"templates": templates,
 		"metrics": []ruleMetric{
 			{Value: "offline", Label: "节点失联", Unit: "秒", Op: "gt", NoVal: true,
 				Hint: "超过指定时长未上报即触发；阈值固定为 1，无需填写"},

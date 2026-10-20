@@ -54,6 +54,19 @@ function rate(v) {
   return Math.round(v) + 'B';
 }
 
+// 流量口径文案。服务商计费方式不同：收发合计 / 只算下行 / 只算上行 / 取较大者。
+// 服务端返回的 mode 已归一化，这里只需映射成中文。
+const TRAFFIC_MODES = [
+  { v: 'sum', t: '收发合计（默认）' },
+  { v: 'rx', t: '只计下行' },
+  { v: 'tx', t: '只计上行' },
+  { v: 'max', t: '取收发较大者' },
+];
+function trafficModeLabel(mode) {
+  const m = TRAFFIC_MODES.find((x) => x.v === (mode || 'sum'));
+  return m ? m.t : '收发合计';
+}
+
 function dur(sec) {  sec = Number(sec) || 0;
   if (sec < 60) return sec + 's';
   const d = Math.floor(sec / 86400);
@@ -705,7 +718,11 @@ async function viewNodeDetail(id) {
   const loadVals = pts.map((p) => p.load1);
   const last = detail.latest || {};
   const traffic = detail.traffic || {};
-  const trafficUsed = (traffic.usedRx || 0) + (traffic.usedTx || 0);
+  // 服务端已按节点配置的计费口径合成了 used（收发合计 / 只计单边 / 取较大者），
+  // 这里不能再自己把收发相加——单边计费的节点会显示成双倍用量。
+  // 保留 rx+tx 兜底：升级瞬间浏览器可能还连着旧版服务端。
+  const trafficUsed = traffic.used != null ? traffic.used : (traffic.usedRx || 0) + (traffic.usedTx || 0);
+  const trafficMode = trafficModeLabel(traffic.mode);
   const quotaBytes = (traffic.quotaGb || 0) * 1024 * 1024 * 1024;
   const quotaPctVal = quotaBytes > 0 ? (trafficUsed / quotaBytes) * 100 : 0;
   const mounts = last.mounts || [];
@@ -814,7 +831,7 @@ async function viewNodeDetail(id) {
               <span class="field-hint">配额 ${traffic.quotaGb} GB · 每月 ${traffic.resetDay || 1} 日重置</span>
             </div>
             <div class="meter"><i style="width:${Math.min(100, quotaPctVal).toFixed(1)}%;background:${quotaPctVal >= 100 ? 'var(--crit)' : quotaPctVal >= 90 ? 'var(--warn)' : 'var(--ok)'}"></i></div>
-            <div class="field-hint" style="margin-top:6px">已用 ${quotaPctVal.toFixed(1)}%${traffic.cycleStart ? ' · 周期起点 ' + clock(traffic.cycleStart) : ''}</div>
+            <div class="field-hint" style="margin-top:6px">已用 ${quotaPctVal.toFixed(1)}% · 口径 ${esc(trafficMode)}${traffic.cycleStart ? ' · 周期起点 ' + clock(traffic.cycleStart) : ''}</div>
           ` : `
             <div class="field-hint">未设置月度配额。可在 <a href="#/settings">设置 → 节点管理 → 编辑</a> 中填写，超过阈值时由「流量配额使用率」规则告警。</div>
           `}
@@ -1071,7 +1088,7 @@ async function viewAlerts() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">告警规则</h2>
-        ${sectionActions(`${filteredRules.length} / ${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
+        ${sectionActions(`${filteredRules.length} / ${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm" id="ruleTplBtn">规则模板</button> <button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
       </div>
       <div class="table-wrap"><table class="alerts-table">
         <thead><tr><th>规则</th><th>条件</th><th class="num">持续</th><th>级别</th><th class="num">启用</th><th class="num">操作</th></tr></thead>
@@ -1183,6 +1200,14 @@ async function viewAlerts() {
     if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
     openRuleDialog(null, meta, nodes);
   };
+
+  const ruleTplBtn = $('#ruleTplBtn');
+  if (ruleTplBtn) {
+    ruleTplBtn.onclick = () => {
+      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      openRuleTemplateDialog(meta, rules);
+    };
+  }
 
   const globalSilenceBtn = $('#globalSilenceBtn');
   if (globalSilenceBtn) {
@@ -1450,6 +1475,102 @@ function openRuleDialog(rule, meta, nodes) {
   };
 }
 
+// ruleCondText 把一条规则/模板的条件写成一行可读文案，模板列表与规则表共用同一口径。
+function ruleCondText(r, metricMap) {
+  const m = metricMap ? metricMap[r.metric] : null;
+  const unit = m ? m.unit : '';
+  if (r.metric === 'offline') return `超过 ${r.duration > 0 ? durText(r.duration) : '即刻'} 未上报`;
+  const op = r.op === 'lt' ? '低于' : '高于';
+  return `${m ? m.label : r.metric} ${op} ${r.threshold}${unit}`;
+}
+
+// openRuleTemplateDialog 规则模板：内置一组常见故障的预设，一键建成正式规则。
+// 模板带固定 ID，因此"补齐缺失"是幂等的；已存在的会显示为「已启用」。
+function openRuleTemplateDialog(meta, rules) {
+  const tpls = (meta && meta.templates) || [];
+  const existing = new Set((rules || []).map((r) => r.id));
+  const metricMap = {};
+  (meta.metrics || []).forEach((m) => { metricMap[m.value] = m; });
+  const sevLabel = { critical: '严重', warn: '警告', info: '信息' };
+  const missing = tpls.filter((t) => !existing.has(t.id)).length;
+
+  const rows = tpls.map((t) => {
+    const on = existing.has(t.id);
+    return `<div style="display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-top:1px solid var(--line)">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="strong">${esc(t.name)}</span>
+          <span class="badge ${t.severity === 'critical' ? 'crit' : t.severity === 'warn' ? 'warn' : 'mute'}">${sevLabel[t.severity] || esc(t.severity)}</span>
+          <span class="mono" style="font-size:11.5px;color:var(--fg-3)">${esc(ruleCondText(t, metricMap))}${t.duration > 0 ? ' · 持续 ' + durText(t.duration) : ''}</span>
+        </div>
+        <div class="field-hint" style="margin-top:3px">${esc(t.desc || '')}</div>
+      </div>
+      ${on
+        ? '<span class="badge ok" style="flex-shrink:0">已启用</span>'
+        : `<button class="btn tiny primary" type="button" data-tpl-create="${esc(t.id)}" style="flex-shrink:0">创建</button>`}
+    </div>`;
+  }).join('');
+
+  const dlg = openDialog('规则模板', `
+    <p class="modal-sub">这些是最常见的故障场景，阈值与持续时长都按经验设好；创建后仍可照常编辑阈值、级别与定向范围。模板使用固定 ID，重复套用不会产生同名规则。</p>
+    <div style="max-height:52vh;overflow:auto">${rows || '<div class="empty">服务端未下发模板（可能是旧版本）</div>'}</div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn" type="button" data-close>关闭</button>
+      ${missing > 0 ? `<button class="btn primary" type="button" id="tplCreateAll">一键补齐缺失的 ${missing} 条</button>` : ''}
+    </div>`);
+
+  // createOne 建一条模板规则；返回 'ok' | 'exists' | 'fail'。
+  async function createOne(t) {
+    const payload = {
+      id: t.id, name: t.name, metric: t.metric, op: t.op,
+      duration: t.duration, severity: t.severity, enabled: true,
+    };
+    // offline / service_down 没有阈值，后端也会忽略；其余必须带上。
+    if (t.metric !== 'offline' && t.metric !== 'service_down') payload.threshold = t.threshold;
+    try {
+      await adminApi('/api/admin/rules', { method: 'POST', body: JSON.stringify(payload) });
+      return 'ok';
+    } catch (err) {
+      // 409 = 同 ID 已存在（例如另一个浏览器刚刚建过），按"已存在"处理即可。
+      return /已存在|409/.test(err.message || '') ? 'exists' : 'fail';
+    }
+  }
+
+  dlg.querySelectorAll('[data-tpl-create]').forEach((b) => {
+    b.onclick = async () => {
+      if (!state.authenticated) { toast('当前会话没有管理权限', 'err'); return; }
+      const t = tpls.find((x) => x.id === b.dataset.tplCreate);
+      if (!t) return;
+      b.disabled = true;
+      const r = await createOne(t);
+      if (r === 'fail') { b.disabled = false; toast('创建失败：' + t.name, 'err'); return; }
+      toast(r === 'exists' ? '该规则已存在' : '已创建：' + t.name);
+      dlg.close();
+      viewAlerts();
+    };
+  });
+
+  const all = dlg.querySelector('#tplCreateAll');
+  if (all) {
+    all.onclick = async () => {
+      if (!state.authenticated) { toast('当前会话没有管理权限', 'err'); return; }
+      all.disabled = true;
+      let ok = 0, skip = 0, fail = 0;
+      for (const t of tpls) {
+        if (existing.has(t.id)) { skip++; continue; }
+        const r = await createOne(t);
+        if (r === 'ok') ok++;
+        else if (r === 'exists') skip++;
+        else fail++;
+      }
+      dlg.close();
+      viewAlerts();
+      const head = ok ? `已创建 ${ok} 条规则` : '没有新建规则';
+      toast(fail ? `${head}，${fail} 条失败` : `${head}${skip ? `（${skip} 条已存在）` : ''}`, fail ? 'err' : '');
+    };
+  }
+}
+
 async function viewAssets() {
   const [d, renewals] = await Promise.all([
     api('/api/assets'),
@@ -1635,7 +1756,8 @@ async function viewCompare() {
 
   const nodeRows = rows.map((n) => {
     const quota = n.traffic ? n.traffic.quotaGb || 0 : 0;
-    const used = n.traffic ? (n.traffic.usedRx || 0) + (n.traffic.usedTx || 0) : 0;
+    // 与详情页一致：用量取服务端按口径合好的 used，旧版服务端才回退相加。
+    const used = n.traffic ? (n.traffic.used != null ? n.traffic.used : (n.traffic.usedRx || 0) + (n.traffic.usedTx || 0)) : 0;
     const qp = quota > 0 ? (used / (quota * 1024 * 1024 * 1024)) * 100 : 0;
     const st = nodeState({ state: n.state, online: n.state === 'online', alerts: 0 });
     const days = n.expireAt ? Math.ceil((new Date(n.expireAt + 'T00:00:00') - Date.now()) / 86400000) : null;
@@ -1718,6 +1840,9 @@ async function viewCompare() {
             country: n.country || '', expireAt: n.expireAt, price: n.price, currency: n.currency,
             note: n.note, weight: n.weight, favorite: next,
             trafficQuotaGb: n.trafficQuotaGb || 0, trafficResetDay: n.trafficResetDay || 0,
+            // PUT 是整表替换：这里漏掉 trafficMode 会把用户配置的计费口径
+            // 悄悄打回默认值，收藏一次就"用量翻倍/减半"。
+            trafficMode: n.trafficMode || '',
           }),
         });
         toast(next ? '已收藏' : '已取消收藏');
@@ -2322,6 +2447,7 @@ async function viewSettings() {
           ${selectField('币种', 'currency', 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
           ${field('月度流量配额（GB）', 'trafficQuotaGb', '', { type: 'number', placeholder: '0 = 不限制' })}
           ${field('流量重置日', 'trafficResetDay', '1', { type: 'number', hint: '每月 1–28 日' })}
+          ${selectField('流量计费口径', 'trafficMode', 'sum', TRAFFIC_MODES.map((x) => ({ v: x.v, t: x.t })))}
           ${field('备注', 'note', '', { placeholder: '可选' })}
           ${field('排序权重', 'weight', '', { type: 'number', placeholder: '0' })}
           ${checkbox('收藏（对比页优先展示）', 'favorite', false)}
@@ -2837,6 +2963,7 @@ async function viewSettings() {
         expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
         trafficQuotaGb: Number(d.trafficQuotaGb) || 0,
         trafficResetDay: Number(d.trafficResetDay) || 0,
+        trafficMode: d.trafficMode || 'sum',
         note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
       }) });
       toast('节点已创建');
@@ -3156,6 +3283,7 @@ function openDialog(title, bodyHTML) {
   return {
     close,
     querySelector: (s) => mask.querySelector(s),
+    querySelectorAll: (s) => mask.querySelectorAll(s),
   };
 }
 
@@ -3545,6 +3673,8 @@ function showNodeEdit(n, after) {
       ${selectField('币种', 'currency', n.currency || 'USD', [{ v: 'USD', t: 'USD ($)' }, { v: 'CNY', t: 'CNY (¥)' }])}
       ${field('月度流量配额（GB）', 'trafficQuotaGb', n.trafficQuotaGb || '', { type: 'number', placeholder: '0 = 不限制' })}
       ${field('流量重置日', 'trafficResetDay', n.trafficResetDay == null ? 1 : n.trafficResetDay, { type: 'number', hint: '每月 1–28 日' })}
+      ${selectField('流量计费口径', 'trafficMode', n.trafficMode || 'sum', TRAFFIC_MODES.map((x) => ({ v: x.v, t: x.t })))}
+      <div class="field-hint" style="grid-column:1/-1;margin-top:-6px">按商家计费方式选择：双边计费用「收发合计」，只算单向用对应单边口径。切换后本周期已用量会立即按新口径重算。</div>
       ${field('备注', 'note', n.note, { placeholder: '可选' })}
       ${field('排序权重', 'weight', n.weight, { type: 'number', placeholder: '0' })}
       ${checkbox('收藏（对比页优先展示）', 'favorite', !!n.favorite)}
@@ -3570,6 +3700,7 @@ function showNodeEdit(n, after) {
           expireAt: d.expireAt, price: Number(d.price) || 0, currency: d.currency,
           trafficQuotaGb: Number(d.trafficQuotaGb) || 0,
           trafficResetDay: Number(d.trafficResetDay) || 0,
+          trafficMode: d.trafficMode || 'sum',
           note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
         }),
       });

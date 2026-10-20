@@ -25,6 +25,10 @@ type Node struct {
 	// TrafficResetDay 是周期起始日（1–28，0 按 1 处理）。
 	TrafficQuotaGB  float64 `json:"trafficQuotaGb,omitempty"`
 	TrafficResetDay int     `json:"trafficResetDay,omitempty"`
+	// TrafficMode 决定周期用量如何由收发字节合成：sum（默认，收发合计）/
+	// rx（只计下行）/ tx（只计上行）/ max（取较大者）。
+	// 商家按单边计费时选对应口径，否则双边相加会高估用量、提前触发配额告警。
+	TrafficMode string `json:"trafficMode,omitempty"`
 	// AgentVersion 是 Agent 最近一次上报的版本，由上报请求头写入，
 	// 台账 API 不能修改；用于面板提示落后的 Agent。
 	AgentVersion string `json:"agentVersion,omitempty"`
@@ -99,6 +103,56 @@ type TrafficUsage struct {
 	QuotaGB    float64 `json:"quotaGb,omitempty"`
 	ResetDay   int     `json:"resetDay,omitempty"`
 	CycleStart int64   `json:"cycleStart,omitempty"`
+	// Mode 是生效的流量口径（已归一化，空值不会出现）；
+	// Used 是按该口径合成的计费用量，前端与告警都应使用它而不是自己相加。
+	Mode string `json:"mode"`
+	Used uint64 `json:"used"`
+}
+
+// 流量口径取值。不同商家计费方式不同：有的收发相加，有的只算单边，
+// 还有的取收发较大者，用错口径会让配额判断整体偏高或偏低。
+const (
+	TrafficModeSum = "sum" // 收发合计（默认，与历史行为一致）
+	TrafficModeRx  = "rx"  // 只计下行（接收）
+	TrafficModeTx  = "tx"  // 只计上行（发送）
+	TrafficModeMax = "max" // 取收发较大者
+)
+
+// ValidTrafficMode 判断口径是否可接受；空字符串表示「未设置」，按默认处理。
+func ValidTrafficMode(mode string) bool {
+	switch mode {
+	case "", TrafficModeSum, TrafficModeRx, TrafficModeTx, TrafficModeMax:
+		return true
+	}
+	return false
+}
+
+// NormalizeTrafficMode 把「未设置」收敛成默认口径。
+// 未知值不在这里猜测：校验层已经拦掉，此处只为空值兜底。
+func NormalizeTrafficMode(mode string) string {
+	if mode == "" {
+		return TrafficModeSum
+	}
+	return mode
+}
+
+// TrafficUsed 按口径把周期内的收发字节合成计费用量。
+// 计数器来自 /proc/net/dev 的累计值，现实中不可能接近 uint64 上限，
+// 因此合计口径直接相加。
+func TrafficUsed(mode string, rx, tx uint64) uint64 {
+	switch NormalizeTrafficMode(mode) {
+	case TrafficModeRx:
+		return rx
+	case TrafficModeTx:
+		return tx
+	case TrafficModeMax:
+		if rx > tx {
+			return rx
+		}
+		return tx
+	default:
+		return rx + tx
+	}
 }
 
 // Report 是 Agent → Server 的单向上报载荷。

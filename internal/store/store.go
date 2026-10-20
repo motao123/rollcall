@@ -1050,18 +1050,22 @@ func trafficCycleStart(ts time.Time, resetDay int) int64 {
 }
 
 // TrafficUsage 返回节点当前周期的流量用量。
+// Used 已按节点配置的计费口径合成，调用方不要再自行把 UsedRx+UsedTx 相加 ——
+// 单边计费或取大者口径下那样算会得出偏大的用量。
 func (s *Store) TrafficUsage(nodeID string) model.TrafficUsage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := model.TrafficUsage{}
+	out := model.TrafficUsage{Mode: model.TrafficModeSum}
 	if n := s.nodes[nodeID]; n != nil {
 		out.QuotaGB = n.TrafficQuotaGB
 		out.ResetDay = n.TrafficResetDay
+		out.Mode = model.NormalizeTrafficMode(n.TrafficMode)
 	}
 	if tc := s.traffic[nodeID]; tc != nil {
 		out.UsedRx, out.UsedTx = tc.UsedRx, tc.UsedTx
 		out.CycleStart = tc.Start
 	}
+	out.Used = model.TrafficUsed(out.Mode, out.UsedRx, out.UsedTx)
 	return out
 }
 

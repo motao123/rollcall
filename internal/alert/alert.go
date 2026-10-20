@@ -797,8 +797,10 @@ func (e *Engine) check(rule *model.AlertRule, n *model.Node, now int64) (float64
 		if n.TrafficQuotaGB <= 0 {
 			return 0, false
 		}
+		// 用量必须走 TrafficUsage().Used：节点可能配置了单边或取大者口径，
+		// 这里自己把收发相加会让单边计费的节点提前报「配额超限」。
 		used := e.st.TrafficUsage(nodeID)
-		gb := float64(used.UsedRx+used.UsedTx) / (1 << 30)
+		gb := float64(used.Used) / (1 << 30)
 		pct := gb / n.TrafficQuotaGB * 100
 		switch rule.Op {
 		case "lt":
