@@ -215,11 +215,18 @@ def measure(binary, nodes, port, workdir, settle=75):
 
         st, metrics, _ = http(base, token, "/metrics")
         save_total = save_dur = None
+        phases = {}
+        want = ("rollcall_save_copy_seconds", "rollcall_save_marshal_seconds",
+                "rollcall_save_encode_seconds", "rollcall_save_sync_seconds",
+                "rollcall_save_bytes")
         for line in metrics.decode("utf-8", "ignore").splitlines():
             if line.startswith("rollcall_save_total "):
                 save_total = float(line.split()[1])
             if line.startswith("rollcall_save_duration_seconds "):
                 save_dur = float(line.split()[1])
+            for k in want:
+                if line.startswith(k + " "):
+                    phases[k.replace("rollcall_save_", "")] = round(float(line.split()[1]), 4)
 
         ws, priv = proc_mem(proc.pid)
         p = lambda v, q: round(sorted(v)[min(len(v) - 1, int(len(v) * q))], 1) if v else None
@@ -234,6 +241,8 @@ def measure(binary, nodes, port, workdir, settle=75):
             "api_status_p50_ms": p(lat_status, 0.5), "api_status_p95_ms": p(lat_status, 0.95),
             "save_total": save_total,
             "save_duration_ms": round(save_dur * 1000, 1) if save_dur else None,
+            "save_phases_ms": {k: round(v * 1000, 1) if k != "bytes" else int(v)
+                               for k, v in phases.items()},
         }
     finally:
         proc.terminate()

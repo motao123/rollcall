@@ -1034,6 +1034,27 @@ rollcall/
 5. 想进一步压低常驻内存，可设 `GOMEMLIMIT=512MiB` 换取更积极的 GC，
    代价是快照期间 CPU 略升。
 
+**快照耗时花在哪**（40 台 / 开发机 / 单次 224 ms）
+
+| 阶段 | 耗时 | 占比 |
+|---|---|---|
+| 锁内深拷贝 | 0.5–5.5 ms | ~2% |
+| JSON 编码（约 30 MB） | 106 ms | 47% |
+| gzip 压缩（BestSpeed） | 114 ms | 51% |
+| 写盘 + rename | < 1 ms | <1% |
+
+两点结论：
+
+1. **快照几乎不影响请求延迟**：只有深拷贝阶段持有读锁（几毫秒），
+   JSON 编码与压缩都在锁外完成。
+2. **想显著降低快照成本只能减小序列化体积**（`series` 占 90% 以上），
+   那是存储格式变更，不是微优化能解决的。已实测并否决两条思路：
+   用 `json.Encoder` 直接对接 gzip **慢 35%**（小写入碎片的开销），
+   gzip 直写文件在 Windows 上**慢 55%**（大量小块系统调用）。两者均已回退。
+
+分段耗时已暴露为指标：`rollcall_save_copy_seconds`、`rollcall_save_marshal_seconds`、
+`rollcall_save_encode_seconds`、`rollcall_save_write_seconds`、`rollcall_save_bytes`。
+
 **复现方式**
 
 ```bash

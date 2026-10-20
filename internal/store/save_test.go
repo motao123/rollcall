@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -192,5 +193,42 @@ func TestSavePersistsAllSections(t *testing.T) {
 	pub, _ := json.Marshal(s2.Nodes())
 	if strings.Contains(string(pub), "tok-secret") {
 		t.Error("令牌泄露到公开节点视图")
+	}
+}
+
+// TestSaveRecordsPhaseTimings 是分段计时的接线回归。
+//
+// 加这套指标的目的，是在优化快照前先定位瓶颈；如果哪次重构把某个阶段
+// 的计时弄丢（例如改成流式编码后 Marshal 恒为 0），指标会静默失真，
+// 后续所有"优化"就都建立在假数据上。
+func TestSaveRecordsPhaseTimings(t *testing.T) {
+	s := New(t.TempDir())
+	// 塞够数据：快照太小时 gzip 会快到计时为 0，指标"接线正确"也无法验证。
+	// 2000 个历史点约 1MB JSON，压缩耗时足够可观。
+	for i := 0; i < 20; i++ {
+		s.UpsertNode(&model.Node{ID: "n" + strconv.Itoa(i), Name: "节点" + strconv.Itoa(i)})
+	}
+	for i := 0; i < 2000; i++ {
+		s.AddMetrics("n0", model.HostInfo{Hostname: "n0"},
+			model.Metrics{TS: int64(1700000000 + i*30), CPUPct: 12.5, MemUsed: 1 << 30, MemTotal: 8 << 30,
+				NetRx: uint64(i) * 1024, NetTx: uint64(i) * 512})
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	st := s.SaveStats()
+	if st.LastBytes <= 0 {
+		t.Fatalf("快照体积未记录: %+v", st)
+	}
+	sum := st.LastCopySeconds + st.LastMarshalSeconds + st.LastEncodeSeconds + st.LastWriteSeconds
+	if sum <= 0 {
+		t.Fatalf("分段耗时全为 0，指标未接线: %+v", st)
+	}
+	if st.LastMarshalSeconds <= 0 || st.LastEncodeSeconds <= 0 {
+		t.Fatalf("编码/压缩阶段耗时应大于 0: %+v", st)
+	}
+	// 分段之和不应超过总耗时（总耗时还包含锁等待与 defer 开销）
+	if sum > st.LastDurationSeconds+0.05 {
+		t.Fatalf("分段之和 %.4fs 超过总耗时 %.4fs", sum, st.LastDurationSeconds)
 	}
 }

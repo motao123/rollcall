@@ -173,6 +173,14 @@ type SaveStats struct {
 	Failures            int64   // 失败次数
 	LastDurationSeconds float64 // 最近一次成功落盘耗时
 	LastSuccess         int64   // 最近一次成功落盘的 unix 时间
+
+	// 分段耗时：优化快照时必须先知道时间花在哪一段。
+	// Copy=锁内深拷贝，Marshal=JSON 编码，Encode=gzip 压缩，Write=写盘+rename。
+	LastCopySeconds    float64
+	LastMarshalSeconds float64
+	LastEncodeSeconds  float64
+	LastWriteSeconds   float64
+	LastBytes          int64
 }
 
 // New 创建并尝试从磁盘恢复状态。
@@ -423,7 +431,8 @@ func (s *Store) load() error {
 // 快照一次、40 节点每 30 秒上报一次，撞车是必然而非偶然。
 func (s *Store) Save() (err error) {
 	start := time.Now()
-	defer func() { s.recordSave(time.Since(start), err) }()
+	var tm saveTiming
+	defer func() { s.recordSave(time.Since(start), tm, err) }()
 
 	// ★ saveMu 必须在抓快照之前获取。
 	// 若先抓快照、序列化完才拿 saveMu，两个并发 Save 可能
@@ -434,6 +443,7 @@ func (s *Store) Save() (err error) {
 	defer s.saveMu.Unlock()
 
 	s.mu.RLock()
+	copyStart := time.Now()
 	snap := snapshot{
 		SchemaVersion:  SnapshotSchemaVersion,
 		Nodes:          make(map[string]*model.Node, len(s.nodes)),
@@ -521,27 +531,47 @@ func (s *Store) Save() (err error) {
 		snap.SvcRes[k] = r.Slice()
 	}
 	s.mu.RUnlock()
+	tm.Copy = time.Since(copyStart)
 
-	b, err := json.Marshal(&snap)
+	marshalStart := time.Now()
+	raw, err := json.Marshal(&snap)
 	if err != nil {
 		return err
 	}
-	b, err = encodeSnapshot(b)
+	tm.Marshal = time.Since(marshalStart)
+
+	encodeStart := time.Now()
+	enc, err := encodeSnapshot(raw)
 	if err != nil {
 		return fmt.Errorf("压缩快照: %w", err)
 	}
+	tm.Encode = time.Since(encodeStart)
+
+	writeStart := time.Now()
 	// 写入已被函数开头的 saveMu 串行化：固定 temp 路径下，
 	// 两个并发 Save 会互相截断/覆盖。
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
+	if werr := os.WriteFile(tmp, enc, 0o600); werr != nil {
+		return werr
 	}
-	return os.Rename(tmp, s.path)
+	err = os.Rename(tmp, s.path)
+	tm.Write = time.Since(writeStart)
+	tm.Bytes = int64(len(enc))
+	return err
+}
+
+// saveTiming 记录一次快照各阶段的耗时，用于定位瓶颈。
+type saveTiming struct {
+	Copy    time.Duration // 锁内深拷贝
+	Marshal time.Duration // JSON 编码
+	Encode  time.Duration // gzip 压缩到内存
+	Write   time.Duration // 写临时文件 + rename
+	Bytes   int64
 }
 
 // recordSave 汇总落盘耗时，供 /metrics 与运维排查使用。
 // 失败时只累计次数，保留上一次成功的耗时作为参考。
-func (s *Store) recordSave(d time.Duration, err error) {
+func (s *Store) recordSave(d time.Duration, tm saveTiming, err error) {
 	s.saveStatMu.Lock()
 	defer s.saveStatMu.Unlock()
 	s.saveStats.Count++
@@ -550,6 +580,11 @@ func (s *Store) recordSave(d time.Duration, err error) {
 		return
 	}
 	s.saveStats.LastDurationSeconds = d.Seconds()
+	s.saveStats.LastCopySeconds = tm.Copy.Seconds()
+	s.saveStats.LastMarshalSeconds = tm.Marshal.Seconds()
+	s.saveStats.LastEncodeSeconds = tm.Encode.Seconds()
+	s.saveStats.LastWriteSeconds = tm.Write.Seconds()
+	s.saveStats.LastBytes = tm.Bytes
 	s.saveStats.LastSuccess = time.Now().Unix()
 }
 

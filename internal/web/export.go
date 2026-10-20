@@ -326,6 +326,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("rollcall_save_duration_seconds", nil, ss.LastDurationSeconds)
 	help("rollcall_save_last_success_timestamp_seconds", "Unix timestamp of the last successful state save (0 = never).", "gauge")
 	gauge("rollcall_save_last_success_timestamp_seconds", nil, float64(ss.LastSuccess))
+	// 分段耗时：定位快照瓶颈用（copy=锁内深拷贝 encode=流式 JSON+gzip sync=fsync）
+	help("rollcall_save_copy_seconds", "Duration of the deep copy phase of the last successful save.", "gauge")
+	gauge("rollcall_save_copy_seconds", nil, ss.LastCopySeconds)
+	help("rollcall_save_marshal_seconds", "Duration of the JSON encoding phase of the last successful save.", "gauge")
+	gauge("rollcall_save_marshal_seconds", nil, ss.LastMarshalSeconds)
+	help("rollcall_save_encode_seconds", "Duration of the gzip compression phase of the last successful save.", "gauge")
+	gauge("rollcall_save_encode_seconds", nil, ss.LastEncodeSeconds)
+	help("rollcall_save_write_seconds", "Duration of the write+rename phase of the last successful save.", "gauge")
+	gauge("rollcall_save_write_seconds", nil, ss.LastWriteSeconds)
+	help("rollcall_save_bytes", "Size of the last compressed state snapshot in bytes.", "gauge")
+	gauge("rollcall_save_bytes", nil, float64(ss.LastBytes))
 
 	// 通知队列
 	ns := s.st.NotifyStats()
