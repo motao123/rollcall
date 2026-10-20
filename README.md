@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.10.1**（`./rollcall-server -version` 可查）。
+当前版本 **v1.10.2**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -450,7 +450,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.1`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.2`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -825,7 +825,7 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 构建机
-make linux VERSION=v1.10.1
+make linux VERSION=v1.10.2
 scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
 ```
 
@@ -1151,19 +1151,19 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十二、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.10.1）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.10.2）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.10.1、active + enabled；13/13 节点在线 |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.10.2、active + enabled；13/13 节点在线 |
 | 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过；staticcheck 与 govulncheck 无发现；gosec 仅剩已逐项复核的演示随机数/插件路径类误报；Node 20 对 `app.js`/`status.js` 语法检查通过 |
 | 端到端脚本 | `rollcall-e2e.sh` 隔离实例 116/116 通过：P0–P3 全部新功能、通知模板、摘要/免打扰、证书/服务/流量告警、DNS/抖动/丢包、TOTP、范围化令牌、加密备份、报告、升级/回滚 |
 | 面板账号 | 设置页可直接修改用户名/邮箱与密码，均需当前密码确认；改后当前浏览器续签、其他设备旧会话立即失效；旧用户名/旧密码登录 401，新凭据可登录；`admin-user.json` 仍仅存 PBKDF2 哈希 |
-| 服务端升级脚本 | 生产机用 `deploy/rollcall-server-upgrade.sh`：v1.10.0-10-g1bb7026 → v1.10.1，强制 sha256 校验、`.prev` 保留、健康检查失败自动回滚；升级后 `/healthz` ok、登录 200/未登录 401 |
-| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.10.0 → v1.10.1，配置未改动，`.prev` 保留 v1.10.0；分发目录同步更新 amd64/arm64 二进制 |
-| Agent 版本上报 | 本机 Agent 上报 v1.10.1 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion`（远端节点多为旧版 Agent，未发送版本头） |
+| 服务端升级脚本 | 生产机用 `deploy/rollcall-server-upgrade.sh`：v1.10.1 → v1.10.2，强制 sha256 校验、`.prev` 保留、健康检查失败自动回滚；升级后 `/healthz` ok、登录 200/未登录 401 |
+| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.10.1 → v1.10.2，配置未改动，`.prev` 保留 v1.10.1；分发目录同步更新 amd64/arm64 二进制 |
+| Agent 版本上报 | 本机 Agent 上报 v1.10.2 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion`（远端节点多为旧版 Agent，未发送版本头） |
 | 审计修复 | 未认证上报不再计入健康速率（生产连发 3 次无效上报，`last60s` 保持 26 不变）；健康卡片区分 noData；流量配额支持 `lt` 且阈值边界与运算符一致；到期提醒/日报/周报/月报仅在真正入队后写去重标记；到期天数跨夏令时按日历日计算；计数器忽略远期时钟回拨桶 |
-| 轮询刷新 | 隔离实例实测：概览空闲 12 秒 0 次重绘；外部修改节点后 4.6 秒内以 1 次重绘更新节点列表且行数不变；渲染进行中点击导航不会停在旧视图（补跑后进入目标页） |
+| 轮询刷新 | 隔离实例实测：顶栏同步时间每约 5 秒推进；聚焦搜索框 22 秒内 CPU 连续 30%→35%→40%→45%，轮询不再被输入焦点冻结；节点详情每约 5 秒比对，上报后 1 个周期内更新图表且不重复请求；勾选节点 28 秒内选择保留、数据照常拉取，取消勾选后 5 秒内补上最新值（20%→40%）；390px 视口隐藏同步时间且无横向溢出；全程无控制台错误 |
 | 新告警闭环 | 服务宕机、TLS 证书剩余天数、月度流量配额三条默认规则在生产创建成功（201）；告警触发 Webhook 与恢复通知、到期提醒均进入 Outbox |
 | 网络质量 | DNS/HTTPS/TCP 探测返回延迟、抖动与丢包；公开页展示「可用率 · 抖动 · 丢包」，探测全失败时标记「探测失败」 |
 | 通知降噪 | 免打扰窗口、摘要聚合、自定义标题/正文模板对 Webhook 同样生效；每日/每周/每月报告可配置并经通知通道送达 |

@@ -20,6 +20,9 @@ const state = {
   user: null,
   rendering: false,
   renderPending: false,
+  livePending: false,
+  detailSig: '',
+  detailCache: null,
   timers: [],
 };
 
@@ -91,6 +94,32 @@ function clock(ts) {
   const d = new Date(ts * 1000);
   const p = (n) => String(n).padStart(2, '0');
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// 顶栏同步时间：每次成功拉取（含静默轮询）都刷新，
+// 让"页面是否还在自动更新"可见，而不是只能靠观察数字变化。
+function markSynced() {
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const hms = `${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+  const text = $('#liveText');
+  const badge = $('#liveBadge');
+  const time = $('#liveTime');
+  if (text) text.textContent = '实时';
+  if (badge) {
+    badge.classList.remove('live-off');
+    badge.title = '上次同步 ' + hms;
+  }
+  if (time) time.textContent = ' · ' + hms;
+}
+
+function markOffline() {
+  const text = $('#liveText');
+  const badge = $('#liveBadge');
+  const time = $('#liveTime');
+  if (text) text.textContent = '离线';
+  if (badge) badge.classList.add('live-off');
+  if (time) time.textContent = '';
 }
 
 // 本地日期（YYYY-MM-DD）。toISOString 是 UTC，东八区凌晨会落到前一天。
@@ -310,6 +339,7 @@ async function viewOverview() {
   // 静默轮询用它判断"数据是否真的变了"，避免每次轮询都整体重绘：
   // 重绘会重建搜索框、打断输入，也会让 KPI 数字闪一下。
   state.liveSig = JSON.stringify([ov, nodes]);
+  state.livePending = false;
   setAlertBadge(ov.activeAlert || 0);
 
   const expiring = ov.expiring || [];
@@ -564,10 +594,24 @@ function bindBatchOps(list) {
 }
 
 async function viewNodeDetail(id) {
-  const [detail, series] = await Promise.all([
-    api('/api/nodes/' + id),
-    api(`/api/nodes/${id}/series?range=${state.range}`),
-  ]);
+  const key = id + '|' + state.range;
+  let detail, series;
+  // 轮询已经拉到的新数据直接复用，避免"比对一次、渲染再拉一次"。
+  // 超过 5 秒的缓存不再使用：可能期间用户切换过节点/区间，重新拉更稳。
+  const cached = state.detailCache;
+  if (cached && cached.key === key && Date.now() - cached.at < 5000) {
+    detail = cached.detail;
+    series = cached.series;
+    state.detailCache = null;
+  } else {
+    const pair = await Promise.all([
+      api('/api/nodes/' + id),
+      api(`/api/nodes/${id}/series?range=${state.range}`),
+    ]);
+    detail = pair[0];
+    series = pair[1];
+  }
+  state.detailSig = JSON.stringify([detail, series]);
   const n = detail.node, host = detail.host || {};
   const pts = series.points || [];
   const resolution = series.resolution || 'raw';
@@ -718,7 +762,11 @@ async function viewNodeDetail(id) {
 
   $('#backToNodes').onclick = () => { location.hash = '#/nodes'; };
   $$('.range-tabs button', $('#view')).forEach((b) => {
-    b.onclick = () => { state.range = b.dataset.range; viewNodeDetail(id); };
+    b.onclick = () => {
+      state.range = b.dataset.range;
+      state.detailCache = null;
+      viewNodeDetail(id);
+    };
   });
 }
 
@@ -3374,7 +3422,7 @@ function showLoginGate() {
     }
   };
 
-  $('#liveText').textContent = '实时';
+  markOffline();
 }
 
 async function doLogout() {
@@ -3432,7 +3480,7 @@ async function render() {
     } else {
       location.hash = '#/overview';
     }
-    $('#liveText').textContent = '实时';
+    markSynced();
   } catch (e) {
     if (e && e.status === 401) {
       showLoginGate();
@@ -3443,7 +3491,7 @@ async function render() {
       <div style="font-size:12px;color:var(--fg-3)">${esc(e.message)}</div>
       <div style="font-size:11.5px;color:var(--fg-3);margin-top:10px">请确认服务端已启动（默认 :19080）</div>
     </div>`;
-    $('#liveText').textContent = '离线';
+    markOffline();
   } finally {
     state.rendering = false;
     if (state.renderPending) {
@@ -3626,55 +3674,87 @@ async function boot() {
 
   // ---- 数据页静默轮询 ----
   // 概览/节点列表每 5 秒比对一次数据：只有内容变化才重绘。
-  // Agent 默认 30 秒上报一次，30 秒轮询会让"刚上报的数据"最多等一分钟才出现，
-  // 看起来就像没在刷新。
+  // Agent 默认 30 秒上报一次；5 秒一轮能把"刚上报的数据"尽快显示出来。
+  // 每次成功拉取都会刷新顶栏的同步时间——即使指标没变，用户也能看到页面在更新。
   const LIVE_ROUTES = ['overview', 'nodes'];
-  const busy = () => {
-    // 有弹窗、或正在输入时不打断用户
-    if (document.querySelector('dialog[open], .modal, .modal-backdrop')) return true;
+  const modalOpen = () => !!document.querySelector('dialog[open], .modal-mask');
+  // 表单页重绘会重建输入区，正在编辑时先不打断。
+  const formBusy = () => {
+    if (modalOpen()) return true;
     const el = document.activeElement;
     return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
   };
+  // 节点列表的勾选状态存在 DOM 里，重绘会清空批量操作的选择。
+  const listBusy = () => modalOpen() || !!document.querySelector('#view .row-sel:checked');
   const tickLive = async () => {
     if (document.hidden || state.authRequired || !state.authenticated) return;
     if (LIVE_ROUTES.indexOf(state.route) < 0) return;
     if (state.route === 'nodes' && state.param) return; // 详情页单独节奏
-    if (busy() || state.rendering) return;
+    if (state.rendering) return;
     try {
       const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
+      markSynced();
       const sig = JSON.stringify([ov, nodes]);
-      if (sig === state.liveSig) return; // 数据没变，不重绘
-      state.liveSig = sig;
-      // 节点列表视图直接复用这次拉到的数据；否则 viewNodes 会读到旧缓存，
-      // 每 5 秒用同一份旧数据重绘（并丢掉本次刷新）。
-      state.data.nodes = nodes;
+      if (sig !== state.liveSig) {
+        state.liveSig = sig;
+        // 节点列表视图直接复用这次拉到的数据；否则 viewNodes 会读到旧缓存，
+        // 每 5 秒用同一份旧数据重绘（并丢掉本次刷新）。
+        state.data.nodes = nodes;
+        state.livePending = true;
+      }
+      if (!state.livePending) return; // 数据没变，不重绘
+      // 用户正在勾选或弹窗编辑时先只更新数据，等下一轮再重绘。
+      if (listBusy()) return;
+      state.livePending = false;
       render();
     } catch (e) {
       // 轮询失败保持旧数据，等下一轮；真正的会话失效由 api() 内的 401 分支处理
     }
   };
-  setInterval(tickLive, 5000);
 
-  // 切回标签页/窗口获得焦点时立即刷新一次，不用等下一个 5 秒
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) tickLive();
-  });
-  window.addEventListener('focus', tickLive);
-
-  // 节点详情页：图表较重，15 秒一次整体重绘（原来 20 秒）。
+  // 节点详情页每 5 秒比对一次数据，图表只在内容变化时才重绘。
   // 注意它不能用上面的 tickLive —— 那条路径会跳过详情页。
-  setInterval(() => {
+  let detailFetching = false;
+  const tickDetail = async () => {
     if (document.hidden || state.authRequired || !state.authenticated) return;
     if (!(state.route === 'nodes' && state.param)) return;
-    if (busy() || state.rendering) return;
-    render();
-  }, 15000);
+    if (state.rendering || detailFetching || modalOpen()) return;
+    const id = state.param;
+    const range = state.range;
+    detailFetching = true;
+    try {
+      const pair = await Promise.all([
+        api('/api/nodes/' + id),
+        api(`/api/nodes/${id}/series?range=${range}`),
+      ]);
+      markSynced();
+      const sig = JSON.stringify(pair);
+      if (sig === state.detailSig) return;
+      // 交给 viewNodeDetail 复用，避免重绘时再请求一次。
+      state.detailCache = { key: id + '|' + range, detail: pair[0], series: pair[1], at: Date.now() };
+      render();
+    } catch (e) {
+      // 与列表轮询一致：失败保留旧图，下一轮再试
+    } finally {
+      detailFetching = false;
+    }
+  };
+
+  setInterval(tickLive, 5000);
+  setInterval(tickDetail, 5000);
+
+  // 切回标签页/窗口获得焦点时立即刷新一次，不用等下一个 5 秒
+  const tickNow = () => { tickLive(); tickDetail(); };
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) tickNow();
+  });
+  window.addEventListener('focus', tickNow);
 
   // 其它页面（设置、规则、令牌等含表单）保持 30 秒整体重绘，避免打断编辑
   setInterval(() => {
     if (document.hidden || state.authRequired) return;
     if (LIVE_ROUTES.indexOf(state.route) >= 0) return;
-    if (busy()) return;
+    if (formBusy()) return;
     render();
   }, 30000);
 }
