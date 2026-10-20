@@ -937,6 +937,16 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   align-items: start;
 }
 
+/* 实例健康卡片：内容偏宽，窄屏时整块堆叠，而不是把两组数字硬挤成两列 */
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 18px;
+  align-items: start;
+}
+/* 「9 / 预期 6」这类组合在窄屏会被拆到两行，禁止折行 */
+.health-stat { white-space: nowrap; }
+
 /* 多选框网格：状态页字段开关、维护窗口/事件的影响范围选择。   .check 自带 padding-top:18px 是为 form-grid 对齐设计的，
    密集网格里会显得上下间距失衡，这里覆写。 */
 .check-grid {

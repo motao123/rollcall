@@ -190,6 +190,13 @@ func (l *authFailureLimiter) succeed(ip string) {
 	l.mu.Unlock()
 }
 
+// size 返回当前状态表条目数，供「实例健康」观察限速器占用。
+func (l *authFailureLimiter) size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.state)
+}
+
 // resetIP 清除该来源在**所有作用域**下的失败计数与封禁。
 //
 // ★ 登录成功后必须调用，不能只 succeed(authLogin)：

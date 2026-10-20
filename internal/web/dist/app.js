@@ -1789,6 +1789,97 @@ function showRawToken(token, meta) {
   };
 }
 
+/* ---------------- 实例健康 ---------------- */
+
+let healthTimer = null;
+
+// healthBody 渲染卡片主体。所有数值都可缺省：老服务端没有该接口时
+// 前端不应整页报错，只是不显示这块。
+function healthBody(h) {
+  if (!h || !h.nodes) return `<div class="empty">实例状态暂时不可用</div>`;
+  const s = h.save || {}, mem = h.memory || {}, rep = h.reports || {};
+  const nodes = h.nodes || {}, nt = h.notify || {};
+
+  const up = Number(h.uptimeSeconds) || 0;
+  const upText = up >= 86400
+    ? `${Math.floor(up / 86400)} 天 ${Math.floor((up % 86400) / 3600)} 小时`
+    : up >= 3600 ? `${Math.floor(up / 3600)} 小时 ${Math.floor((up % 3600) / 60)} 分`
+      : up >= 60 ? `${Math.floor(up / 60)} 分` : `${Math.round(up)} 秒`;
+
+  const expected = Number(rep.expected) || 0;
+  const got = Number(rep.last60s) || 0;
+  // 低于预期的 60% 才算"掉队"：上报本来就有抖动，卡太严会长期显示黄色。
+  const reportOk = expected === 0 || got >= expected * 0.6;
+
+  const total = Math.max(1, (s.copyMs || 0) + (s.marshalMs || 0) + (s.encodeMs || 0) + (s.writeMs || 0));
+  // 亚毫秒的段显示 <0.1 而不是 0.0：后者会被误读成"没花时间"
+  const msText = (v) => {
+    const n = Number(v) || 0;
+    if (n <= 0) return '0 ms';
+    return n < 0.05 ? '<0.1 ms' : n.toFixed(1) + ' ms';
+  };
+  const seg = (label, ms, color) => `
+    <div style="display:flex;align-items:center;gap:8px;margin:5px 0">
+      <span style="width:56px;color:var(--fg-3);font-size:11.5px">${label}</span>
+      <span style="flex:1;height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden">
+        <span style="display:block;height:100%;width:${Math.max(1, (Number(ms) || 0) / total * 100).toFixed(1)}%;background:${color}"></span>
+      </span>
+      <span class="mono" style="width:62px;text-align:right;font-size:11.5px">${msText(ms)}</span>
+    </div>`;
+
+  return `
+    <div class="health-grid">
+      <div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <span class="badge mute">${esc(h.version || 'dev')}</span>
+          <span class="badge mute">运行 ${upText}</span>
+          <span class="badge ${nodes.online === nodes.total ? 'ok' : 'warn'}">在线 ${nodes.online}/${nodes.total}</span>
+          <span class="badge mute">限速条目 ${Number(h.limiterEntries) || 0}</span>
+        </div>
+        <div class="field-hint" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px">
+          <span class="health-stat">内存（堆）：<b class="mono">${bytes(mem.heapAllocBytes)}</b></span>
+          <span class="health-stat">协程：<b class="mono">${Number(h.goroutines) || 0}</b></span>
+          <span class="health-stat">上报（60s）：<b class="mono">${got}</b> / 预期 <b class="mono">${expected}</b></span>
+          <span class="health-stat">速率：<b class="mono">${(Number(rep.perSecond) || 0).toFixed(2)}</b> 次/秒</span>
+          <span class="health-stat">通知队列：<b class="mono">${Number(nt.pending) || 0}</b> 待投递</span>
+          <span class="health-stat">已送达：<b class="mono">${Number(nt.sent) || 0}</b></span>
+        </div>
+        <div style="margin-top:10px">
+          <span class="badge ${reportOk ? 'ok' : 'warn'}">${reportOk ? '采集正常' : '采集可能掉队'}</span>
+          <span class="badge ${(Number(s.failures) || 0) === 0 ? 'ok' : 'crit'}">快照失败 ${Number(s.failures) || 0}</span>
+        </div>
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <span class="sub-title">最近一次快照</span>
+          <span class="mono" style="font-size:11.5px;color:var(--fg-3)">
+            ${(Number(s.lastDurationMs) || 0).toFixed(0)} ms · ${bytes(s.bytes)}
+          </span>
+        </div>
+        ${seg('深拷贝', s.copyMs, 'var(--accent)')}
+        ${seg('JSON', s.marshalMs, 'var(--accent-2)')}
+        ${seg('gzip', s.encodeMs, 'var(--ok)')}
+        ${seg('写盘', s.writeMs, 'var(--fg-3)')}
+        <div class="field-hint" style="margin-top:8px">
+          每 60 秒一次；编码与压缩在锁外进行，只有深拷贝会短暂持有读锁。
+          上次成功：${Number(s.lastSuccessAgoSeconds) || 0} 秒前。
+        </div>
+      </div>
+    </div>`;
+}
+
+async function refreshHealthCard() {
+  const el = document.getElementById('healthBody');
+  // 切走页面后定时器还在跑，这里必须自检，否则会往不存在的节点写。
+  if (!el || state.route !== 'settings') return;
+  try {
+    const h = await adminApi('/api/admin/health');
+    el.innerHTML = healthBody(h);
+  } catch (e) {
+    // 轮询失败不覆盖页面：卡片保留上一次的数据，避免闪成错误态。
+  }
+}
+
 async function viewSettings() {
   if (!state.authenticated) {
     // 与首屏登录共用同一个全屏登录层：验证通过后 render() 会回到当前路由
@@ -1802,15 +1893,18 @@ async function viewSettings() {
   let themeCfg = null;
   let queue = { stats: {}, jobs: [] };
   let tokens = [];
+  let health = null;
   let loadErr = '';
   try {
-    const [n, svc, q, th, tk] = await Promise.all([
+    const [n, svc, q, th, tk, hl] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
       adminApi('/api/admin/notify/jobs'),
       adminApi('/api/admin/theme'),
       adminApi('/api/admin/tokens').catch(() => []),
+      adminApi('/api/admin/health').catch(() => null),
     ]);
+    health = hl;
     nodes = n; services = svc; queue = q || queue; tokens = Array.isArray(tk) ? tk : [];
     themeCfg = th || {};
     const st = await adminApi('/api/admin/settings');
@@ -1865,6 +1959,14 @@ async function viewSettings() {
   </tr>`).join('') || `<tr><td colspan="6"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
 
   $('#view').innerHTML = `
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">实例健康</h2>
+        <span class="section-meta">运行状态与快照成本 · 每 5 秒刷新</span>
+      </div>
+      <div class="panel panel-pad" id="healthBody">${healthBody(health)}</div>
+    </section>
+
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">管理员账号</h2>
@@ -2188,6 +2290,10 @@ async function viewSettings() {
         </p>
       </div>
     </section>`;
+
+  // 实例健康轮询：每次进入设置页重置定时器，避免离开后堆积多个 interval。
+  if (healthTimer) clearInterval(healthTimer);
+  healthTimer = setInterval(refreshHealthCard, 5000);
 
   // 事件绑定
   $('#logoutBtn').onclick = doLogout;

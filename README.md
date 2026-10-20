@@ -688,6 +688,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | GET/POST | `/api/admin/services` | 列出 / 创建探测目标（`enabled` 默认 true） |
 | DELETE | `/api/admin/services/{id}` | 删除探测目标 |
 | GET/POST | `/api/admin/settings` | 读取（脱敏）/ 保存通知配置 |
+| GET | `/api/admin/health` | 实例自身状态：内存/协程/上报速率/快照分段耗时/通知队列 |
 | GET/PUT | `/api/admin/theme` | 读取 / 保存外观主题（固定字段，未知字段拒绝） |
 | POST | `/api/admin/test-notify` | 发送测试通知，可带 `{"channelId":"..."}` 只测单个 |
 | GET/POST | `/api/admin/rules` | 列出 / 创建告警规则 |

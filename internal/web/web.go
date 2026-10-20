@@ -77,6 +77,11 @@ type Server struct {
 	revokedMu sync.Mutex
 	revoked   map[string]int64
 
+	// startedAt 用于「实例健康」卡片显示运行时长。
+	startedAt time.Time
+	// reports 统计最近 60 秒的上报次数（滑窗），用于看采集是否正常。
+	reports reportCounter
+
 	// notifySaveMu 串行化「写设置 + 应用配置」这一对操作。
 	// 两者是分开的两步：两个并发保存可能交错成「持久化的是 A、内存生效的是 B」，
 	// 重启后行为突然改变。
@@ -115,7 +120,8 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		panelLink: cfg.PanelLink, cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
-		trustedProxies: trusted}
+		trustedProxies: trusted,
+		startedAt:      time.Now()}
 	srv.loadRevokedSessions()
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
@@ -254,6 +260,7 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
 		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
+		{"/api/admin/health", authAdmin, http.HandlerFunc(s.handleAdminHealth)},
 		{"/api/admin/renewals", authAdmin, http.HandlerFunc(s.handleAdminRenewals)},
 		{"/api/admin/renewals/", authAdmin, http.HandlerFunc(s.handleAdminRenewalByID)},
 		// 管理员账号资料与密码：除会话/令牌外还要求当前密码，
@@ -599,6 +606,8 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad json")
 		return
 	}
+
+	s.reports.hit(time.Now().Unix())
 
 	token := r.Header.Get("X-Node-Token")
 	node, ok := s.st.NodeByToken(token, rep.NodeID)
