@@ -137,8 +137,10 @@ func (s *Store) loadSeriesShards() error {
 			skipped++
 			continue
 		}
-		// 孤儿分片（节点已删除、或备份导入后不存在）直接忽略；
-		// 真正删除文件交给 pruneSeriesShards，避免加载路径产生副作用。
+		// ★ 以节点为准：没有节点记录的分片视为孤儿，不加载。
+		// 与 pruneSeriesShards 的判据保持一致 —— 两者一旦不一致（这里加载、
+		// 那里删除），就会出现"启动时有历史、一分钟后又消失"的诡异现象。
+		// 真实上报路径一定先解析出节点，所以这条检查不会误伤正常数据。
 		if _, ok := s.nodes[sh.NodeID]; !ok {
 			skipped++
 			continue

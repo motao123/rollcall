@@ -235,3 +235,41 @@ func TestShardFileNameSanitizes(t *testing.T) {
 		}
 	}
 }
+
+// TestHistoryReplayFromShardsNoDoubleCount 是回归：
+//
+// 重启后应当从分片读回原始点，并接着 history.json 的聚合继续累计，
+// 既不重复计流量也不漏一次增量。曾因"分片加载要求节点存在"而丢点：
+// 测试/恢复场景里节点记录可能缺失，导致重启后第一次上报被当成无前值。
+func TestHistoryReplayFromShardsNoDoubleCount(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	s.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
+	for i := 0; i < 20; i++ {
+		addHistSample(s, "n1", i)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s.SaveHistory(); err != nil {
+		t.Fatalf("SaveHistory: %v", err)
+	}
+
+	re := New(dir)
+	if err := re.LoadErr(); err != nil {
+		t.Fatalf("重载: %v", err)
+	}
+	if got := len(re.Series("n1", 0)); got != 20 {
+		t.Fatalf("重启后应从分片读回 20 个点，实际 %d", got)
+	}
+	for i := 20; i < 30; i++ {
+		addHistSample(re, "n1", i)
+	}
+	h := re.HistorySeries("n1", HistoryResolution1h, histBase)
+	if len(h) != 1 || h[0].Count != 30 {
+		t.Fatalf("聚合异常: %+v", h)
+	}
+	if h[0].NetRxDelta != 2900 || h[0].NetTxDelta != 1450 {
+		t.Fatalf("重启后流量累计错误: rx=%d tx=%d", h[0].NetRxDelta, h[0].NetTxDelta)
+	}
+}

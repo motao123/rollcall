@@ -208,6 +208,9 @@ func TestHistoryPersistsAndReplays(t *testing.T) {
 	}
 	dir := t.TempDir()
 	s := New(dir)
+	// 历史分片以节点为准持久化（没有节点记录的分片会被当作孤儿清理），
+	// 所以这里必须先登记节点 —— 真实上报路径也一定先解析出节点。
+	s.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
 	for i := 0; i < 20; i++ {
 		addHistSample(s, "n1", i)
 	}
