@@ -53,11 +53,19 @@ func TestTrafficCycleAccumulatesAndResets(t *testing.T) {
 		t.Errorf("新周期累计错误: %+v", u)
 	}
 
-	// 双向归零（Agent 重启）：重新建立基线，不把上次开机的流量算进来。
+	// 双向归零（Agent 重启 / 网卡重载）：只重建基线，**保留本周期已用量**。
+	// 清零会把"这个月已经跑掉的流量"抹掉，配额告警随之偏低；
+	// 而重置基线已经避免了把上次开机的计数重复加进来。
 	add(time.Date(2026, 4, 2, 12, 2, 0, 0, time.Local).Unix(), 10, 20)
 	u = st.TrafficUsage("n1")
-	if u.UsedRx != 0 || u.UsedTx != 0 {
-		t.Errorf("计数器归零后应重置基线: %+v", u)
+	if u.UsedRx != 100 || u.UsedTx != 100 {
+		t.Errorf("计数器归零应保留已用量、只重置基线: %+v", u)
+	}
+	// 归零后继续正常累计：基线是 10/20
+	add(time.Date(2026, 4, 2, 12, 3, 0, 0, time.Local).Unix(), 60, 120)
+	u = st.TrafficUsage("n1")
+	if u.UsedRx != 150 || u.UsedTx != 200 {
+		t.Errorf("归零后累计错误: %+v", u)
 	}
 }
 

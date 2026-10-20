@@ -836,13 +836,16 @@ func (s *Store) updateTrafficLocked(nodeID string, m model.Metrics) {
 		}
 		return
 	}
-	if tc.Start != start || m.TS < tc.Start || (tc.LastRx > m.NetRx && tc.LastTx > m.NetTx) {
-		// 新周期，或计数器明显归零（Agent 重启/网卡重载）：
-		// 从当前值重新开始累计，避免把上一次开机的流量算进本周期。
+	if tc.Start != start {
+		// 真正的新周期：用量清零，从当前计数重新起算。
 		*tc = model.TrafficCycle{Start: start, LastRx: m.NetRx, LastTx: m.NetTx}
-		if tc.Start != start {
-			tc.UsedRx, tc.UsedTx = 0, 0
-		}
+		return
+	}
+	if m.TS < tc.Start || (tc.LastRx > m.NetRx && tc.LastTx > m.NetTx) {
+		// 同一周期内的异常：时钟回拨，或计数器归零（Agent 重启 / 网卡重载）。
+		// ★ 必须保留本周期已累计的用量，只重置基线 ——
+		// 原来这里整体重建结构体，等于把本周期已经跑掉的流量抹掉。
+		tc.LastRx, tc.LastTx = m.NetRx, m.NetTx
 		return
 	}
 	if m.NetRx >= tc.LastRx {

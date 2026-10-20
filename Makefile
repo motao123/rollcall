@@ -16,11 +16,14 @@ endif
 # VERSION_FLAG 最终位于 recipe 的双引号 shell 字符串里，而双引号内的
 # 单引号只是普通字符，$ / ` 仍会触发命令替换。这些字符在版本号里没有
 # 任何用途，直接拒绝，而不是指望引号保护。
-ifneq ($(findstring $$,$(VERSION)),)
-$(error VERSION 不能包含 $: $(VERSION))
+# ★ 必须校验**未展开**的原始文本：命令行/环境传入的 VERSION 是递归变量，
+# 写成 $(VERSION) 会先展开再检查，$(shell …) 这类值在检查前就已经执行了。
+RAW_VERSION := $(value VERSION)
+ifneq ($(findstring $$,$(RAW_VERSION)),)
+$(error VERSION 不能包含 $: $(RAW_VERSION))
 endif
-ifneq ($(findstring `,$(VERSION)),)
-$(error VERSION 不能包含反引号: $(VERSION))
+ifneq ($(findstring `,$(RAW_VERSION)),)
+$(error VERSION 不能包含反引号: $(RAW_VERSION))
 endif
 ifneq ($(findstring ",$(VERSION)),)
 $(error VERSION 不能包含双引号: $(VERSION))

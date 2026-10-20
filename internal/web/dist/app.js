@@ -2558,7 +2558,7 @@ async function viewSettings() {
                 <span class="field-label">备份文件（.rcbk）</span>
                 <input type="file" id="restoreFile" accept=".rcbk,text/plain">
               </label>
-              ${checkbox('我确认导入会替换当前全部配置', 'restoreConfirm', false)}
+              ${checkbox('我确认导入会覆盖备份中包含的配置项', 'restoreConfirm', false)}
             </div>
             <div class="form-actions start">
               <button class="btn danger" id="restoreBtn" type="button">导入并覆盖配置</button>
@@ -2682,7 +2682,7 @@ async function viewSettings() {
     if (!file) { toast('请选择备份文件', 'err'); return; }
     if (!pwd) { toast('请输入备份密码', 'err'); return; }
     if (!confirmBox.checked) { toast('请先勾选确认覆盖配置', 'err'); return; }
-    if (!confirm('导入会替换当前全部节点、探测、规则与设置，且无法撤销。继续？')) return;
+    if (!confirm('导入会覆盖备份中的节点、探测、规则与设置（本机独有的设置项保留），且无法撤销。继续？')) return;
     const btn = $('#restoreBtn');
     btn.disabled = true;
     try {

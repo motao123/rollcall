@@ -104,7 +104,22 @@ func parseHash(encoded string) (int, []byte, []byte, error) {
 }
 
 // DeriveKey 导出 PBKDF2-HMAC-SHA256，供备份加密等场景复用。
+//
+// iter/keyLen 会被夹到安全区间：导出函数若直接接受调用方传值，
+// iter=0 会退化成单次哈希、keyLen 过大则按 blocks×keyLen 分配内存。
 func DeriveKey(password, salt []byte, iter, keyLen int) []byte {
+	if iter < minHashIter {
+		iter = minHashIter
+	}
+	if iter > maxHashIter {
+		iter = maxHashIter
+	}
+	if keyLen <= 0 {
+		keyLen = keySize
+	}
+	if keyLen > 64 {
+		keyLen = 64
+	}
 	return deriveKey(password, salt, iter, keyLen)
 }
 

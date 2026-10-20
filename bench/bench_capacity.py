@@ -56,9 +56,26 @@ def proc_mem(pid):
     return proc_mem_nt(pid)
 
 
-def proc_mem_nt(pid):
+def _win_handles():
+    """声明 Windows API 的入参/返回类型。
+
+    不声明时 ctypes 默认 restype=c_int（32 位），在 64 位进程里
+    OpenProcess 返回的 HANDLE 会被截断，后续调用拿到的句柄无效。
+    """
     k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.GetProcessTimes.argtypes = [wt.HANDLE, ctypes.POINTER(wt.FILETIME),
+                                    ctypes.POINTER(wt.FILETIME), ctypes.POINTER(wt.FILETIME),
+                                    ctypes.POINTER(wt.FILETIME)]
     psapi = ctypes.windll.psapi
+    psapi.GetProcessMemoryInfo.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wt.DWORD]
+    return k32, psapi
+
+
+def proc_mem_nt(pid):
+    k32, psapi = _win_handles()
     h = k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
     if not h:
         return 0, 0
@@ -86,7 +103,7 @@ def proc_cpu(pid):
 
 
 def proc_cpu_nt(pid):
-    k32 = ctypes.windll.kernel32
+    k32, _ = _win_handles()
     h = k32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
     if not h:
         return 0.0
@@ -307,6 +324,10 @@ def main():
     ap.add_argument("--interval", type=float, default=2.0)
     ap.add_argument("--port", type=int, default=9195)
     args = ap.parse_args()
+    if args.duration <= 0:
+        ap.error("--duration 必须大于 0（当前 %s）：为 0 会让 CPU 均值出现除零" % args.duration)
+    if args.interval <= 0:
+        ap.error("--interval 必须大于 0（当前 %s）" % args.interval)
 
     results = []
     for n in args.nodes:

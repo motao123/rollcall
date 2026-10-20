@@ -107,12 +107,15 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 
-		g := grouped[n.Group]
+		// 查与写必须用同一个 key：原来查 grouped[n.Group]（空分组是 ""）、
+		// 写 grouped["未分组"]，导致每台未分组节点都新建一个聚合并覆盖前一个，
+		// 最后只剩最后一台的统计。
+		label := n.Group
+		if label == "" {
+			label = "未分组"
+		}
+		g := grouped[label]
 		if g == nil {
-			label := n.Group
-			if label == "" {
-				label = "未分组"
-			}
 			g = &groupAgg{Group: label}
 			grouped[label] = g
 		}

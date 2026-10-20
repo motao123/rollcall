@@ -388,6 +388,12 @@ func redactServer(raw string) string {
 	if i := strings.LastIndex(raw, "@"); i >= 0 {
 		raw = "***@" + raw[i+1:]
 	}
+	// 没有合法协议时 url.Parse 会把整串当成 path（Host 为空），
+	// 兜底分支必须自己截掉路径：hook 地址常把密钥放在 path 里
+	// （/hooks/T000/B000/xxxx），只截查询串救不了它。
+	if i := strings.Index(raw, "/"); i >= 0 {
+		raw = raw[:i]
+	}
 	// 再截掉查询串/片段，它们同样可能包含凭据。
 	if i := strings.IndexAny(raw, "?#"); i >= 0 {
 		raw = raw[:i] + "…"

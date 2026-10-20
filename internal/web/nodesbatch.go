@@ -72,6 +72,13 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "分组名不能为空")
 			return
 		}
+	case "provider", "region":
+		// 这两个动作在下面的变更循环里有实现，但校验 switch 漏了分支，
+		// 会直接落到 default 报"未知操作"。这里与单节点编辑保持同样的长度上限。
+		if len([]rune(req.Value)) > 64 {
+			fail(w, 400, "value 不能超过 64 字符")
+			return
+		}
 	case "expire":
 		if req.Value != "" && !validDate(req.Value) {
 			fail(w, 400, "到期日格式应为 YYYY-MM-DD")

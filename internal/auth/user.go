@@ -381,33 +381,9 @@ func saveUserExclusive(path string, u *User) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("创建管理员配置目录失败: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	name := path
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(name)
-	}
-	if _, err := f.Write(raw); err != nil {
-		cleanup()
-		return fmt.Errorf("写入管理员配置失败: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		cleanup()
-		return fmt.Errorf("落盘管理员配置失败: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
-		return fmt.Errorf("关闭管理员配置失败: %w", err)
-	}
-	syncDir(dir)
-	return nil
+	// 原子发布：O_EXCL 直接创建再写入时，另一个实例会在 ErrExist 分支里
+	// 读到 0 字节/半写的账号文件，表现为启动失败或"账号损坏"。
+	return writeExclusiveAtomic(path, raw, 0o600)
 }
 
 // syncDir 让 rename/create 的目录项本身落盘（Windows 不支持目录 fsync）。

@@ -92,10 +92,12 @@ const (
 func (l *authFailureLimiter) evictLocked(now time.Time) {
 	freed, scanned := 0, 0
 
-	// 第一遍：优先回收窗口已过且无封禁/无在途的条目
+	// 第一遍：优先回收窗口已过且无封禁/无在途的条目。
+	// ★ 这里必须是 break 而不是 return：return 会把第二遍也跳过，
+	// 于是"表满但本轮没扫到可回收项"时一条都不删，表只增不减。
 	for k, v := range l.state {
 		if freed >= evictBatch || scanned >= evictScan {
-			return
+			break
 		}
 		scanned++
 		if v.inflight > 0 || now.Before(v.blockedUntil) {

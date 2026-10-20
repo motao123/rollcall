@@ -192,23 +192,39 @@ func (s *Store) ImportConfig(raw []byte) error {
 	s.rules = rules
 	s.notifySilent = silences
 	s.renewals = renewals
+	// 设置项按"覆盖同名键"合并，而不是整体替换：备份里没有的键保留本机值。
+	// 这样旧备份不会清掉新版本才有的设置项（否则升级后导入一份旧备份，
+	// 新功能的配置会静默回落到默认值）。UI 文案按这个语义描述。
 	for k, v := range settings {
-		// ★ 与 ExportConfig 的排除规则保持对称：会话吊销表属于运行态安全状态，
-		// 备份里出现该键（旧版本导出、手工构造、或其它实例）都不能覆盖本机值，
-		// 否则导入 + 重启会让已登出的旧 Cookie 重新可用。
 		if k == "revoked_sessions" {
 			continue
 		}
 		s.settings[k] = v
 	}
 	// 清理不再存在的节点运行态数据，避免导出→导入后旧节点幽灵般残留。
+	// 遍历并集：series 在 UpsertNode 时就建 Ring，expirySent 也可能先于 hosts
+	// 存在，只以 hosts 为遍历源会漏掉这些孤儿数据。
+	stale := map[string]bool{}
 	for id := range s.hosts {
-		if _, ok := nodes[id]; !ok {
-			delete(s.hosts, id)
-			delete(s.series, id)
-			delete(s.traffic, id)
-			delete(s.expirySent, id)
+		stale[id] = true
+	}
+	for id := range s.series {
+		stale[id] = true
+	}
+	for id := range s.traffic {
+		stale[id] = true
+	}
+	for id := range s.expirySent {
+		stale[id] = true
+	}
+	for id := range stale {
+		if _, ok := nodes[id]; ok {
+			continue
 		}
+		delete(s.hosts, id)
+		delete(s.series, id)
+		delete(s.traffic, id)
+		delete(s.expirySent, id)
 	}
 	for id := range s.svcRes {
 		if _, ok := services[id]; !ok {

@@ -36,9 +36,13 @@ func (s *Server) handleAdminStatusPage(w http.ResponseWriter, r *http.Request) {
 		body := http.MaxBytesReader(w, r.Body, 8<<10)
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
-		// 从默认值起解：前端只传它关心的字段时，
-		// 其余项保持默认而不是被读成 false 把页面关空。
-		cfg := model.DefaultStatusPage()
+		// ★ 必须从**当前已保存的配置**起解，而不是默认值。
+		// 前端表单只提交 title/historyDays/announcement/visibility/blocks，
+		// 从默认值起解会让未提交的 sections（模块顺序）被重置回默认顺序——
+		// 表现就是"拖好顺序后点一次保存配置，顺序自己变回去了"。
+		// 当前配置本身已是 DefaultStatusPage 合并过 JSON 的结果，
+		// 所以对"新增字段"依然安全。
+		cfg := s.st.StatusPage()
 		if err := dec.Decode(&cfg); err != nil {
 			fail(w, 400, "bad json: "+err.Error())
 			return

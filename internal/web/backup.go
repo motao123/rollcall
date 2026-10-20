@@ -74,7 +74,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !in.Confirm {
-		fail(w, http.StatusBadRequest, "请确认导入会替换当前全部配置")
+		fail(w, http.StatusBadRequest, "请确认导入会覆盖备份中包含的配置项")
 		return
 	}
 	if in.Password == "" {
@@ -91,6 +91,25 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// ★ 先校验备份里的通知配置，再落库。
+	// 反过来做（先导入、失败只回 warning）会把一份非法的 notify 配置
+	// 持久化下来：运行态仍是旧配置，重启时 notify.Parse 失败，通知直接静默停摆。
+	var peek struct {
+		Settings map[string]string `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &peek); err == nil {
+		if nv := strings.TrimSpace(peek.Settings["notify"]); nv != "" {
+			nc, perr := notify.Parse(nv)
+			if perr != nil {
+				fail(w, http.StatusBadRequest, "备份中的通知配置无法解析，已拒绝导入: "+perr.Error())
+				return
+			}
+			if verr := nc.Validate(); verr != nil {
+				fail(w, http.StatusBadRequest, "备份中的通知配置不合法，已拒绝导入: "+verr.Error())
+				return
+			}
+		}
+	}
 	if err := s.st.ImportConfig(raw); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
@@ -100,6 +119,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// 管理员会看到"导入成功"但通知行为没变（直到重启才在日志里发现）。
 	warning := ""
 	s.notifySaveMu.Lock()
+	defer s.notifySaveMu.Unlock()
 	if nc, err := notify.Parse(s.st.GetSetting("notify")); err != nil {
 		log.Printf("导入后通知配置解析失败: %v", err)
 		warning = "配置已导入，但通知配置无法解析，未生效: " + err.Error()
@@ -109,7 +129,6 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.applyNotifyConfig(nc)
 	}
-	s.notifySaveMu.Unlock()
 
 	resp := map[string]any{
 		"ok":       true,

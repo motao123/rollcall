@@ -443,6 +443,12 @@ func runPlugin(p *plugin, ch ChannelConfig, subject, body string, m Message) err
 	// 但孙进程（wrapper 脚本拉起的实际发送程序）还留在进程组里。
 	// 每次调用后补一次组回收，避免反复告警累积孤儿进程。
 	cleanupProcess(cmd)
+	// ★ 成功优先：WaitDelay 会让 Run 在"子进程已成功退出、孙进程仍持有管道"时
+	// 等到超时再返回；此时 err 可能是 nil 而 ctx 已过期，先判 ctx 会把
+	// 一次成功的投递记成失败，进而触发重复告警。
+	if err == nil {
+		return nil
+	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("插件 %s 超时（%s）", p.def.Type, p.timeout)
 	}

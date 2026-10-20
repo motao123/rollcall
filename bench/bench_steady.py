@@ -250,6 +250,10 @@ def measure(binary, nodes, port, workdir, settle=75):
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # 已经 kill，再等不到就放弃：不能让清理异常盖住真正的错误
 
 
 def main():

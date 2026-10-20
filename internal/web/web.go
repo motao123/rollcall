@@ -2183,6 +2183,11 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 		}
 		if rule.ID == "" {
 			rule.ID = store.NewID("r")
+		} else if _, exists := s.ruleByID(rule.ID); exists {
+			// 与节点/服务的创建路径保持一致：带 ID 的 POST 只允许新建。
+			// 静默覆盖会让"创建"实际变成"改配置"，而调用方以为多了一条规则。
+			fail(w, 409, "规则 ID 已存在，更新请使用 PUT /api/admin/rules/"+rule.ID)
+			return
 		}
 		s.st.UpsertRule(rule)
 		writeJSON(w, 201, rule)
@@ -2256,6 +2261,11 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updated.Op = req.Op
+		} else if req.Metric != "" && req.Metric != existing.Metric {
+			// 换指标时必须显式给方向：cpu 用 gt、cert_days 用 lt，
+			// 沿用旧指标的 op 会得到一个语义相反的规则（例如"证书剩余天数 > 7 告警"）。
+			fail(w, 400, "切换 metric 时必须同时提供 op（gt / lt）")
+			return
 		}
 		if req.Threshold != nil {
 			// offline 规则的阈值是「失联多少秒」，与 cpu/mem 的量纲无关。

@@ -408,9 +408,9 @@ fi
 umask 077
 cat > /etc/rollcall/agent.json <<JSON
 {
-  "server": "$SERVER",
-  "nodeId": "$NODE_ID",
-  "token": "$TOKEN",
+  "server": "$SERVER_JSON",
+  "nodeId": "$NODE_ID_JSON",
+  "token": "$TOKEN_JSON",
   "interval": 30,
   "update": { "enabled": false }
 }

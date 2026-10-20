@@ -14,7 +14,7 @@ on:
 # push 用 commit SHA 分组：GitHub 即使 cancel-in-progress=false，也会在
 # 同组有新任务入队时取消**排队中**的旧任务，快速连续推送仍会漏测中间提交。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || (startsWith(github.ref, 'refs/tags/') && github.ref || github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
