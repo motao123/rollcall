@@ -2,7 +2,12 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.10.3**（`./rollcall-server -version` 可查）。
+当前版本 **v1.10.4**（`./rollcall-server -version` 可查）。
+
+**目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
+[界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
+[项目结构](#七项目结构) · [安全设计](#八安全设计要点) · [已知限制](#九已知限制) ·
+[容量基线](#十容量基线) · [后续路线](#十一后续路线) · [部署验证](#十二实际部署验证)
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -14,7 +19,7 @@
                                                     │
                                             ┌────────────────┐
                                             │ Web UI（原生） │
-                                            │    7 个视图    │
+                                            │    8 个视图    │
                                             └────────────────┘
 ```
 
@@ -168,25 +173,6 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 - 插件在本机以服务端用户身份运行，属于**受信任的本地扩展**，不是沙箱；
   只应安装自己审计过的脚本
 
-### 6. 外观主题（受限沙箱）
-
-- 设置页可配置明暗模式、浅色/深色强调色、圆角（0–24px）与紧凑密度
-- 服务端只接受固定字段（`mode` / `accent` / `accentDark` / `radius` / `compact`），
-  未知字段与非法颜色直接拒绝；**永远不接受 CSS 文本**
-- 前端只把这些值映射到白名单 CSS 变量；公开状态页同步应用，且不新增任何数据暴露
-- 主题随设置持久化；`GET /api/theme` 公开下发（仅样式），
-  管理端用 `GET/PUT /api/admin/theme` 读写
-
-### 7. Agent 签名自更新（可选，默认关闭）
-
-- Agent 从配置中的**清单地址主动拉取**更新，不开放入站端口，服务端不参与、也无法下发更新指令
-- 清单是 Ed25519 签名信封，包含版本、平台资产 URL、SHA-256 与大小；签名、哈希或大小不符即拒绝
-- 更新包必须是小端 ELF 且架构匹配，下载到同目录后原子替换，保留 `.prev` 备份
-- 新版本连续 3 次启动仍未完成一次成功上报时自动回滚；失败版本 7 天内不再自动尝试
-- 手动回滚 `rollcall-agent -rollback`；立即检查 `rollcall-agent -update-now`
-- 自更新需要 Agent 对其二进制所在目录有写权限，systemd 加固下还需放行该目录
-  （见运维手册）；默认安装路径 `/usr/local/bin` 归 root 所有，因此默认不会自动更新
-
 ### 4. 资产台账（两者都没有）
 这是 40 台规模最现实的痛点：**忘续费 = 直接丢机器**。
 
@@ -321,6 +307,25 @@ Agent 上报只认节点令牌。
 - 可设置有效期（0–3650 天），到期自动拒绝；最近使用时间会持久化，重启后令牌仍然有效
 - 令牌通过 `Authorization: Bearer <token>` 使用；`read` 令牌访问管理写接口返回 403
 
+### 6. 外观主题（受限沙箱）
+
+- 设置页可配置明暗模式、浅色/深色强调色、圆角（0–24px）与紧凑密度
+- 服务端只接受固定字段（`mode` / `accent` / `accentDark` / `radius` / `compact`），
+  未知字段与非法颜色直接拒绝；**永远不接受 CSS 文本**
+- 前端只把这些值映射到白名单 CSS 变量；公开状态页同步应用，且不新增任何数据暴露
+- 主题随设置持久化；`GET /api/theme` 公开下发（仅样式），
+  管理端用 `GET/PUT /api/admin/theme` 读写
+
+### 7. Agent 签名自更新（可选，默认关闭）
+
+- Agent 从配置中的**清单地址主动拉取**更新，不开放入站端口，服务端不参与、也无法下发更新指令
+- 清单是 Ed25519 签名信封，包含版本、平台资产 URL、SHA-256 与大小；签名、哈希或大小不符即拒绝
+- 更新包必须是小端 ELF 且架构匹配，下载到同目录后原子替换，保留 `.prev` 备份
+- 新版本连续 3 次启动仍未完成一次成功上报时自动回滚；失败版本 7 天内不再自动尝试
+- 手动回滚 `rollcall-agent -rollback`；立即检查 `rollcall-agent -update-now`
+- 自更新需要 Agent 对其二进制所在目录有写权限，systemd 加固下还需放行该目录
+  （见运维手册）；默认安装路径 `/usr/local/bin` 归 root 所有，因此默认不会自动更新
+
 ---
 
 ## 三、数据采集与展示
@@ -393,7 +398,7 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 └──────────┴────────────────────────────────────────┘
 ```
 
-七个视图：**概览 / 节点 / 服务 / 告警 / 台账 / 状态页 / 设置**，左侧导航切换，节点详情走 `#/nodes/{id}`。
+八个视图：**概览 / 节点 / 对比 / 服务 / 告警 / 台账 / 状态页 / 设置**，左侧导航切换，节点详情走 `#/nodes/{id}`。
 未登录时整页切换为账号密码登录表单；登录后顶栏右上角提供账号菜单与退出登录。
 
 ### 视觉风格
@@ -431,8 +436,25 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 
 - 生产：Linux + systemd
 - 构建机：**Go 1.24+**（`go.mod` 声明 `go 1.24.0`；低版本会触发 `GOTOOLCHAIN` 自动下载工具链，
-  离线构建机会直接失败）、git、curl
+  离线构建机会直接失败）、git、curl、make（构建分发产物时需要）
+- 可选：gcc（仅 `go test -race` 需要；普通构建与交叉编译不需要）
 - 生产端口默认只监听回环，对外请用反向代理或内置 TLS
+- 规划基线（40 台节点、30 秒上报）：**1 vCPU / 1.5–2GB 内存 / 5GB 磁盘**；
+  10 台以内 512MB 起步。服务端内存随原始环跑满而增长（实测 40 台 RSS 约 361MB），
+  快照期间还有峰值，不能按空环的几十兆估算；Agent 只读 `/proc`，占用可忽略。
+  完整实测数据与估算方法见「[十、容量基线](#十容量基线)」。
+
+> Ubuntu 22.04 的 `apt install golang-go` 目前是 Go 1.18，**无法构建本项目**。
+> 请使用官方二进制包或更新的发行版仓库；构建机为 arm64 时把 `linux-amd64` 换成 `linux-arm64`：
+>
+> ```bash
+> GO_VERSION=1.27.2
+> curl -fsSLO "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+> sudo rm -rf /usr/local/go
+> sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
+> export PATH=$PATH:/usr/local/go/bin
+> go version   # 确认 >= 1.24
+> ```
 
 ### 1. 获取源码并构建
 
@@ -447,11 +469,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-server ./cmd/server
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 ```
 
-> 项目零外部依赖，`go build` 不需要联网。`make linux` 只是上面的封装，
-> 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
-> `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
+> 项目零外部依赖，`go build` 不需要联网。`make linux` 会一次构建
+> server/agent/rollsign 并生成 amd64/arm64/arm/386 的分发产物，同时写出
+> `dist/SHA256SUMS`；只做单机构建时可以不装 make。需要生成自更新签名清单时，
+> 在**签名机**上执行 `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.3`。直接 `go build` 时
+> 构建参数包含 `-trimpath -buildvcs=false`：同一份源码配合相同的 Go 版本，
+> 在任意目录（包括 git 工作区与非 git 目录）都能得到字节一致的二进制。
+> 发布时先用 `cd dist && sha256sum -c SHA256SUMS` 自检，再把校验和与版本号一起记录。
+>
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.4`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -463,11 +490,15 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 ### 2. 预览 UI（可选）
 
 ```bash
-./rollcall-server -addr 127.0.0.1:9188 -demo
+# 演示模式同样需要登录；显式给一个临时密码，避免去临时目录翻初始密码
+ROLLCALL_ADMIN_PASSWORD='demo-password-1234' \
+  ./rollcall-server -addr 127.0.0.1:9188 -demo
 ```
 
-打开 `http://127.0.0.1:9188`。演示模式使用临时数据目录，退出后自动删除，
-不会污染生产 `state.json`。
+打开 `http://127.0.0.1:9188`，用 `admin` / 上面设置的密码登录。
+演示模式使用临时数据目录，退出后自动删除，不会污染生产 `state.json`。
+未设置密码时，服务端会随机生成并写入该临时目录的 `initial-admin-password.txt`，
+启动日志会打印完整路径。
 
 ### 3. 安装服务端（systemd）
 
@@ -477,9 +508,10 @@ sudo install -d -o rollcall -g rollcall -m 0750 /opt/rollcall /opt/rollcall/data
 sudo install -m 0755 rollcall-server /opt/rollcall/rollcall-server
 sudo install -m 0644 deploy/rollcall-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now rollcall-server
-curl -fsS http://127.0.0.1:19080/healthz
 ```
+
+**先不要启动服务**。下一步需要选择管理员初始化方式；如果服务已经启动过，
+方式 A 不会再生效，请按方式 B 读取初始密码，或使用重置流程设置密码。
 
 `deploy/rollcall-server.service` 默认**不开启**私网探测/通知。确需监控本机服务或向内网
 webhook 推送时，用 systemd drop-in 追加 `-allow-private-probes` / `-allow-private-notify`
@@ -492,7 +524,8 @@ webhook 推送时，用 systemd drop-in 追加 `-allow-private-probes` / `-allow
 
 ### 4. 首次登录
 
-首次启动时会在 `data/admin-user.json` 创建唯一管理员账号。两种初始化方式任选：
+首次启动时会在 `data/admin-user.json` 创建唯一管理员账号。两种初始化方式任选，
+**方式 A 必须在第一次启动之前完成**：
 
 ```bash
 # 方式 A（推荐）：首次启动前通过环境变量指定用户名、邮箱和初始密码
@@ -506,26 +539,35 @@ sudo systemctl edit rollcall-server
 # 在打开的编辑器中写入：
 # [Service]
 # EnvironmentFile=-/etc/rollcall/server.env
-sudo systemctl restart rollcall-server
+```
 
-# 方式 B：不提供密码，服务端随机生成 24 位初始密码并只打印一次
-sudo journalctl -u rollcall-server -n 50 | grep '初始管理员密码'
+方式 B 不需要配置文件，直接启动后读取服务端生成的密码：
+
+```bash
+# 启动服务（两种方式都在这里首次启动）
+sudo systemctl enable --now rollcall-server
+curl -fsS http://127.0.0.1:19080/readyz   # 200 表示存储与数据目录均正常
+
+# 方式 B：密码只写入 data/initial-admin-password.txt（0600），日志只记录路径
+sudo cat /opt/rollcall/data/initial-admin-password.txt
 ```
 
 打开 `http://127.0.0.1:19080`（或反代域名），输入用户名/邮箱与密码登录。
 登录后可在「设置 → 管理员账号」直接编辑用户名/邮箱、修改密码或退出登录。
 保存前必须输入当前密码；修改成功后当前浏览器自动续签，其他设备上的旧会话立即失效。
+首次登录成功后，服务端会自动删除 `initial-admin-password.txt`。
 
 > 环境变量只用于**首次创建**账号。建议登录后立即按下方重置流程换成自己的强密码，
 > 然后删除 `/etc/rollcall/server.env` 中的密码行（单元使用 `EnvironmentFile=-`，
 > 文件缺失不影响启动），避免明文密码长期留在磁盘。
 
 > 密码只在创建或显式重置时写入。正常重启不会用环境变量覆盖已保存的密码。
-> 忘记密码时执行一次（该命令只改密码后退出，不会启动第二个服务）：
+> 忘记密码时**先停止服务**，执行一次重置后再启动：
 > ```bash
+> sudo systemctl stop rollcall-server
 > sudo -u rollcall env ROLLCALL_ADMIN_PASSWORD='<新密码>' \
 >   /opt/rollcall/rollcall-server -data /opt/rollcall/data -reset-admin-password
-> sudo systemctl restart rollcall-server
+> sudo systemctl start rollcall-server
 > ```
 
 对外访问请用 SSH 隧道或反向代理，不要直接把 19080 暴露到公网。
@@ -624,29 +666,36 @@ runuser -u rollcall-agent -- \
 面板的「接入」弹窗就会给出一条可直接粘贴的命令：
 
 ```bash
-# 控制端：准备分发目录（用 make linux 的产物）
+# 控制端：准备分发目录（用 make linux 的产物，四种架构一并放入）
 sudo install -d -o rollcall -g rollcall -m 0755 /opt/rollcall/agent
-sudo install -m 0755 dist/rollcall-agent-linux-amd64 dist/rollcall-agent-linux-arm64 /opt/rollcall/agent/
+sudo install -m 0755 dist/rollcall-agent-linux-{amd64,arm64,arm,386} /opt/rollcall/agent/
 # 在 rollcall-server.service 的 ExecStart 追加 -agent-dir /opt/rollcall/agent
 # （drop-in 写法见 docs/operations.md；改完 systemctl daemon-reload && systemctl restart rollcall-server）
 ```
 
 ```bash
-# 目标节点：一条命令
-curl -fsSL https://你的面板/agent/install.sh | sh -s -- https://你的面板 <node-id> <token>
+# 目标节点：一条命令（必须以 root 运行）
+curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- https://你的面板 <node-id> <token>
 
 # 后续升级：只替换二进制，保留配置与 unit
 curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 ```
 
-脚本会自动识别架构、创建 `rollcall-agent` 低权限用户（与 `deploy/rollcall-agent.service`
-姿态一致）、写入 0640 配置、生成 systemd 单元；没有 systemd 的容器里退回后台常驻。
-升级模式的完整行为与回滚方式见「六、更新与升级」。
+脚本会自动识别架构（amd64/arm64/arm/386）、创建 `rollcall-agent` 低权限用户
+（与 `deploy/rollcall-agent.service` 姿态一致）、写入 0640 配置、生成 systemd 单元；
+没有 systemd 的容器里以同一低权限用户后台常驻，日志写入 `/var/log/rollcall-agent.log`。
+升级模式只替换二进制，保留配置、unit 与原属主；没有 systemd 时会重启后台进程，
+启动失败自动回滚 `.prev`。完整行为见「六、更新与升级」。
 未配置 `-agent-dir` 时 `/agent/*` 返回 404，仍可按上面的手动步骤安装。
+
+脚本下载二进制后会向 `/agent/download.sha256?arch=<arch>` 查询服务端计算的 SHA-256，
+校验一致才替换（截断文件、代理错误页都会中止）；停止旧进程时按 `/proc/<pid>/exe`
+精确匹配目标二进制，不会误杀命令行里含有相同字符串的其他进程。
 
 > 脚本本身不含任何密钥（node id / token 由命令行参数传入），因此可以公开下载与审计。
 > 但它以 `curl | sh` 方式执行，**只在 HTTPS 或 SSH 隧道下使用**：明文 HTTP 下中间人
-> 可以替换脚本或二进制。同理，Agent 二进制目前只做 `-version` 可执行性校验，不校验签名。
+> 可以替换脚本或二进制。SHA-256 只能防止传输损坏，不是密码学签名——它同样来自
+> 控制端，无法抵御能篡改 HTTPS 响应的攻击者。
 
 > **端口约定**：全文统一用 **19080** 作为生产端口（与 `deploy/rollcall-server.service` 一致）。
 >
@@ -673,7 +722,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | `-allow-private-probes` | false | 允许 HTTP/TCP 探测内网与回环目标 |
 | `-allow-private-notify` | false | 允许通知通道访问内网/回环目标（自建 Gotify/Bark/Webhook） |
 | `-notify-plugins` | 空 | 通知插件目录；显式指定后加载顶层 `*.json` 清单 |
-| `-agent-dir` | 空 | Agent 二进制分发目录（内含 `rollcall-agent-linux-{amd64,arm64}`），启用面板里的「一条命令接入」；未配置时 `/agent/*` 返回 404 |
+| `-agent-dir` | 空 | Agent 二进制分发目录（内含 `rollcall-agent-linux-{amd64,arm64,arm,386}`），启用面板里的「一条命令接入」与 `/agent/download.sha256`；未配置时 `/agent/*` 返回 404 |
 | `-trusted-proxies` | 空 | 可信反向代理 CIDR（逗号分隔，如 `127.0.0.1/32,10.0.0.0/8`）；留空只信任回环。放在反代后面时必须配置，否则日志与限速会把所有访客当成同一个 IP |
 | `-insecure-probe-tls` | false | 探测 HTTPS 时跳过证书校验（自签名目标） |
 | `-probe-interval` | `10s` | 探测调度粒度；每个服务按自身 `interval` 执行 |
@@ -684,7 +733,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | `-cny-rate` | `7.2` | CNY 折算 USD 的汇率（仅用于成本聚合展示） |
 | `-admin-user` | `admin` / `ROLLCALL_ADMIN_USER` | 面板管理员用户名（2–32 位字母/数字/点/下划线/连字符） |
 | `-admin-email` | 空 / `ROLLCALL_ADMIN_EMAIL` | 可选邮箱，设置后可用邮箱登录 |
-| `-admin-password` | 空 / `ROLLCALL_ADMIN_PASSWORD` | 初始密码（至少 12 位）；仅在首次创建或重置时生效，留空则随机生成并打印一次 |
+| `-admin-password` | 空 / `ROLLCALL_ADMIN_PASSWORD` | 初始密码（至少 12 位）；仅在首次创建或重置时生效，留空则随机生成并写入 `data/initial-admin-password.txt`（0600，首次登录后自动删除） |
 | `-reset-admin-password` | false | 用上面的密码重置管理员密码后退出；重启服务后旧会话失效 |
 | `-admin-token` | 自动生成 | 管理 API 令牌（供自动化/监控使用），显式指定时至少 16 字符 |
 | `-data` | `./data` | 数据目录（state.json / history.json / admin.token / admin-user.json / session.key） |
@@ -732,7 +781,8 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | GET | `/api/status/incidents` | 事件时间线（告警自动事件 + 人工登记事件合并后按时间倒序） |
 | GET | `/api/theme` | 公开外观主题（仅固定样式字段） |
 | GET | `/status.js` | 公开状态页脚本 |
-| GET | `/healthz` | 健康检查 |
+| GET | `/healthz` | 存活检查（进程能响应即返回 `ok`） |
+| GET | `/readyz` | 就绪检查：存储已载入、数据目录可写、快照未持续保存失败；升级脚本据此决定是否回滚 |
 
 管理接口与 CSV 导出接受两种凭据：浏览器会话 Cookie（写操作需带
 `X-Requested-With: XMLHttpRequest`）或请求头 `X-Admin-Token`（供自动化使用）。
@@ -780,11 +830,45 @@ ssh -N -L 19080:127.0.0.1:19080 root@<控制端 IP>
 # 浏览器访问 http://127.0.0.1:19080
 ```
 
+> Cookie 不区分端口：在同一浏览器里再登录 `127.0.0.1` 其他端口上的测试实例，
+> 会覆盖生产面板的登录态。测试完重新登录生产面板即可。
+
 **B. 面板反向代理（推荐长期使用）**
 
 *宝塔*：网站 → 添加站点 → 站点设置 → 反向代理 → 目标 `http://127.0.0.1:19080`，SSL 可一键申请。
 
 *1Panel*：网站 → 创建网站 → 反向代理类型 → 代理地址填 `http://127.0.0.1:19080`。
+
+*Nginx（等价手写配置）*：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name monitor.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/monitor.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/monitor.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:19080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+*Caddy*：
+
+```caddyfile
+monitor.example.com {
+    reverse_proxy 127.0.0.1:19080
+}
+```
+
+反代与面板同机时，服务端要加 `-trusted-proxies 127.0.0.1/32`；反代在另一台机器时
+填其真实地址/网段。否则会话 Cookie 的 `Secure` 判断、审计日志与登录限速都会把
+所有访客当成同一个来源 IP。
 
 **C. 内置 TLS（无需反代）**
 
@@ -828,7 +912,8 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 构建机
-make linux VERSION=v1.10.3
+make linux VERSION=v1.10.4
+(cd dist && sha256sum -c SHA256SUMS)
 scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
 ```
 
@@ -840,7 +925,7 @@ sudo cp -a /opt/rollcall/data /var/backups/rollcall/data-$(date +%F-%H%M)
 sudo cp -p /opt/rollcall/rollcall-server /opt/rollcall/rollcall-server.prev
 sudo install -m 0755 /tmp/rollcall-server.new /opt/rollcall/rollcall-server
 sudo systemctl start rollcall-server
-curl -fsS http://127.0.0.1:19080/healthz
+curl -fsS http://127.0.0.1:19080/readyz
 ```
 
 回滚：
@@ -863,15 +948,16 @@ sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file /tmp/rollcall-server.new \
   --sha256 "$(sha256sum /tmp/rollcall-server.new | awk '{print $1}')" \
   --service rollcall-server \
-  --health http://127.0.0.1:19080/healthz
+  --health http://127.0.0.1:19080/readyz
 
 # 回滚到升级前的 .prev
 sudo sh deploy/rollcall-server-upgrade.sh rollback --service rollcall-server \
-  --health http://127.0.0.1:19080/healthz
+  --health http://127.0.0.1:19080/readyz
 ```
 
 - 升级前校验 ELF 魔数、架构与 SHA-256；当前二进制备份为 `rollcall-server.prev`
-- 原子替换后重启 systemd 单元，最多等待 20 秒健康检查；失败自动恢复 `.prev` 并再次重启
+- 原子替换后重启 systemd 单元，最多等待 20 秒；只有 `/readyz` 返回 200 且
+  版本号与目标二进制一致才算成功，否则自动恢复 `.prev` 并再次重启
 - 使用 `/run/rollcall-upgrade.lock` 防止并发执行；仅支持 Linux
 - 脚本不会修改 unit 文件与数据目录；schema 升级后的数据回滚仍需按下方说明恢复备份
 
@@ -888,8 +974,10 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 1. 从 `/etc/rollcall/agent.json` 读取控制端地址（**不需要节点令牌**，也不会改写配置）；
 2. 从 `rollcall-agent.service` 的 `ExecStart` 找到实际二进制路径（找不到时回退 `/usr/local/bin`），
    也支持 `--upgrade /自定义/路径`；
-3. 按当前架构下载、校验可执行性、保留原属主后原子替换，旧版本备份为 `<二进制>.prev`；
-4. 重启 `rollcall-agent`，若启动失败**自动回滚**到 `.prev`。
+3. 按当前架构下载，校验服务端 SHA-256 与可执行性，保留原属主后原子替换，
+   旧版本备份为 `<二进制>.prev`；
+4. 重启 `rollcall-agent`，若启动失败**自动回滚**到 `.prev`；没有 systemd 的容器
+   会重启同一低权限用户的后台进程（日志 `/var/log/rollcall-agent.log`），同样带自动回滚。
 
 手动回滚：
 
@@ -918,11 +1006,12 @@ Agent 在每次上报时通过 `X-Agent-Version` 请求头上报版本，**下�
 - 使用 `-agent-dir` 时，Agent 二进制不在服务端二进制里，每个版本都要同步替换，否则新安装的节点仍会拉到旧版本：
 
 ```bash
-sudo install -m 0755 dist/rollcall-agent-linux-amd64 \
-                        dist/rollcall-agent-linux-arm64 /opt/rollcall/agent/
+sudo install -m 0755 dist/rollcall-agent-linux-{amd64,arm64,arm,386} \
+                        /opt/rollcall/agent/
 ```
 
-替换分发文件无需重启控制端，下一次 `/agent/download` 请求即生效。
+替换分发文件无需重启控制端，下一次 `/agent/download` 请求即生效；
+`/agent/download.sha256` 会即时重新计算新文件的摘要。
 
 ### 4. 版本对应关系
 
@@ -932,6 +1021,35 @@ sudo install -m 0755 dist/rollcall-agent-linux-amd64 \
 | Agent 版本显示 `—` | 尚未上报过版本：旧 Agent 升级后等下一轮上报，或检查上报是否正常 |
 | `--upgrade` 提示未找到配置 | 该节点从未通过安装脚本安装，先执行一次完整安装 |
 | `--upgrade` 提示 404 / 无法下载 | 控制端未配置 `-agent-dir`，改用手动替换二进制 |
+| 安装脚本提示 SHA-256 不匹配 | 下载被截断或反代返回了错误页；重试并检查 `/agent/download` 与 `/agent/download.sha256` 是否一致 |
+
+### 5. 卸载
+
+先备份 `data/`（账号、令牌、历史都在里面），再停止并删除。**删除数据目录不可恢复**。
+
+```bash
+# 控制端
+sudo systemctl disable --now rollcall-server
+sudo rm -f /etc/systemd/system/rollcall-server.service
+sudo rm -rf /etc/systemd/system/rollcall-server.service.d
+sudo systemctl daemon-reload
+sudo rm -rf /opt/rollcall                 # 确认已备份后再执行
+sudo userdel rollcall 2>/dev/null || true
+```
+
+```bash
+# 被控端（每台都要执行）
+sudo systemctl disable --now rollcall-agent 2>/dev/null || true
+# 无 systemd 的容器改为：sudo pkill -f /usr/local/bin/rollcall-agent
+sudo rm -f /etc/systemd/system/rollcall-agent.service
+sudo rm -f /etc/systemd/system/rollcall-agent.service.d/*.conf
+sudo rm -f /usr/local/bin/rollcall-agent /usr/local/bin/rollcall-agent.prev
+sudo rm -f /etc/rollcall/agent.json /var/log/rollcall-agent.log
+sudo systemctl daemon-reload
+sudo userdel rollcall-agent 2>/dev/null || true
+```
+
+最后删除反向代理站点与 DNS 记录，并吊销不再使用的管理令牌。
 
 ---
 
@@ -961,6 +1079,8 @@ rollcall/
 │       ├── statuspub.go     公开状态页数据：脱敏、可见性、区间聚合、服务延迟
 │       ├── statuspage.go    公开页 HTML/CSS 外壳（深色优先、响应式、CSP 兼容）
 │       ├── auth.go          登录 / 会话 / 退出端点
+│       ├── ready.go         /readyz 深度健康检查（存储/磁盘/快照）
+│       ├── static.go        内嵌静态资源 gzip 与弱 ETag / 304
 │       └── dist/
 │           ├── index.html   管理后台外壳
 │           ├── app.js       管理后台 SPA
@@ -1011,7 +1131,7 @@ rollcall/
 
 1. 未内置 ICMP ping 探测（需 raw socket 权限）；HTTP/TCP/DNS + 丢包/抖动已覆盖绝大多数场景
 2. 长历史依赖本地分层聚合（默认 1h 层 365 天）；更长期归档或多实例仍需外接 TSDB
-3. 单实例单进程，无水平扩展设计（40 台/1 GB 内存实测可行，容量数据见「十、容量基线」）
+3. 单实例单进程，无水平扩展设计（40 台满环实测 RSS 约 361MB，建议 1.5–2GB 内存，容量数据见「十、容量基线」）
 4. 无多用户与权限体系（单一管理员账号 + 两种 API 令牌 scope，适合个人/小团队）
 5. Agent 自更新仅支持 Linux，且要求对二进制目录有写权限；控制端升级由运维执行，
    可用 `deploy/rollcall-server-upgrade.sh` 一键完成，但**不支持**远程下发升级
@@ -1154,7 +1274,21 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十二、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.10.3）：
+已在 Debian 13 / AMD EPYC 16 核 / 32GB 环境完成控制端 + 被控端同机部署验证（v1.10.4）：
+
+| 项目 | 结果 |
+|---|---|
+| 构建与测试 | 生产机 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过；`make linux VERSION=v1.10.4` 产出四架构 server/agent/rollsign 共 12 个二进制，`sha256sum -c SHA256SUMS` 全过 |
+| 可复现构建 | 生产机与另一台 Debian 13 主机分别用 Go 1.27.3 构建 agent amd64，sha256 均为 `dcf60967…`，与分发目录一致 |
+| 深度健康检查 | `/readyz` 返回 `{"ready":true,"version":"v1.10.4"}`；数据目录不可写、首次快照未落盘等故障场景返回 503；升级脚本以 `/readyz` 版本匹配作为成功判据 |
+| 一键升级 | 生产机执行 `rollcall-server-upgrade.sh upgrade`（sha256 校验 + `.prev` + `/readyz` 版本核对）成功；隔离实例验证坏二进制会失败并自动回滚到旧版本 |
+| 首次登录 | 环境变量方式启动后无密码文件残留；隔离实例验证 `initial-admin-password.txt` 权限 0600、首次登录成功后被删除；非回环明文启动被拒绝时不落任何凭据文件 |
+| 凭据与安全 | 错误密码 401、未登录管理 API 401、写请求缺少 `X-Requested-With` 403；`admin.token`/`session.key` 0600；会话跨服务重启保持 |
+| 静态资源 | `/app.js` 返回 gzip + `Vary` + 弱 ETag，`If-None-Match` 命中 304；`/agent/install.sh` 从不压缩；公开 `/status` 与面板登录页正常渲染，无控制台错误、无横向溢出 |
+| Agent 分发 | `/agent/download.sha256?arch=amd64` 返回的哈希与下载二进制一致；一键安装脚本在控制端本机完整走通（下载、SHA-256 校验、低权限用户、systemd 单元、启动） |
+| 机群恢复 | 12 台远端节点 + 本机控制端全部升级至 v1.10.4；面板与公开页 13/13 在线、0 离线、0 无数据，公开 `/api/status` 仍不含 `agentVersion` |
+
+以下为 v1.10.3 及更早版本的验证记录：
 
 | 项目 | 结果 |
 |---|---|

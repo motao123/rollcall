@@ -176,6 +176,7 @@ func (s *Server) handleAdminAccountPassword(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		s.setUser(updated)
+		s.clearInitialPassword()
 		log.Printf("管理员密码已修改 user=%s ip=%s", updated.Username, clientIP(r, s.trustedProxies))
 		s.accountResponse(w, r, updated, viaSession)
 	})

@@ -68,6 +68,11 @@ type Server struct {
 	// 为空表示不提供「一条命令接入」，下载接口会明确报错。
 	agentDir string
 
+	// dataDir 与 saveInterval 用于 /readyz 判断磁盘可写与快照是否新鲜。
+	dataDir      string
+	saveInterval time.Duration
+	ready        readyProbe
+
 	testMu   sync.Mutex
 	lastTest time.Time
 
@@ -100,6 +105,9 @@ type Config struct {
 	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
 	Outbox     *outbox.Manager // 通知投递队列；nil 时不外发通知
 	AgentDir   string          // Agent 二进制分发目录；空则不提供下载
+	// DataDir 与 SaveInterval 供 /readyz 做深度检查；SaveInterval<=0 时跳过时效判断。
+	DataDir      string
+	SaveInterval time.Duration
 	// TrustedProxies 是可信反向代理网段；nil 时仅信任回环。
 	// 跨机代理必须显式配置，否则无法识别真实客户端 IP。
 	TrustedProxies []*net.IPNet
@@ -121,6 +129,8 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
 		trustedProxies: trusted,
+		dataDir:        cfg.DataDir,
+		saveInterval:   cfg.SaveInterval,
 		startedAt:      time.Now()}
 	srv.loadRevokedSessions()
 	// 载入已保存的通知配置并挂到告警引擎
@@ -220,6 +230,9 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/healthz", authPublic, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, "ok")
 		})},
+		// 深度健康检查：存储可用且快照在正常落盘才算就绪。
+		// 升级脚本以它决定是否回滚。
+		{"/readyz", authPublic, http.HandlerFunc(s.handleReadyz)},
 		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
 		{"/status.js", authPublic, static},
 		{"/api/status", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatus))},
@@ -231,6 +244,7 @@ func (s *Server) routes(static http.Handler) []route {
 		// 一条命令接入：脚本与二进制都公开（脚本不含密钥，token 由调用方传参）
 		{"/agent/install.sh", authPublic, http.HandlerFunc(s.handleAgentInstall)},
 		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},
+		{"/agent/download.sha256", authPublic, http.HandlerFunc(s.handleAgentChecksum)},
 		{"/api/theme", authPublic, http.HandlerFunc(s.handleTheme)},
 
 		// 面板登录：登录失败按独立 scope 限速，不会拖累公开页。
@@ -338,7 +352,7 @@ func (s *Server) Handler() http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	static := http.FileServer(http.FS(sub))
+	static := withStaticETag(sub, http.FileServer(http.FS(sub)))
 
 	routes := s.routes(static)
 	levels, err := validateRoutes(routes)
@@ -471,7 +485,7 @@ func (s *Server) panelBasicOK(r *http.Request) bool {
 // 压缩后通常降到几百 KB，且客户端不声明 gzip 时行为完全不变。
 func withGzip(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") {
+		if !gzipPath(r.URL.Path) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -527,7 +541,7 @@ func (g *gzipResponseWriter) WriteHeader(code int) {
 	g.status = code
 	ct := g.Header().Get("Content-Type")
 	g.gzipBody = code >= 200 && code != http.StatusNoContent && code != http.StatusNotModified &&
-		(strings.HasPrefix(ct, "application/json") || strings.HasPrefix(ct, "text/csv"))
+		compressibleContentType(ct)
 	if !g.gzipBody {
 		g.ResponseWriter.WriteHeader(code)
 	}

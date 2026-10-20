@@ -3,9 +3,11 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -275,6 +277,49 @@ func TestAuthLoginSuccessResetsFailures(t *testing.T) {
 			t.Fatalf("成功登录后失败计数应清零，第 %d 次实际 %d", i+1, w.Code)
 		}
 	}
+}
+
+// TestInitialPasswordFileRemovedAfterAuth 首启随机密码落盘后，
+// 只有成功登录/改密才删除；失败登录不能把它删掉（否则用户再也拿不到密码）。
+func TestInitialPasswordFileRemovedAfterAuth(t *testing.T) {
+	h, userPath, _ := newAuthWebAt(t, time.Hour)
+	p := filepath.Join(filepath.Dir(userPath), auth.InitialPasswordFile)
+	write := func() {
+		t.Helper()
+		if err := os.WriteFile(p, []byte("bootstrap-password\n"), 0o600); err != nil {
+			t.Fatalf("写入初始密码文件: %v", err)
+		}
+	}
+	requireGone := func(stage string) {
+		t.Helper()
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s 后应删除初始密码文件，stat err=%v", stage, err)
+		}
+	}
+
+	write()
+	if w := loginReq(h, "10.15.0.1", "imotao", "wrong-password-123"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("错误密码应 401，实际 %d", w.Code)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("失败登录不应删除初始密码文件: %v", err)
+	}
+
+	if w := loginReq(h, "10.15.0.2", "imotao", testAdminPassword); w.Code != http.StatusOK {
+		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
+	}
+	requireGone("成功登录")
+
+	// 改密同样应清理（多实例/手工恢复可能留下旧文件）。
+	write()
+	login := loginReq(h, "10.15.0.3", "imotao", testAdminPassword)
+	cookie := findSessionCookie(t, login)
+	if w := doAuthReq(h, http.MethodPost, "/api/admin/account/password", "10.15.0.4",
+		`{"currentPassword":"`+testAdminPassword+`","newPassword":"another-strong-password-1"}`,
+		map[string]string{"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"}, cookie); w.Code != http.StatusOK {
+		t.Fatalf("修改密码失败: %d %s", w.Code, w.Body.String())
+	}
+	requireGone("修改密码")
 }
 
 // TestAdminAccountUpdateFlow 覆盖在线改账号/改密码：当前密码确认、

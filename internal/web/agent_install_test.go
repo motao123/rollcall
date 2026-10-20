@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -60,17 +62,46 @@ func TestAgentInstallScriptIsSafeAndPublic(t *testing.T) {
 		t.Fatal("脚本缺少控制端地址格式校验")
 	}
 	// 无 systemd 的容器里也要尽量用专用用户运行，而不是默默 root
-	if !strings.Contains(body, "runuser -u \"$RUN_USER\" --") ||
-		!strings.Contains(body, "无法降权到 $AS_USER") {
+	if !strings.Contains(body, "runuser -u \"$RUN_AS\" --") ||
+		!strings.Contains(body, "无法以 $RUN_AS 运行") {
 		t.Fatal("无 systemd 分支缺少降权/告警")
 	}
 	// 仅存在 systemctl 客户端不代表 systemd 是 PID 1（容器很常见）
 	if !strings.Contains(body, "/run/systemd/system") {
 		t.Fatal("脚本只检查 systemctl 是否存在，容器里会走错分支")
 	}
-	// 重复安装必须停掉旧进程，避免 pgrep 命中旧实例造成假成功
-	if !strings.Contains(body, "pkill -f \"$BIN\"") {
-		t.Fatal("脚本缺少重复安装时的旧进程清理")
+	// 重复安装/升级必须停掉旧进程，且只能按 /proc/<pid>/exe 精确匹配。
+	// pkill -f 会误杀命令行里恰好包含二进制路径的无关进程。
+	if strings.Contains(body, "pkill -f \"$BIN\"") || strings.Contains(body, "pgrep -f \"$BIN\"") {
+		t.Fatal("不能用 pgrep/pkill -f 匹配进程：会误杀命令行包含该路径的进程")
+	}
+	for _, want := range []string{"agent_pids", "/proc/[0-9]*/exe", "/proc/"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("脚本缺少按 exe 精确匹配的进程管理逻辑 %q", want)
+		}
+	}
+	// 下载后必须校验服务器给出的 SHA-256
+	for _, want := range []string{"agent/download.sha256", "SHA-256 不匹配", "sha256sum"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("脚本缺少下载校验逻辑 %q", want)
+		}
+	}
+	// 生成的 unit 必须与 deploy/ 模板一致，不能少掉关键加固项
+	for _, want := range []string{
+		"PrivateDevices=true", "RestrictNamespaces=true",
+		"RestrictAddressFamilies=AF_INET AF_INET6",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("生成的 unit 缺少加固项 %q", want)
+		}
+	}
+	if strings.Contains(body, "AF_UNIX") {
+		t.Fatal("Agent 不需要 Unix socket，生成的 unit 不应放行 AF_UNIX")
+	}
+	// 无 systemd 的升级必须自动重启，而不是只提示手动重启
+	if !strings.Contains(body, "未检测到 rollcall-agent.service，重启后台进程") ||
+		!strings.Contains(body, "start_agent_bg") {
+		t.Fatal("无 systemd 的升级分支缺少自动重启")
 	}
 	// 配置值必须转义后写入 JSON，且拒绝控制字符
 	for _, want := range []string{"json_escape", "[[:cntrl:]]", "SERVER_JSON"} {
@@ -96,6 +127,38 @@ func TestAgentInstallScriptIsSafeAndPublic(t *testing.T) {
 	configWrite := strings.Index(body, "cat > /etc/rollcall/agent.json")
 	if upgradeExit < 0 || configWrite < 0 || upgradeExit > configWrite {
 		t.Fatal("升级分支必须先于配置写入退出")
+	}
+}
+
+// TestAgentChecksumEndpoint 安装脚本依赖它校验下载内容：
+// 必须与二进制逐字节一致，缺失架构时明确 404。
+func TestAgentChecksumEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(dir, "rollcall-agent-linux-amd64"), content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(store.New(t.TempDir()), nil, nil, Config{AgentDir: dir})
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/download.sha256?arch=amd64", nil))
+	if rec.Code != 200 {
+		t.Fatalf("校验端点应 200，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	sum := sha256.Sum256(content)
+	if got, want := strings.TrimSpace(rec.Body.String()), hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("校验值不符: got %s want %s", got, want)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/download.sha256?arch=arm64", nil))
+	if rec.Code != 404 {
+		t.Fatalf("缺失架构应 404，实际 %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/download.sha256?arch=../x", nil))
+	if rec.Code != 400 {
+		t.Fatalf("非法架构应 400，实际 %d", rec.Code)
 	}
 }
 

@@ -12,7 +12,7 @@
 #
 # 可选参数：--bin /opt/rollcall/rollcall-server
 #           --service rollcall-server
-#           --health http://127.0.0.1:19080/healthz
+#           --health http://127.0.0.1:19080/readyz
 #           --health "" 跳过健康检查
 #
 # 只支持 Linux systemd 部署；需要 root 权限。脚本不读取任何凭据。
@@ -21,10 +21,13 @@ set -eu
 
 BIN=/opt/rollcall/rollcall-server
 SERVICE=rollcall-server
-HEALTH=http://127.0.0.1:19080/healthz
+HEALTH=http://127.0.0.1:19080/readyz
 LOCK=/run/rollcall-upgrade.lock
 TMP=
 PREV=
+# 非空时要求 /readyz 报告的版本与目标二进制一致，
+# 防止 systemd 仍拉起旧文件/旧路径时误判升级成功。
+EXPECT_VERSION=
 
 log() { printf '%s\n' "[rollcall-upgrade] $*"; }
 die() { printf '%s\n' "[rollcall-upgrade] 错误: $*" >&2; exit 1; }
@@ -82,18 +85,30 @@ health_ok() {
   i=0
   while [ "$i" -lt 20 ]; do
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      body=
+      fetched=0
       if command -v curl >/dev/null 2>&1; then
-        curl -fsS --max-time 3 "$HEALTH" >/dev/null 2>&1 && return 0
+        if body=$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null); then fetched=1; fi
       elif command -v wget >/dev/null 2>&1; then
-        wget -q -T 3 -O /dev/null "$HEALTH" && return 0
+        if body=$(wget -q -T 3 -O - "$HEALTH" 2>/dev/null); then fetched=1; fi
       else
         return 0
+      fi
+      if [ "$fetched" = 1 ]; then
+        if [ -z "$EXPECT_VERSION" ] || printf '%s' "$body" | grep -Fq "\"version\":\"$EXPECT_VERSION\""; then
+          return 0
+        fi
       fi
     fi
     sleep 1
     i=$((i + 1))
   done
   return 1
+}
+
+# binary_version 从 `-version` 输出中取第二列（rollcall-server v1.2.3 -> v1.2.3）。
+binary_version() {
+  "$1" -version 2>/dev/null | awk 'NR==1 {print $2}'
 }
 
 restart_and_check() {
@@ -146,6 +161,9 @@ cmd_upgrade() {
 
   magic=$(od -An -tx1 -N4 "$new" | tr -d ' \n')
   [ "$magic" = "7f454c46" ] || die "新文件不是 Linux ELF 可执行文件"
+  chmod 0755 "$new" || die "设置新二进制执行权限失败"
+  EXPECT_VERSION=$(binary_version "$new" || true)
+  [ -n "$EXPECT_VERSION" ] || log "提示: 无法读取新版本号，只校验就绪状态"
 
   old_ver=$("$BIN" -version 2>/dev/null || printf 'unknown')
   log "当前版本: $old_ver"
@@ -154,7 +172,6 @@ cmd_upgrade() {
   sync
 
   log "安装新二进制"
-  chmod 0755 "$new"
   sync
   mv -f "$new" "$BIN" || die "替换二进制失败"
 
@@ -180,6 +197,7 @@ cmd_rollback() {
   take_lock
 
   failed_ver=$("$BIN" -version 2>/dev/null || printf 'unknown')
+  EXPECT_VERSION=$(binary_version "$BIN.prev" || true)
   log "当前版本: $failed_ver"
   log "从 $BIN.prev 恢复"
   restore_prev

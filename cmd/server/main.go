@@ -89,6 +89,42 @@ func main() {
 		log.Fatal("-tls-cert 与 -tls-key 必须同时提供")
 	}
 
+	// Basic Auth
+	var authUser, authPass string
+	if *basicAuth != "" {
+		parts := strings.SplitN(*basicAuth, ":", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			log.Fatal("-auth 格式应为 user:password")
+		}
+		if parts[1] == "" {
+			log.Fatal("-auth 密码不能为空")
+		}
+		authUser, authPass = parts[0], parts[1]
+		if len(authPass) < 12 {
+			log.Printf("⚠ Basic Auth 密码较短（%d 字符），建议至少 12 个字符", len(authPass))
+		}
+		log.Printf("Basic Auth 已启用（用户 %s）", authUser)
+	}
+
+	// 安全默认：非回环绑定必须显式确认暴露面。
+	// 面板始终要求账号密码登录，因此不再要求额外配置 Basic Auth；
+	// 但明文 HTTP 会把密码暴露在链路上，非回环仍必须有 TLS 或显式确认。
+	//
+	// ★ 必须在创建任何凭据文件之前完成：被拒绝的启动不应在数据目录里
+	// 留下 admin-user.json / admin.token / session.key，否则用户修正参数
+	// 后仍会复用这些文件（随机初始密码也已写进 initial-admin-password.txt）。
+	loopback := isLoopbackListen(*addr)
+	if !loopback {
+		if *tlsCert == "" && !*allowInsecure {
+			log.Fatal("拒绝在非回环地址上使用明文 HTTP；请配置 -tls-cert/-tls-key，或通过反向代理/隧道，或显式加 -allow-insecure")
+		}
+	} else if authUser == "" {
+		log.Printf("⚠ 当前仅监听回环，请通过反向代理/隧道访问")
+	}
+	if *allowPublic {
+		log.Printf("提示: -allow-public 已废弃；面板账号登录始终启用，该开关不再影响启动")
+	}
+
 	// 演示模式使用临时数据目录：预览数据不应污染真实台账与令牌文件。
 	if *demo {
 		dir, err := os.MkdirTemp("", "rollcall-demo-*")
@@ -167,38 +203,6 @@ func main() {
 	sessions, err := auth.NewSessions(sessionKey, auth.DefaultSessionTTL)
 	if err != nil {
 		log.Fatalf("会话管理器初始化失败: %v", err)
-	}
-
-	// Basic Auth
-	var authUser, authPass string
-	if *basicAuth != "" {
-		parts := strings.SplitN(*basicAuth, ":", 2)
-		if len(parts) != 2 || parts[0] == "" {
-			log.Fatal("-auth 格式应为 user:password")
-		}
-		if parts[1] == "" {
-			log.Fatal("-auth 密码不能为空")
-		}
-		authUser, authPass = parts[0], parts[1]
-		if len(authPass) < 12 {
-			log.Printf("⚠ Basic Auth 密码较短（%d 字符），建议至少 12 个字符", len(authPass))
-		}
-		log.Printf("Basic Auth 已启用（用户 %s）", authUser)
-	}
-
-	// 安全默认：非回环绑定必须显式确认暴露面。
-	// 面板始终要求账号密码登录，因此不再要求额外配置 Basic Auth；
-	// 但明文 HTTP 会把密码暴露在链路上，非回环仍必须有 TLS 或显式确认。
-	loopback := isLoopbackListen(*addr)
-	if !loopback {
-		if *tlsCert == "" && !*allowInsecure {
-			log.Fatal("拒绝在非回环地址上使用明文 HTTP；请配置 -tls-cert/-tls-key，或通过反向代理/隧道，或显式加 -allow-insecure")
-		}
-	} else if authUser == "" {
-		log.Printf("⚠ 当前仅监听回环，请通过反向代理/隧道访问")
-	}
-	if *allowPublic {
-		log.Printf("提示: -allow-public 已废弃；面板账号登录始终启用，该开关不再影响启动")
 	}
 
 	if *demo {
@@ -334,6 +338,7 @@ func main() {
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass,
 		User: panelUser, UserPath: userPath, Sessions: sessions, PanelLink: *panelLink,
 		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets, AgentDir: *agentDir,
+		DataDir: *dataDir, SaveInterval: *saveInterval,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)
@@ -472,13 +477,13 @@ func announceGeneratedPassword(dataDir, pwd string) {
 		fmt.Printf("初始管理员密码: %s（仅本次启动打印一次，请立即保存；落盘仅保存哈希）\n", pwd)
 		return
 	}
-	path := filepath.Join(dataDir, "initial-admin-password.txt")
+	path := filepath.Join(dataDir, auth.InitialPasswordFile)
 	if err := os.WriteFile(path, []byte(pwd+"\n"), 0o600); err != nil {
 		log.Printf("无法安全输出初始管理员密码（写入 %s 失败: %v）；请使用 -reset-admin-password 重新设置", path, err)
 		return
 	}
 	_ = os.Chmod(path, 0o600)
-	log.Printf("初始管理员密码已写入 %s（仅本次启动生成；登录后请删除）", path)
+	log.Printf("初始管理员密码已写入 %s（仅本次启动生成；首次登录成功后自动删除）", path)
 }
 
 // loadOrCreateAdminToken 从数据目录读取管理令牌，不存在则生成并落盘（权限 0600）。

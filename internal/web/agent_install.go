@@ -1,7 +1,10 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,6 +39,28 @@ if [ "$(id -u)" != "0" ]; then
     echo "请用 root 运行（例如 curl ... | sudo sh -s -- ...）" >&2
     exit 1
 fi
+
+fetch_file() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1"
+    else
+        echo "需要 curl 或 wget" >&2
+        return 1
+    fi
+}
+
+fetch_text() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O - "$1"
+    else
+        echo "需要 curl 或 wget" >&2
+        return 1
+    fi
+}
 
 ALLOW_INSECURE=0
 while [ "$#" -gt 0 ]; do
@@ -147,6 +172,80 @@ if [ ! -w "$BIN_DIR" ]; then
     exit 1
 fi
 
+# agent_pids 只匹配 /proc/<pid>/exe 精确指向 $BIN 的进程。
+# 不能用 pgrep/pkill 的模糊匹配：任何命令行里包含该路径的进程
+# （编辑器、tail、另一次安装）都会被误杀。替换二进制后旧进程的
+# exe 链接会带 " (deleted)" 后缀，这里一并归一化。
+agent_pids() {
+    target=$(readlink -f "$BIN" 2>/dev/null || printf '%%s' "$BIN")
+    for exe in /proc/[0-9]*/exe; do
+        [ -e "$exe" ] || continue
+        link=$(readlink "$exe" 2>/dev/null) || continue
+        link=${link%% (deleted)}
+        [ "$link" = "$target" ] || continue
+        pid=${exe#/proc/}
+        printf '%%s\n' "${pid%%/exe}"
+    done
+}
+
+stop_agent() {
+    pids=$(agent_pids)
+    [ -n "$pids" ] || return 0
+    echo "→ 停止已在运行的 Agent: $(printf '%%s ' $pids)"
+    kill $pids 2>/dev/null || true
+    n=0
+    while [ -n "$(agent_pids)" ] && [ "$n" -lt 5 ]; do
+        sleep 1
+        n=$((n + 1))
+    done
+    pids=$(agent_pids)
+    if [ -n "$pids" ]; then
+        echo "⚠ Agent 未在 5 秒内退出，强制结束" >&2
+        kill -9 $pids 2>/dev/null || true
+        sleep 1
+    fi
+}
+
+agent_run_user() {
+    for pid in $(agent_pids); do
+        u=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ -n "$u" ] && [ "$u" != "root" ]; then
+            printf '%%s' "$u"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# 进程已停止时从配置属组推断原运行用户（低权限安装为 root:rollcall-agent 0640）。
+agent_user_from_config() {
+    [ -f "$CONFIG" ] || return 0
+    grp=$(stat -c '%%G' "$CONFIG" 2>/dev/null || true)
+    case "$grp" in
+        ""|root|UNKNOWN) return 0 ;;
+    esac
+    if id -u "$grp" >/dev/null 2>&1; then
+        printf '%%s' "$grp"
+    fi
+}
+
+start_agent_bg() {
+    LOG=/var/log/rollcall-agent.log
+    : >> "$LOG"
+    if [ -n "${RUN_AS:-}" ] && [ "$RUN_AS" != "root" ] \
+        && command -v runuser >/dev/null 2>&1 && id -u "$RUN_AS" >/dev/null 2>&1; then
+        chown "$RUN_AS:$RUN_AS" "$LOG" 2>/dev/null || chown "$RUN_AS" "$LOG" 2>/dev/null || true
+        chmod 0640 "$LOG" 2>/dev/null || true
+        echo "  以低权限用户 $RUN_AS 运行"
+        nohup runuser -u "$RUN_AS" -- "$BIN" -config "$CONFIG" $INSECURE >>"$LOG" 2>&1 &
+    else
+        if [ -n "${RUN_AS:-}" ] && [ "$RUN_AS" != "root" ]; then
+            echo "⚠ 无法以 $RUN_AS 运行（缺 runuser 或用户不存在），改为 root" >&2
+        fi
+        nohup "$BIN" -config "$CONFIG" $INSECURE >>"$LOG" 2>&1 &
+    fi
+}
+
 # 临时目录放在 root 专属目录：/tmp 常被 noexec 挂载，且可预测的
 # 文件名会给本地用户留下抢占路径（BIN_DIR 自更新场景可能归 Agent 用户）。
 WORK=$(mktemp -d /root/.rollcall-install.XXXXXX 2>/dev/null \
@@ -156,12 +255,40 @@ WORK=$(mktemp -d /root/.rollcall-install.XXXXXX 2>/dev/null \
 TMP="$WORK/agent"
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 echo "→ 下载 Agent ($ARCH)"
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$SERVER/agent/download?arch=$ARCH" -o "$TMP"
-elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$TMP" "$SERVER/agent/download?arch=$ARCH"
+fetch_file "$SERVER/agent/download?arch=$ARCH" "$TMP" || {
+    echo "下载失败: $SERVER/agent/download?arch=$ARCH" >&2
+    exit 1
+}
+# 校验和由同一控制端提供：能发现传输截断/代理缓存错误，
+# 也能避免把错误页当成二进制装上去（身份校验仍然保留在下面）。
+EXPECTED=$(fetch_text "$SERVER/agent/download.sha256?arch=$ARCH") || {
+    echo "无法获取二进制校验值，已放弃安装" >&2
+    exit 1
+}
+EXPECTED=$(printf '%%s' "$EXPECTED" | tr -d ' \r\n' | tr 'A-F' 'a-f')
+case "$EXPECTED" in
+    *[!0-9a-f]*|'')
+        echo "校验值格式无效，已放弃安装" >&2
+        exit 1
+        ;;
+esac
+[ "${#EXPECTED}" -eq 64 ] || {
+    echo "校验值长度无效，已放弃安装" >&2
+    exit 1
+}
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$TMP" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$TMP" | awk '{print $1}')
+elif command -v openssl >/dev/null 2>&1; then
+    ACTUAL=$(openssl dgst -sha256 "$TMP" | awk '{print $NF}')
 else
-    echo "需要 curl 或 wget" >&2; exit 1
+    echo "缺少 sha256sum / shasum / openssl，无法校验下载的二进制" >&2
+    exit 1
+fi
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "SHA-256 不匹配（期望 $EXPECTED，实际 $ACTUAL），已放弃安装" >&2
+    exit 1
 fi
 chmod 0755 "$TMP"
 
@@ -192,6 +319,10 @@ if [ "$UPGRADE" = "1" ]; then
             exit 1
             ;;
     esac
+    # 记录当前运行身份：无 systemd 的回退模式重启时要沿用，
+    # 不能因为升级把低权限进程变成 root 常驻。
+    RUN_AS=$(agent_run_user)
+    [ -n "$RUN_AS" ] || RUN_AS=$(agent_user_from_config)
     # 保留原属主：自更新目录通常归 rollcall-agent，换成 root 会让下次自更新失效。
     OWNER=$(stat -c '%%u:%%g' "$BIN" 2>/dev/null || true)
     # 先写随机目录再 rename：避免 BIN.prev 被预置成指向敏感文件的软链接。
@@ -225,7 +356,25 @@ if [ "$UPGRADE" = "1" ]; then
             exit 1
         fi
     else
-        echo "⚠ 未检测到 rollcall-agent.service，请手动重启 Agent 使新版本生效"
+        # 无 systemd 的容器/LXC：升级同样要重启，否则新二进制永远不会生效。
+        echo "→ 未检测到 rollcall-agent.service，重启后台进程"
+        stop_agent
+        start_agent_bg
+        sleep 2
+        if [ -n "$(agent_pids)" ]; then
+            echo "✔ Agent 已以新版本重启，约 30 秒内可在面板看到"
+        else
+            echo "✘ 新版本启动失败，正在回滚…" >&2
+            mv -f "$BIN.prev" "$BIN"
+            start_agent_bg
+            sleep 2
+            if [ -n "$(agent_pids)" ]; then
+                echo "✔ 已回滚到 $OLD_VER" >&2
+            else
+                echo "✘ 回滚后仍未启动，查看 /var/log/rollcall-agent.log" >&2
+            fi
+            exit 1
+        fi
     fi
     exit 0
 fi
@@ -275,7 +424,8 @@ fi
 
 cat > /etc/systemd/system/rollcall-agent.service <<UNIT
 [Unit]
-Description=Rollcall Agent (fleet monitoring)
+Description=Rollcall Agent (read-only metrics reporter)
+Documentation=https://github.com/motao/rollcall
 After=network-online.target
 Wants=network-online.target
 
@@ -287,18 +437,22 @@ Restart=always
 RestartSec=10s
 ReadOnlyPaths=/proc
 
-# 采集器只读：无特权、只读文件系统、禁写可执行内存
+# 采集器只读：无特权、只读文件系统、禁写可执行内存。
+# 与 deploy/rollcall-agent.service 保持逐项一致（含 PrivateDevices/
+# RestrictNamespaces），否则两种安装方式的安全姿态会悄悄分叉。
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-MemoryDenyWriteExecute=true
+PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target
@@ -309,36 +463,16 @@ UNIT
 # 仅看 systemctl 是否存在不够：容器里常有客户端但没有 PID 1 的 systemd。
 if [ ! -d /run/systemd/system ] || ! command -v systemctl >/dev/null 2>&1; then
     echo "→ 未检测到运行中的 systemd，改为后台常驻"
-    LOG=/var/log/rollcall-agent.log
-    RUN_USER=""
-    if [ -n "$AS_USER" ] && command -v runuser >/dev/null 2>&1; then
-        RUN_USER=$AS_USER
-        : > "$LOG"
-        chown "$AS_USER:$AS_USER" "$LOG" 2>/dev/null || chown "$AS_USER" "$LOG" 2>/dev/null || true
-        chmod 0640 "$LOG" 2>/dev/null || true
-        echo "  以低权限用户 $AS_USER 运行"
-    elif [ -n "$AS_USER" ]; then
-        echo "⚠ 未找到 runuser，无法降权到 $AS_USER，Agent 将以 root 运行" >&2
-    fi
-    # 重复安装时先停掉旧进程，否则 pgrep 会匹配到旧实例，
-    # 新进程启动失败也会被误报为成功。
-    if pgrep -f "$BIN" >/dev/null 2>&1; then
-        echo "→ 停止已在运行的 Agent"
-        pkill -f "$BIN" 2>/dev/null || true
-        sleep 1
-    fi
+    RUN_AS=$AS_USER
     # 与 systemd 分支保持同样的最小权限：有专用用户就不要 root 常驻。
-    if [ -n "$RUN_USER" ]; then
-        nohup runuser -u "$RUN_USER" -- "$BIN" -config /etc/rollcall/agent.json$INSECURE >"$LOG" 2>&1 &
-    else
-        nohup "$BIN" -config /etc/rollcall/agent.json$INSECURE >"$LOG" 2>&1 &
-    fi
+    stop_agent
+    start_agent_bg
     sleep 2
-    if pgrep -f "$BIN" >/dev/null 2>&1; then
+    if [ -n "$(agent_pids)" ]; then
         echo "✔ Agent 已在后台运行，约 30 秒内可在面板看到该节点"
-        echo "  日志: $LOG（无 systemd，开机自启需自行配置）"
+        echo "  日志: /var/log/rollcall-agent.log（无 systemd，开机自启需自行配置）"
     else
-        echo "✘ Agent 启动失败，查看 $LOG" >&2
+        echo "✘ Agent 启动失败，查看 /var/log/rollcall-agent.log" >&2
         exit 1
     fi
     exit 0
@@ -379,9 +513,7 @@ func (s *Server) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	arch := r.URL.Query().Get("arch")
-	switch arch {
-	case "amd64", "arm64", "arm", "386":
-	default:
+	if !validAgentArch(arch) {
 		fail(w, http.StatusBadRequest, "arch 必须是 amd64/arm64/arm/386")
 		return
 	}
@@ -407,6 +539,48 @@ func (s *Server) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeContent(w, r, name, fi.ModTime(), f)
+}
+
+func validAgentArch(arch string) bool {
+	switch arch {
+	case "amd64", "arm64", "arm", "386":
+		return true
+	default:
+		return false
+	}
+}
+
+// handleAgentChecksum 返回分发目录中 Agent 二进制的 SHA-256（小写十六进制）。
+// 安装脚本下载后校验，避免截断文件或代理错误页被当作 Agent 安装。
+func (s *Server) handleAgentChecksum(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	arch := r.URL.Query().Get("arch")
+	if !validAgentArch(arch) {
+		fail(w, http.StatusBadRequest, "arch 必须是 amd64/arm64/arm/386")
+		return
+	}
+	if s.agentDir == "" {
+		fail(w, http.StatusNotFound, "服务端未启用 Agent 分发（启动参数 -agent-dir 未配置）")
+		return
+	}
+	name := "rollcall-agent-linux-" + arch
+	f, err := os.Open(filepath.Join(s.agentDir, name))
+	if err != nil {
+		fail(w, http.StatusNotFound, "该架构的 Agent 尚未放到分发目录: "+name)
+		return
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		fail(w, http.StatusInternalServerError, "读取 Agent 失败")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = io.WriteString(w, hex.EncodeToString(h.Sum(nil))+"\n")
 }
 
 // requestBaseURL 推断控制端的外部地址（scheme + host）。

@@ -10,10 +10,25 @@
 |---|---|---|
 | 服务端二进制 | `/opt/rollcall/rollcall-server` | systemd 单元 `rollcall-server.service` |
 | 服务端数据 | `/opt/rollcall/data` | `state.json`（主快照）、`history.json`（分层历史）、`admin.token`（自动化令牌）、`admin-user.json`（面板账号 PBKDF2 哈希）、`session.key`（会话签名密钥），权限 0600 |
+| 初始密码 | `/opt/rollcall/data/initial-admin-password.txt` | 仅在未提供初始密码时生成（0600）；首次成功登录后自动删除 |
 | 服务端单元 | `/etc/systemd/system/rollcall-server.service` | 以 `rollcall` 用户运行 |
 | Agent 二进制 | `/usr/local/bin/rollcall-agent` | systemd 单元 `rollcall-agent.service` |
 | Agent 配置 | `/etc/rollcall/agent.json` | `root:rollcall-agent 0640` |
 | Agent 单元 | `/etc/systemd/system/rollcall-agent.service` | 以 `rollcall-agent` 用户运行 |
+| Agent 分发目录 | `/opt/rollcall/agent` | 仅启用 `-agent-dir` 时存在；含 amd64/arm64/arm/386 二进制，供一键安装与升级下载 |
+
+### 容量基线
+
+| 规模 | CPU | 内存 | 磁盘 | 说明 |
+|---|---|---|---|---|
+| ≤10 节点 | 1 vCPU | 512MB | 2GB | 起步配置 |
+| ~40 节点 | 1 vCPU | 1.5–2GB | 5GB | 24h 环跑满后实测 RSS 约 361MB，快照期间还需峰值余量 |
+| >40 节点 / 更短 interval | 2 vCPU | 4GB+ | 按实测 | 先用满环数据压测，再评估拆分实例 |
+
+内存必须按**满环稳态**估算：空环会低估一个数量级，原始点约 5–9MB/节点。
+磁盘占用主要由 `history.json` 与快照频率决定，长期运行建议给 `data/` 单独挂载数据盘，
+并监控 `data/` 体积与 `/readyz`（数据目录不可写会直接返回 503）。
+仓库内 `bench/bench_steady.py` 可复现完整数据，README「十、容量基线」有 Linux 实测表。
 
 查看状态与日志：
 
@@ -29,11 +44,16 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.10.3
+make linux VERSION=v1.10.4
+(cd dist && sha256sum -c SHA256SUMS)
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
 ```
+
+构建统一带 `-trimpath -buildvcs=false`：同一份源码 + 相同 Go 版本，在 git 工作区、
+tag 克隆或普通目录中构建出的二进制字节一致。发布时同时记录版本号、Go 版本与
+`dist/SHA256SUMS`，便于核对线上文件是否来自该次构建。
 
 升级步骤（务必先备份）：
 
@@ -51,7 +71,7 @@ sudo install -m 0755 rollcall-server /opt/rollcall/rollcall-server
 sudo install -m 0644 deploy/rollcall-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl start rollcall-server
-curl -fsS http://127.0.0.1:19080/healthz
+curl -fsS http://127.0.0.1:19080/readyz
 /opt/rollcall/rollcall-server -version
 ```
 
@@ -67,14 +87,15 @@ sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file /tmp/rollcall-server.new \
   --sha256 "$(sha256sum /tmp/rollcall-server.new | awk '{print $1}')" \
   --service rollcall-server \
-  --health http://127.0.0.1:19080/healthz
+  --health http://127.0.0.1:19080/readyz
 
 sudo sh deploy/rollcall-server-upgrade.sh rollback \
-  --service rollcall-server --health http://127.0.0.1:19080/healthz
+  --service rollcall-server --health http://127.0.0.1:19080/readyz
 ```
 
 - `--sha256` 为必填；同时检查 ELF 魔数与架构，拒绝把脚本/损坏文件装成服务端
-- 当前二进制保存为 `rollcall-server.prev`；健康检查最多等待 20 秒
+- 当前二进制保存为 `rollcall-server.prev`；最多等待 20 秒，要求 `/readyz`
+  返回 200 且版本号与目标二进制一致（防止 systemd 仍拉起旧文件）
 - 新版本启动失败时自动换回 `.prev` 并再次重启，脚本返回非 0
 - 只操作二进制与 systemd 服务，不触碰 unit 文件和数据目录；
   如果新版本已经写入更高 schema，回滚前仍需恢复数据备份
@@ -91,8 +112,10 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade /opt/rollcall-agent/rollcall-agent
 ```
 
-脚本会按架构下载、在临时路径验证可执行性、保留原属主，把旧二进制备份为
-`<二进制>.prev`，重启 `rollcall-agent`；若重启后未处于 active 状态会自动回滚并返回非 0。
+脚本会按架构下载，校验服务端 `/agent/download.sha256` 返回的 SHA-256 与临时路径可执行性，
+保留原属主，把旧二进制备份为 `<二进制>.prev`，重启 `rollcall-agent`；若重启后未处于
+active 状态会自动回滚并返回非 0。没有 systemd 的容器会重启同一低权限用户的后台进程
+（日志 `/var/log/rollcall-agent.log`），启动失败同样自动回滚 `.prev`。
 
 手动回滚：
 
@@ -117,8 +140,8 @@ Agent 会在每次上报时通过 `X-Agent-Version` 请求头上报版本（兼�
 分发目录里的二进制不会随控制端自动更新。使用 `-agent-dir` 时，每个版本都要替换：
 
 ```bash
-sudo install -m 0755 dist/rollcall-agent-linux-amd64 \
-                        dist/rollcall-agent-linux-arm64 /opt/rollcall/agent/
+sudo install -m 0755 dist/rollcall-agent-linux-{amd64,arm64,arm,386} \
+                        /opt/rollcall/agent/
 ```
 
 ### 快照版本与回滚
@@ -161,9 +184,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.10.3
-./rollsign sign -key /root/rollcall-update.key -version v1.10.3 \
-  -base-url https://updates.example.com/agent/v1.10.3 \
+make linux VERSION=v1.10.4
+./rollsign sign -key /root/rollcall-update.key -version v1.10.4 \
+  -base-url https://updates.example.com/agent/v1.10.4 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json
@@ -369,9 +392,13 @@ ROLLCALL_ADMIN_PASSWORD='至少 12 位的强密码'
 # 2) 启动参数
 -admin-user admin -admin-email ops@example.com -admin-password '至少 12 位的强密码'
 
-# 3) 都不提供：服务端生成 24 位随机密码，仅在首次启动的日志中打印一次
-journalctl -u rollcall-server | grep '面板管理员已创建'
+# 3) 都不提供：服务端生成 24 位随机密码，写入 data/initial-admin-password.txt（0600）
+sudo cat /opt/rollcall/data/initial-admin-password.txt
 ```
+
+方式 3 的日志只记录密码文件路径，不会把密码写进 journal。首次登录成功后
+服务端会自动删除该文件；如果登录前发现文件为空或不存在，请确认服务端是否已经
+创建过管理员账号（环境变量只在首次创建时生效）。
 
 重置密码（服务停止时执行；命令重置后立即退出，不会启动服务）：
 
@@ -648,7 +675,8 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
 健康检查与最小验证：
 
 ```bash
-curl -fsS http://127.0.0.1:19080/healthz          # ok
+curl -fsS http://127.0.0.1:19080/healthz          # ok（只要进程能响应）
+curl -fsS http://127.0.0.1:19080/readyz           # ready（存储/磁盘/快照均正常）
 curl -fsS http://127.0.0.1:19080/api/status | head # 公开状态数据
 curl -fsS http://127.0.0.1:19080/metrics \
   -H "X-Admin-Token: $(sudo cat /opt/rollcall/data/admin.token)" | head
@@ -660,10 +688,11 @@ curl -fsS http://127.0.0.1:19080/metrics \
 
 ## 10. 上线后检查清单
 
-- [ ] `rollcall-server -version` / `rollcall-agent -version` 与发布版本一致
+- [ ] `rollcall-server -version` / `rollcall-agent -version` 与发布版本一致，产物的 SHA-256 与发布记录一致
 - [ ] 面板节点列表的 Agent 版本与 `rollcall-agent -version` 一致，无意外「可升级」标记
-- [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`
-- [ ] `/healthz` 返回 `ok`，`/status` 可匿名访问且不含主机名/IP/价格
+- [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`；无 systemd 时确认 `runuser` 后台进程与日志
+- [ ] `/healthz` 返回 `ok`、`/readyz` 返回 200 且版本号与目标版本一致，`/status` 可匿名访问且不含主机名/IP/价格
+- [ ] 首次登录成功后 `data/initial-admin-password.txt` 已自动删除；`/etc/rollcall/server.env` 中不再保留明文密码
 - [ ] 目标节点在线，30–60 秒内有新采样
 - [ ] 可用用户名与邮箱分别登录面板；错误密码被拒绝；设置页修改账号/密码需当前密码，改后当前浏览器续签、其他设备旧会话失效；刷新与重启服务后登录态保持；退出后回到登录页
 - [ ] 管理令牌 API 与 `/metrics` 抓取仍可用，`data/admin.token` 权限为 0600
@@ -673,3 +702,34 @@ curl -fsS http://127.0.0.1:19080/metrics \
 - [ ] 如启用自更新：`update.manifestUrl` 为 HTTPS、公钥正确、二进制目录可写且 systemd 已放行
 - [ ] 如启用通知插件：目录与清单非全局可写，逐通道测试通过
 - [ ] 如修改主题：管理页与 `/status` 均按预期显示，重置后恢复默认
+
+---
+
+## 11. 卸载
+
+卸载前先备份 `data/`（账号、令牌、历史都在其中），并确认没有其他系统依赖该实例的 API。
+删除数据目录不可恢复。
+
+```bash
+# 控制端
+sudo systemctl disable --now rollcall-server
+sudo rm -f /etc/systemd/system/rollcall-server.service
+sudo rm -rf /etc/systemd/system/rollcall-server.service.d
+sudo systemctl daemon-reload
+sudo rm -rf /opt/rollcall                 # 确认备份完成后再执行
+sudo userdel rollcall 2>/dev/null || true
+```
+
+```bash
+# 被控端（每台节点）
+sudo systemctl disable --now rollcall-agent 2>/dev/null || true
+# 无 systemd 的容器改为：sudo pkill -f /usr/local/bin/rollcall-agent
+sudo rm -f /etc/systemd/system/rollcall-agent.service
+sudo rm -f /etc/systemd/system/rollcall-agent.service.d/*.conf
+sudo rm -f /usr/local/bin/rollcall-agent /usr/local/bin/rollcall-agent.prev
+sudo rm -f /etc/rollcall/agent.json /var/log/rollcall-agent.log
+sudo systemctl daemon-reload
+sudo userdel rollcall-agent 2>/dev/null || true
+```
+
+最后删除反向代理站点、DNS 记录，并在密码管理器/CI 中吊销不再使用的管理令牌。

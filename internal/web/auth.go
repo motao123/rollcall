@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -136,12 +138,26 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// IP|readonly / IP|admin 等作用域上，只清 authLogin 会让"重新登录"
 	// 无法解除那些封禁，用户登录成功却满屏 429（10 分钟内不可自愈）。
 	s.limiter.resetIP(ip)
+	s.clearInitialPassword()
 	log.Printf("面板登录成功 user=%s ip=%s", u.Username, ip)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"user":          u.PublicInfo(),
 		"expiresAt":     exp.Unix(),
 	})
+}
+
+// clearInitialPassword 删除首启落盘的随机密码。
+// 成功登录后该密码已被使用（或已被用户改掉），继续留在数据目录只会
+// 被备份、快照或误读的日志带走。删除失败不影响登录。
+func (s *Server) clearInitialPassword() {
+	if s.userPath == "" {
+		return
+	}
+	p := filepath.Join(filepath.Dir(s.userPath), auth.InitialPasswordFile)
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("删除初始密码文件失败: %v", err)
+	}
 }
 
 // handleAuthLogout 清除会话 Cookie，并吊销当前令牌。重复调用是幂等的。

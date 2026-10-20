@@ -37,8 +37,10 @@ VERSION_FLAG := -X 'github.com/motao/rollcall/internal/version.Version=$(VERSION
 # 交叉编译的统一参数（静态链接，无 CGO 依赖）
 LDFLAGS_CROSS := -s -w $(VERSION_FLAG)
 # $(1)=产物名  $(2)=命令目录  $(3)=架构
+# -buildvcs=false：不把 git 状态/提交号嵌进二进制，
+# 同一份源码与 VERSION 在任意机器上构建结果一致。
 define cross_build
-GOOS=linux GOARCH=$(3) CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS_CROSS)" \
+GOOS=linux GOARCH=$(3) CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS_CROSS)" \
 	-o dist/$(1)-linux-$(3) ./cmd/$(2)
 endef
 
@@ -47,13 +49,13 @@ endef
 all: server agent rollsign
 
 server:
-	go build -trimpath -ldflags "$(VERSION_FLAG)" -o $(BINARY_SERVER) ./cmd/server
+	go build -trimpath -buildvcs=false -ldflags "$(VERSION_FLAG)" -o $(BINARY_SERVER) ./cmd/server
 
 agent:
-	go build -trimpath -ldflags "$(VERSION_FLAG)" -o $(BINARY_AGENT) ./cmd/agent
+	go build -trimpath -buildvcs=false -ldflags "$(VERSION_FLAG)" -o $(BINARY_AGENT) ./cmd/agent
 
 rollsign:
-	go build -trimpath -ldflags "$(VERSION_FLAG)" -o $(BINARY_SIGN) ./cmd/rollsign
+	go build -trimpath -buildvcs=false -ldflags "$(VERSION_FLAG)" -o $(BINARY_SIGN) ./cmd/rollsign
 
 # 交叉编译到 Linux。
 # 先清空 dist：否则上一轮/其它目标的旧产物会混进发布包。
@@ -64,11 +66,19 @@ linux:
 	mkdir -p dist
 	$(call cross_build,rollcall-server,server,amd64)
 	$(call cross_build,rollcall-server,server,arm64)
+	$(call cross_build,rollcall-server,server,arm)
+	$(call cross_build,rollcall-server,server,386)
 	$(call cross_build,rollcall-agent,agent,amd64)
 	$(call cross_build,rollcall-agent,agent,arm64)
+	$(call cross_build,rollcall-agent,agent,arm)
+	$(call cross_build,rollcall-agent,agent,386)
 	$(call cross_build,rollsign,rollsign,amd64)
 	$(call cross_build,rollsign,rollsign,arm64)
+	$(call cross_build,rollsign,rollsign,arm)
+	$(call cross_build,rollsign,rollsign,386)
+	@cd dist && sha256sum rollcall-* > SHA256SUMS
 	@ls -lh dist/
+	@cat dist/SHA256SUMS
 
 # -demo 模式会忽略 -data 并改用临时目录，这里不再传 -data。
 demo: server

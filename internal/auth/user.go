@@ -24,6 +24,10 @@ const (
 	maxNameRunes = 32
 )
 
+// InitialPasswordFile 是首启随机密码在数据目录中的文件名。
+// 非交互启动时密码只能落盘一次；登录成功后服务端负责删除。
+const InitialPasswordFile = "initial-admin-password.txt"
+
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$`)
 
 // ErrPasswordMismatch 表示确认身份时提供的当前密码不正确。
