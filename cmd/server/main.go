@@ -414,6 +414,14 @@ func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProduce
 	}
 	ob.Stop()
 	saveErr := st.Save()
+	// 分片按 5 分钟节流，退出时必须强制刷一次：否则最近几分钟的历史
+	// （最多 5 分钟）会在正常重启/升级时丢失。
+	if err := st.FlushSeries(); err != nil {
+		log.Printf("退出前写入历史分片失败: %v", err)
+		if saveErr == nil {
+			saveErr = err
+		}
+	}
 	histErr := st.SaveHistory()
 	if histErr != nil {
 		log.Printf("退出前保存历史失败: %v", histErr)

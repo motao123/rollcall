@@ -2175,9 +2175,10 @@ function healthBody(h) {
         ${seg('JSON', s.marshalMs, 'var(--accent-2)')}
         ${seg('gzip', s.encodeMs, 'var(--ok)')}
         ${seg('写盘', s.writeMs, 'var(--fg-3)')}
+        ${Number(s.seriesMs) > 0 ? seg('历史分片', s.seriesMs, 'var(--crit)') : ''}
         <div class="field-hint" style="margin-top:8px">
-          每 60 秒一次；编码与压缩在锁外进行，只有深拷贝会短暂持有读锁。
-          上次成功：${Number(s.lastSuccessAgoSeconds) || 0} 秒前。
+          配置与当前态每 60 秒一次，历史分片每 5 分钟一次（各自独立计费）；
+          编码与压缩都在锁外。上次成功：${Number(s.lastSuccessAgoSeconds) || 0} 秒前。
         </div>
       </div>
     </div>`;

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -125,21 +126,27 @@ func TestSnapshotIsGzip(t *testing.T) {
 	}
 }
 
-// TestLoadLegacyPlainSnapshot 保证升级兼容：旧版本写出的明文 JSON 仍可读取。
+// TestLoadLegacyPlainSnapshot 保证升级兼容：v1.11 及更早版本写出的
+// 明文 JSON（series 内嵌在 state.json 里）仍可读取，并会在下一次 Save
+// 时迁移成 data/series 分片。
 func TestLoadLegacyPlainSnapshot(t *testing.T) {
-	oldDir := t.TempDir()
-	st := New(oldDir)
-	st.UpsertNode(&model.Node{ID: "n_old", Name: "旧节点", Token: "old-token"})
-	st.AddMetrics("n_old", model.HostInfo{Hostname: "h"}, model.Metrics{TS: 1000, CPUPct: 1})
-	if err := st.Save(); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
 	newDir := t.TempDir()
-	plain := readSnapshotFile(t, filepath.Join(oldDir, "state.json"))
-	if err := os.WriteFile(filepath.Join(newDir, "state.json"), plain, 0o600); err != nil {
+	// 手工构造旧格式：明文、series 内嵌。
+	// 不能用当前 Save 产出 —— 它已经把 series 拆到分片里了。
+	snap := snapshot{
+		SchemaVersion: SnapshotSchemaVersion,
+		Nodes:         map[string]*model.Node{"n_old": {ID: "n_old", Name: "旧节点"}},
+		Tokens:        map[string]string{"n_old": "old-token"},
+		Series:        map[string][]model.Metrics{"n_old": {{TS: 1000, CPUPct: 1.5}}},
+	}
+	raw, err := json.Marshal(&snap)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(newDir, "state.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	re := New(newDir)
 	if err := re.LoadErr(); err != nil {
 		t.Fatalf("明文快照应可读取: %v", err)
@@ -150,6 +157,22 @@ func TestLoadLegacyPlainSnapshot(t *testing.T) {
 	}
 	if _, _, ok := re.Latest("n_old"); !ok {
 		t.Fatal("明文快照时序丢失")
+	}
+
+	// 迁移：Save 之后分片应出现，且主快照里不再带 series。
+	if err := re.Save(); err != nil {
+		t.Fatalf("迁移保存失败: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(newDir, "series", "n_old.json.gz")); err != nil {
+		t.Fatalf("旧格式升级后应写出历史分片: %v", err)
+	}
+	plain := readSnapshotFile(t, filepath.Join(newDir, "state.json"))
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &doc); err != nil {
+		t.Fatalf("解析迁移后的快照失败: %v", err)
+	}
+	if raw, ok := doc["series"]; ok && string(raw) != "null" && string(raw) != "{}" {
+		t.Fatalf("迁移后主快照不应再内嵌 series，实际: %.60s", raw)
 	}
 }
 

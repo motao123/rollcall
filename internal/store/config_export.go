@@ -201,6 +201,18 @@ func (s *Store) ImportConfig(raw []byte) error {
 		}
 		s.settings[k] = v
 	}
+	// 导入会重建节点与 series：把分片写状态整体重置，
+	// 让下一次 Save 把**全部**节点的历史重写到 data/series 下。
+	// 不重置的话，磁盘上残留的分片会被当成"已保存"，
+	// 导入后历史图会显示备份里的旧数据、甚至已删除节点的数据。
+	s.seriesSeq = make(map[string]uint64, len(s.series))
+	s.seriesSaved = make(map[string]uint64, len(s.series))
+	for id, r := range s.series {
+		if r != nil && r.n > 0 {
+			s.seriesSeq[id] = 1
+		}
+	}
+
 	// 清理不再存在的节点运行态数据，避免导出→导入后旧节点幽灵般残留。
 	// 遍历并集：series 在 UpsertNode 时就建 Ring，expirySent 也可能先于 hosts
 	// 存在，只以 hosts 为遍历源会漏掉这些孤儿数据。

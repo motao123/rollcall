@@ -141,6 +141,15 @@ type Store struct {
 	// 只在内存里：在途窗口是毫秒级，重启后不可能还有旧上报在路上。
 	dropped map[string]int64
 
+	// 历史分片（data/series/<id>.json.gz）的增量写状态。
+	// writeSeq 是全局单调写序号；seriesSeq[id] 记录该节点最后一次写入的序号，
+	// seriesSaved[id] 记录已成功落盘的序号。Save 只写 seq > saved 的节点 ——
+	// 30 秒上报 + 60 秒保存下，每次通常只有一半节点需要写。
+	writeSeq     uint64
+	seriesSeq    map[string]uint64
+	seriesSaved  map[string]uint64
+	seriesLastAt time.Time
+
 	// spMu 串行化状态页列表（维护窗口/人工事件）的读-改-写。
 	// settings 的读写各自加锁，但「读列表 → 修改 → 写回」跨了两次加锁，
 	// 两个并发管理员操作会互相覆盖。
@@ -184,6 +193,13 @@ type SaveStats struct {
 	LastEncodeSeconds  float64
 	LastWriteSeconds   float64
 	LastBytes          int64
+
+	// 历史分片：每次快照写多少个文件、多少字节、耗时多少。
+	// 重构成分片后，主快照体积与耗时大幅下降，这部分成为新的主要成本，
+	// 必须单独可观测（否则优化无处验证）。
+	LastSeriesSeconds float64
+	LastSeriesBytes   int64
+	LastSeriesFiles   int
 }
 
 // New 创建并尝试从磁盘恢复状态。
@@ -206,6 +222,8 @@ func New(dataDir string) *Store {
 		expirySent:   map[string]string{},
 		history:      map[string]*nodeHistory{},
 		dropped:      map[string]int64{},
+		seriesSeq:    map[string]uint64{},
+		seriesSaved:  map[string]uint64{},
 		path:         filepath.Join(dataDir, "state.json"),
 		historyPath:  filepath.Join(dataDir, "history.json"),
 		saveReq:      make(chan struct{}, 1),
@@ -216,7 +234,23 @@ func New(dataDir string) *Store {
 	}
 	s.loadErr = s.load()
 	if s.loadErr == nil {
+		s.loadErr = s.loadSeriesShards()
+	}
+	if s.loadErr == nil {
 		s.loadErr = s.loadHistory()
+	}
+	if s.loadErr == nil {
+		// 从旧格式（series 内嵌在 state.json）升级上来时，主快照里已有的点
+		// 还没有对应的分片文件：把它们标脏，让第一次 Save 完成迁移。
+		// 已经读过分片的节点在 loadSeriesShards 里把 seq/saved 都设成 1，
+		// 因此不会被重复写一遍。
+		s.mu.Lock()
+		for id := range s.series {
+			if _, ok := s.seriesSeq[id]; !ok {
+				s.seriesSeq[id] = 1
+			}
+		}
+		s.mu.Unlock()
 	}
 	return s
 }
@@ -449,13 +483,14 @@ func (s *Store) Save() (err error) {
 	s.mu.RLock()
 	copyStart := time.Now()
 	snap := snapshot{
-		SchemaVersion:  SnapshotSchemaVersion,
-		Nodes:          make(map[string]*model.Node, len(s.nodes)),
-		Hosts:          make(map[string]model.HostInfo, len(s.hosts)),
-		Services:       make(map[string]*model.Service, len(s.services)),
-		Rules:          make(map[string]*model.AlertRule, len(s.rules)),
-		Alerts:         make([]*model.Alert, 0, len(s.alerts)),
-		Series:         make(map[string][]model.Metrics, len(s.series)),
+		SchemaVersion: SnapshotSchemaVersion,
+		Nodes:         make(map[string]*model.Node, len(s.nodes)),
+		Hosts:         make(map[string]model.HostInfo, len(s.hosts)),
+		Services:      make(map[string]*model.Service, len(s.services)),
+		Rules:         make(map[string]*model.AlertRule, len(s.rules)),
+		Alerts:        make([]*model.Alert, 0, len(s.alerts)),
+		// ★ Series 刻意留空：历史点走 data/series/<id>.json.gz 分片，
+		// 只有读取旧版本快照时才需要这个字段（见 load）。
 		SvcRes:         make(map[string][]model.Metrics, len(s.svcRes)),
 		Tokens:         make(map[string]string, len(s.nodes)),
 		Settings:       make(map[string]string, len(s.settings)),
@@ -528,14 +563,38 @@ func (s *Store) Save() (err error) {
 	for k, v := range s.expirySent {
 		snap.ExpirySent[k] = v
 	}
-	for k, r := range s.series {
-		snap.Series[k] = r.Slice()
-	}
 	for k, r := range s.svcRes {
 		snap.SvcRes[k] = r.Slice()
 	}
+	// 历史分片按**独立节奏**写（默认 5 分钟），不跟随每次 Save。
+	//
+	// 原因：30 秒上报 + 60 秒保存的组合下，每次保存时几乎所有节点都变脏，
+	// "增量"起不到作用；而 gzip 压缩 30MB 历史的总成本一分不少（实测
+	// 40 台 257ms，比整份快照的 229ms 还多了一点文件开销）。
+	// 把分片降到 5 分钟写一次后：60 秒的保存只剩 3KB 主快照（约 1ms），
+	// 每 5 分钟才出现一次几十到几百毫秒的尖峰。
+	// 代价是崩溃最多丢 5 分钟历史（配置与当前态不丢），对监控完全可接受。
+	now := time.Now()
+	var shardTasks []shardTask
+	if s.seriesLastAt.IsZero() || now.Sub(s.seriesLastAt) >= seriesMinInterval {
+		shardTasks = s.collectShardTasks()
+	}
 	s.mu.RUnlock()
 	tm.Copy = time.Since(copyStart)
+
+	// 先写历史分片，再写主快照。
+	// 顺序很重要：主快照一旦写成功就代表"这一版状态已落盘"，
+	// 若它先于分片落盘而进程崩溃，重启后会读到新配置 + 旧历史（少一段），
+	// 反过来则是旧配置 + 新历史（历史多一段），后者危害更小。
+	st2, shardErr := s.flushSeriesShards(shardTasks, now.Unix())
+	tm.Series, tm.SeriesBytes, tm.SeriesFiles = st2.Series, st2.SeriesBytes, st2.SeriesFiles
+	if shardErr != nil {
+		// 单个分片失败不阻断主快照：主快照是配置的唯一副本。
+		// 失败的分片 saved < seq，下一次 Save 会自动重试。
+		log.Printf("保存历史分片部分失败（下一次重试）: %v", shardErr)
+	} else if len(shardTasks) > 0 {
+		s.seriesLastAt = now
+	}
 
 	marshalStart := time.Now()
 	raw, err := json.Marshal(&snap)
@@ -561,16 +620,26 @@ func (s *Store) Save() (err error) {
 	err = os.Rename(tmp, s.path)
 	tm.Write = time.Since(writeStart)
 	tm.Bytes = int64(len(enc))
-	return err
+	if err != nil {
+		return err
+	}
+	// 主快照成功后再清理：万一清理逻辑有 bug，也不会让"配置"先丢。
+	if n := s.pruneSeriesShards(); n > 0 {
+		log.Printf("清理已删除节点的历史分片 %d 个", n)
+	}
+	return nil
 }
 
 // saveTiming 记录一次快照各阶段的耗时，用于定位瓶颈。
 type saveTiming struct {
-	Copy    time.Duration // 锁内深拷贝
-	Marshal time.Duration // JSON 编码
-	Encode  time.Duration // gzip 压缩到内存
-	Write   time.Duration // 写临时文件 + rename
-	Bytes   int64
+	Copy        time.Duration // 锁内深拷贝
+	Marshal     time.Duration // JSON 编码
+	Encode      time.Duration // gzip 压缩到内存
+	Write       time.Duration // 写临时文件 + rename
+	Bytes       int64
+	Series      time.Duration // 写历史分片
+	SeriesBytes int64
+	SeriesFiles int
 }
 
 // recordSave 汇总落盘耗时，供 /metrics 与运维排查使用。
@@ -589,6 +658,9 @@ func (s *Store) recordSave(d time.Duration, tm saveTiming, err error) {
 	s.saveStats.LastEncodeSeconds = tm.Encode.Seconds()
 	s.saveStats.LastWriteSeconds = tm.Write.Seconds()
 	s.saveStats.LastBytes = tm.Bytes
+	s.saveStats.LastSeriesSeconds = tm.Series.Seconds()
+	s.saveStats.LastSeriesBytes = tm.SeriesBytes
+	s.saveStats.LastSeriesFiles = tm.SeriesFiles
 	s.saveStats.LastSuccess = time.Now().Unix()
 }
 
@@ -748,6 +820,8 @@ func (s *Store) DeleteNode(id string) bool {
 	delete(s.hosts, id)
 	delete(s.traffic, id)
 	delete(s.expirySent, id)
+	delete(s.seriesSeq, id)
+	delete(s.seriesSaved, id)
 	// 墓碑：拦住删除瞬间仍在途的那次上报（见 AddMetrics）。
 	s.markDroppedLocked(id)
 	if _, ok := s.history[id]; ok {
@@ -770,6 +844,11 @@ func (s *Store) DeleteNode(id string) bool {
 		}
 	}
 	s.mu.Unlock()
+	// 分片文件在锁外删除：盘上 IO 不该占着写锁。
+	// 删不掉也不致命：Save 末尾的 pruneSeriesShards 会再兜一次。
+	if err := os.Remove(s.shardPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("删除节点 %s 的历史分片失败（稍后清理）: %v", id, err)
+	}
 	s.RequestSave()
 	return true
 }
@@ -839,6 +918,36 @@ func cloneRule(r *model.AlertRule) model.AlertRule {
 	return cp
 }
 
+// seriesMinInterval 是历史分片的最小写间隔。
+//
+// 它决定了"崩溃最多丢多少历史"（配置与当前态从不丢）。
+// 调小=历史更及时但写放大；调大=更省 IO 但丢得更多。
+const seriesMinInterval = 5 * time.Minute
+
+// FlushSeries 强制把脏的历史分片写盘，忽略最小间隔。
+// 调用时机：进程正常退出、以及任何"希望历史立刻完整"的操作。
+func (s *Store) FlushSeries() error {
+	// 与 Save 共用 saveMu：避免两个分片写并发 rename 同一个文件。
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	s.mu.RLock()
+	tasks := s.collectShardTasks()
+	s.mu.RUnlock()
+	if len(tasks) == 0 {
+		return nil
+	}
+	now := time.Now()
+	tm, err := s.flushSeriesShards(tasks, now.Unix())
+	if err != nil {
+		return err
+	}
+	s.seriesLastAt = now
+	log.Printf("退出前写入历史分片 %d 个（%.1f KB，%.0f ms）",
+		tm.SeriesFiles, float64(tm.SeriesBytes)/1024, tm.Series.Seconds()*1000)
+	return nil
+}
+
 // ---------- 指标 ----------
 
 func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) {
@@ -870,10 +979,17 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 		// 若再聚合一次会造成平均值与流量重复累计。
 		if m.TS <= prev.TS {
 			r.Add(m)
+			// ★ 覆盖也算"变了"：不标脏的话这次更新不会进分片，
+			// 重启后历史里还是旧值（表现为"最后几个点回退"）。
+			s.writeSeq++
+			s.seriesSeq[nodeID] = s.writeSeq
 			return
 		}
 	}
 	r.Add(m)
+	// 标记该节点的历史分片需要重写（Save 只写 seq > saved 的节点）。
+	s.writeSeq++
+	s.seriesSeq[nodeID] = s.writeSeq
 	s.addHistoryLocked(nodeID, m, &prev, hasPrev)
 	s.updateTrafficLocked(nodeID, m)
 }

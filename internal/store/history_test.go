@@ -249,6 +249,9 @@ func TestHistoryPersistsAndReplays(t *testing.T) {
 func TestHistoryRebuildsFromRaw(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
+	// 历史分片按节点归属加载：没有节点记录的分片会被当作孤儿跳过，
+	// 所以这里必须先登记节点（真实上报路径也一定先解析出节点）。
+	s.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
 	for i := 0; i < 20; i++ {
 		addHistSample(s, "n1", i)
 	}
@@ -274,6 +277,7 @@ func TestHistoryRebuildsFromRaw(t *testing.T) {
 func TestHistoryCorruptFileQuarantined(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
+	s.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
 	for i := 0; i < 20; i++ {
 		addHistSample(s, "n1", i)
 	}

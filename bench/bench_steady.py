@@ -162,12 +162,57 @@ def build_state(binary, nodes, workdir, port):
 
     doc["nodes"] = nodes_map
     doc["tokens"] = tokens
-    doc["series"] = series
+    # v1.12 起 series 拆成 data/series/<id>.json.gz 分片；主快照不再内嵌。
+    # 这里必须按新布局构造，否则测出来的是"老格式的快照耗时"，没有意义。
+    doc.pop("series", None)
     doc["hosts"] = {nid: {"hostname": "bench-%04d" % i, "os": "Ubuntu 24.04", "kernel": "6.8.0",
                           "arch": "amd64"} for i, nid in enumerate(nodes_map)}
     save_state(path, doc)
-    return path
 
+    shard_dir = os.path.join(workdir, "series")
+    os.makedirs(shard_dir, exist_ok=True)
+    shard_bytes = 0
+    for nid, pts in series.items():
+        shard = {"schemaVersion": 1, "nodeId": nid, "savedAt": now, "points": pts}
+        raw = json.dumps(shard, separators=(",", ":")).encode("utf-8")
+        sp = os.path.join(shard_dir, nid + ".json.gz")
+        # compresslevel=1 对应 Go 的 gzip.BestSpeed，保证与生产写出的体积可比
+        with gzip.open(sp, "wb", compresslevel=1) as f:
+            f.write(raw)
+        shard_bytes += os.path.getsize(sp)
+    return path, shard_bytes
+
+
+def dirty_and_measure_save(base, workdir, wait=70):
+    """让所有节点各产生一个新点，然后等一次自动保存，读分片写盘耗时。
+
+    只测主快照是不够的：分片架构下真正的成本在"写变脏的节点"。
+    这里制造"全部节点都脏"的最坏情况，等 60 秒自动保存周期跑完再读指标。
+    """
+    doc = load_state(os.path.join(workdir, "state.json"))
+    tokens = doc.get("tokens") or {}
+    op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    ok = 0
+    for nid, tok in tokens.items():
+        body = json.dumps({
+            "nodeId": nid,
+            "host": {"hostname": nid[-8:]},
+            "metrics": {"cpuPct": 30.0, "memUsed": 4 << 30, "memTotal": 8 << 30,
+                        "diskUsed": 20 << 30, "diskTotal": 100 << 30,
+                        "netRx": 1 << 20, "netTx": 1 << 20, "tcpConn": 10,
+                        "uptime": 3600, "procs": 100},
+        }).encode()
+        req = urllib.request.Request(base + "/api/report", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Node-Token", tok)
+        try:
+            op.open(req, timeout=10).read()
+            ok += 1
+        except Exception:
+            pass
+    print("  已注入 %d/%d 个节点的新数据，等待自动保存（%ds）…" % (ok, len(tokens), wait), flush=True)
+    time.sleep(wait)
+    return ok
 
 def http(base, token, path, timeout=15):
     r = urllib.request.Request(base + path)
@@ -181,9 +226,10 @@ def http(base, token, path, timeout=15):
         return e.code, e.read(), (time.perf_counter() - t0) * 1000
 
 
-def measure(binary, nodes, port, workdir, settle=75):
-    state_path = build_state(binary, nodes, workdir, port)
-    print("  填充后 state.json: %.1f MB" % (os.path.getsize(state_path) / 1048576), flush=True)
+def measure(binary, nodes, port, workdir, settle=75, save_probe=False):
+    state_path, shard_bytes = build_state(binary, nodes, workdir, port)
+    print("  填充后 state.json: %.2f MB + 历史分片 %.1f MB（%d 个）"
+          % (os.path.getsize(state_path) / 1048576, shard_bytes / 1048576, nodes), flush=True)
 
     proc = subprocess.Popen([binary, "-addr", "127.0.0.1:%d" % port, "-data", workdir],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -213,12 +259,18 @@ def measure(binary, nodes, port, workdir, settle=75):
         cpu1 = proc_cpu(proc.pid)
         elapsed = time.time() - t_start
 
+        if save_probe:
+            # 制造"全部节点都有新点"的最坏情况，等一次自动保存。
+            # 必须在读 /metrics 之前：读到的应当是这次全脏保存的指标。
+            dirty_and_measure_save(base, workdir)
+
         st, metrics, _ = http(base, token, "/metrics")
         save_total = save_dur = None
         phases = {}
         want = ("rollcall_save_copy_seconds", "rollcall_save_marshal_seconds",
-                "rollcall_save_encode_seconds", "rollcall_save_sync_seconds",
-                "rollcall_save_bytes")
+                "rollcall_save_encode_seconds", "rollcall_save_write_seconds",
+                "rollcall_save_series_seconds", "rollcall_save_series_bytes",
+                "rollcall_save_series_files", "rollcall_save_bytes")
         for line in metrics.decode("utf-8", "ignore").splitlines():
             if line.startswith("rollcall_save_total "):
                 save_total = float(line.split()[1])
@@ -241,7 +293,10 @@ def measure(binary, nodes, port, workdir, settle=75):
             "api_status_p50_ms": p(lat_status, 0.5), "api_status_p95_ms": p(lat_status, 0.95),
             "save_total": save_total,
             "save_duration_ms": round(save_dur * 1000, 1) if save_dur else None,
-            "save_phases_ms": {k: round(v * 1000, 1) if k != "bytes" else int(v)
+            # 秒→毫秒，但字节/文件数原样输出（之前只排除 "bytes"，
+            # 导致 series_bytes/series_files 被乘了 1000，看起来像 6.8GB）。
+            "save_phases_ms": {k: (int(v) if k.endswith(("bytes", "files"))
+                                   else round(v * 1000, 1))
                                for k, v in phases.items()},
         }
     finally:
@@ -262,13 +317,15 @@ def main():
     ap.add_argument("--nodes", type=int, nargs="+", default=[40, 100, 200])
     ap.add_argument("--port", type=int, default=9197)
     ap.add_argument("--settle", type=int, default=75)
+    ap.add_argument("--save-probe", action="store_true",
+                    help="注入一轮上报后等自动保存，测\"全部节点变脏\"时的分片写成本（+70s）")
     args = ap.parse_args()
 
     results = []
     for n in args.nodes:
         print("=== 稳态 %d 节点（每节点 %d 点）===" % (n, RING), flush=True)
         wd = os.path.join(os.environ.get("TEMP", "/tmp"), "rc-steady-%d" % n)
-        r = measure(args.binary, n, args.port, wd, args.settle)
+        r = measure(args.binary, n, args.port, wd, args.settle, args.save_probe)
         results.append(r)
         print(json.dumps(r, ensure_ascii=False), flush=True)
         shutil.rmtree(wd, ignore_errors=True)

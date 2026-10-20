@@ -220,12 +220,18 @@ func TestSaveRecordsPhaseTimings(t *testing.T) {
 	if st.LastBytes <= 0 {
 		t.Fatalf("快照体积未记录: %+v", st)
 	}
-	sum := st.LastCopySeconds + st.LastMarshalSeconds + st.LastEncodeSeconds + st.LastWriteSeconds
+	sum := st.LastCopySeconds + st.LastMarshalSeconds + st.LastEncodeSeconds + st.LastWriteSeconds + st.LastSeriesSeconds
 	if sum <= 0 {
 		t.Fatalf("分段耗时全为 0，指标未接线: %+v", st)
 	}
-	if st.LastMarshalSeconds <= 0 || st.LastEncodeSeconds <= 0 {
-		t.Fatalf("编码/压缩阶段耗时应大于 0: %+v", st)
+	// 主快照现在只含配置与当前态（几百字节到 1MB），编码耗时可能被舍入成 0；
+	// 真正的大头移到了历史分片，所以这里断言"分片阶段确实发生了"，
+	// 而不是硬要求 marshal 非 0。
+	if st.LastSeriesFiles == 0 || st.LastSeriesBytes == 0 {
+		t.Fatalf("历史分片阶段未记录（应写出至少一个分片）: %+v", st)
+	}
+	if st.LastSeriesSeconds <= 0 {
+		t.Fatalf("分片耗时未记录: %+v", st)
 	}
 	// 分段之和不应超过总耗时（总耗时还包含锁等待与 defer 开销）
 	if sum > st.LastDurationSeconds+0.05 {

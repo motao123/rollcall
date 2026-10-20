@@ -335,8 +335,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("rollcall_save_encode_seconds", nil, ss.LastEncodeSeconds)
 	help("rollcall_save_write_seconds", "Duration of the write+rename phase of the last successful save.", "gauge")
 	gauge("rollcall_save_write_seconds", nil, ss.LastWriteSeconds)
-	help("rollcall_save_bytes", "Size of the last compressed state snapshot in bytes.", "gauge")
+	help("rollcall_save_bytes", "Size of the last compressed state snapshot in bytes (config + current state only; history lives in series shards).", "gauge")
 	gauge("rollcall_save_bytes", nil, float64(ss.LastBytes))
+	help("rollcall_save_series_seconds", "Duration of writing history shards in the last successful save.", "gauge")
+	gauge("rollcall_save_series_seconds", nil, ss.LastSeriesSeconds)
+	help("rollcall_save_series_bytes", "Bytes written to history shards in the last successful save.", "gauge")
+	gauge("rollcall_save_series_bytes", nil, float64(ss.LastSeriesBytes))
+	help("rollcall_save_series_files", "Number of history shard files written in the last successful save (incremental: only dirty nodes).", "gauge")
+	gauge("rollcall_save_series_files", nil, float64(ss.LastSeriesFiles))
 
 	// 通知队列
 	ns := s.st.NotifyStats()
