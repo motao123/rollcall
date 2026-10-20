@@ -158,9 +158,17 @@ func parseDNSTarget(target string) (host, server string, err error) {
 			if _, _, e := net.SplitHostPort(server); e != nil {
 				server = net.JoinHostPort(server, "53")
 			}
-			if _, _, e := net.SplitHostPort(server); e != nil {
+			h, port, e := net.SplitHostPort(server)
+			if e != nil || h == "" {
 				return "", "", errors.New("DNS 服务器格式应为 host 或 host:port")
 			}
+			// SplitHostPort 只校验"形状"："" / 0 / 99999 都能通过，
+			// 到解析时才会静默失败（或者打到 0 端口）。这里校验数值范围。
+			n, perr := strconv.Atoi(port)
+			if perr != nil || n < 1 || n > 65535 {
+				return "", "", errors.New("DNS 服务器端口应在 1–65535 之间")
+			}
+			server = net.JoinHostPort(h, strconv.Itoa(n))
 		}
 	} else {
 		host = s

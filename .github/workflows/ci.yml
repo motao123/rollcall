@@ -34,7 +34,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.24.0"
 
       # tag 名可以合法包含 $ ( ) ` 与 / 等字符。VERSION 最终会进入链接器参数，
       # 先按白名单校验，避免任何形式的命令替换被带进构建；/ 在引用内无害。
@@ -80,7 +80,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.24.0"
 
       # store 的并发快照回归测试在 -race 下会显著变慢（约 2 分钟），
       # 单独成 job，避免拖慢常规 test 反馈。
@@ -100,11 +100,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 钉死补丁版本：发布产物要能和构建机上的可复现构建逐字节对齐，
-      # 用 "1.27.x" 会随 runner 上的最新补丁漂移。
+      # ★ 版本必须与 test/race 两个 job 完全一致（都钉死在 go.mod 的 1.24.0）。
+      # 曾出现 test/race 用 1.24.x、发布用 1.27.3：测试通过的代码由另一个
+      # 编译器出产物，等于没验证过发布的那一份。三处修改必须同步。
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.27.3"
+          go-version: "1.24.0"
 
       - name: build dist
         run: make linux VERSION="$VERSION"
@@ -131,7 +132,14 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } > /tmp/rollcall-notes.md
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "Rollcall $GITHUB_REF_NAME" \
-            --notes-file /tmp/rollcall-notes.md \
-            --verify-tag
+          # 幂等：上一次可能已经建好 release 但上传/后续步骤失败，
+          # 直接 create 会因"release 已存在"让整条流水线失败。
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file /tmp/rollcall-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Rollcall $GITHUB_REF_NAME" \
+              --notes-file /tmp/rollcall-notes.md \
+              --verify-tag
+          fi

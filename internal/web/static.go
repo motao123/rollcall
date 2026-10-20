@@ -27,9 +27,14 @@ func withStaticETag(fsys fs.FS, next http.Handler) http.Handler {
 			return
 		}
 		w.Header().Set("ETag", etag)
-		if etagMatches(r.Header.Get("If-None-Match"), etag) {
-			w.WriteHeader(http.StatusNotModified)
-			return
+		// RFC 9110 §13.1.2：If-None-Match 只对 GET/HEAD 有意义。
+		// 其它方法（POST/PUT/DELETE）命中静态路径时必须继续走 next，
+		// 否则会收到 304 而误以为操作成功。
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if etagMatches(r.Header.Get("If-None-Match"), etag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

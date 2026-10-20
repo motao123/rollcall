@@ -91,6 +91,16 @@ func (r *Runner) notifyCfg() *notify.Config {
 // 每期一个且永不过期，长期运行会让 settings 无界增长（也拖慢快照序列化）。
 // 去重只需要当期键，因此保留近两年、更早的删除。
 func (r *Runner) pruneReportMarkers(now time.Time) {
+	// 维护窗口与人工事件同样是"只增不减"的列表（管理员每建一条就多一条），
+	// 长期运行会把 settings 撑大、也让公开页时间线越拉越长。
+	// 保留最近 90 天的历史，更早的清掉；进行中的事件不受影响。
+	if n := r.st.PruneMaintenance(now.Unix(), 90*86400); n > 0 {
+		log.Printf("清理已结束的维护窗口 %d 条", n)
+	}
+	if n := r.st.PruneIncidents(now.AddDate(0, 0, -90).Unix()); n > 0 {
+		log.Printf("清理已结束的事件记录 %d 条", n)
+	}
+
 	const dailyPrefix = "report.daily."
 	dailyCut := now.AddDate(0, 0, -120).Format("2006-01-02")
 	for _, k := range r.st.SettingKeys(dailyPrefix) {
@@ -196,8 +206,10 @@ func (r *Runner) reportTick(now time.Time) {
 			r.st.SetSetting(key, "1")
 		}
 	}
-	// 周报在周一发送；ReportHour 之前不提前，错过整点后当天内仍可补发。
-	if cfg.ReportWeek && now.Weekday() == time.Monday && now.Hour() >= cfg.ReportHour {
+	// 周报每周一次。★ 不看"今天是不是周一"：进程周一停机、或周一当天没跑到
+	// ReportHour 就一直不会补发，整周静默丢失。改为每天都检查，
+	// 靠 ISO 周键去重，这样周内任何一天启动都能补发当周报告。
+	if cfg.ReportWeek && now.Hour() >= cfg.ReportHour {
 		// ★ 必须用 ISOWeek 返回的 ISO 年，不能用日历年：
 		// 2024-12-30 属于 ISO 2025-W01，用 now.Year() 会算成 2024-W01，
 		// 与 2024-01-01 的键碰撞，导致当周周报被判为"已发送"而整周不发。
@@ -207,8 +219,9 @@ func (r *Runner) reportTick(now time.Time) {
 			r.st.SetSetting(key, "1")
 		}
 	}
-	// 月报在每月 1 日发送；与日报同一时刻时两条独立入队。
-	if cfg.ReportMonth && now.Day() == 1 && now.Hour() >= cfg.ReportHour {
+	// 月报每月一次，同理按"月键去重 + 每天检查"补发，
+	// 不再要求恰好是 1 日（1 日停机就整月不发）。
+	if cfg.ReportMonth && now.Hour() >= cfg.ReportHour {
 		key := "report.monthly." + now.Format("2006-01")
 		if r.st.GetSetting(key) == "" && r.sendReport(cfg, "monthly", now) {
 			r.st.SetSetting(key, "1")
@@ -261,7 +274,9 @@ func (r *Runner) sendReport(cfg *notify.Config, kind string, now time.Time) bool
 	}
 	fmt.Fprintf(&b, "活跃告警：%d 条\n", r.st.ActiveAlertCount())
 	fmt.Fprintf(&b, "服务探测：%d 个，异常 %d 个\n", len(svcs), down)
-	fmt.Fprintf(&b, "累计流量：↑ %.2f GB / ↓ %.2f GB\n", float64(rx)/(1<<30), float64(tx)/(1<<30))
+	// rx 累计的是 NetRx（下行），tx 是 NetTx（上行）：箭头必须与面板一致，
+	// 原来写成"↑ rx / ↓ tx"，把上下行报反了。
+	fmt.Fprintf(&b, "累计流量：↓ %.2f GB / ↑ %.2f GB\n", float64(rx)/(1<<30), float64(tx)/(1<<30))
 	fmt.Fprintf(&b, "月度成本：$%.2f\n", cost)
 	if len(expiring) > 0 {
 		fmt.Fprintf(&b, "30 天内到期：%s\n", strings.Join(expiring, "、"))

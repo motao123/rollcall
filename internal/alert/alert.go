@@ -81,11 +81,24 @@ func New(st *store.Store) *Engine {
 	now := time.Now().Unix()
 	for _, a := range st.ActiveAlerts() {
 		key := alertKey(a)
-		e.active[key] = a
+		e.active[key] = cloneAlert(a)
 		e.since[key] = a.StartedAt
 		e.lastAt[key] = now
 	}
 	return e
+}
+
+// cloneAlert 返回告警的内存副本。
+//
+// e.active 里不能直接保存 store 持有的指针：store 在 ResolveAlert /
+// PruneAlerts 时会修改同一个对象，而引擎读取这些字段时并不持有 store 锁，
+// 构成数据竞争（Go 的 race 检测只在真跑到的路径上才报，别指望它兜底）。
+func cloneAlert(a *model.Alert) *model.Alert {
+	if a == nil {
+		return nil
+	}
+	cp := *a
+	return &cp
 }
 
 // alertKey 返回告警在引擎内的唯一键。
@@ -504,7 +517,7 @@ func (e *Engine) Evaluate() {
 			last := e.lastAt[key]
 			repeat := e.repeat
 			if !tracked && !isNew {
-				e.active[key] = a
+				e.active[key] = cloneAlert(a)
 				e.lastAt[key] = now
 			}
 			e.mu.Unlock()
@@ -515,7 +528,7 @@ func (e *Engine) Evaluate() {
 			}
 			if fire {
 				e.mu.Lock()
-				e.active[key] = a
+				e.active[key] = cloneAlert(a)
 				e.lastAt[key] = now
 				e.mu.Unlock()
 				if isNew {
@@ -669,7 +682,7 @@ func (e *Engine) Evaluate() {
 			last := e.lastAt[key]
 			repeat := e.repeat
 			if !tracked && !isNew {
-				e.active[key] = a
+				e.active[key] = cloneAlert(a)
 				e.lastAt[key] = now
 			}
 			e.mu.Unlock()
@@ -679,7 +692,7 @@ func (e *Engine) Evaluate() {
 			}
 			if fire {
 				e.mu.Lock()
-				e.active[key] = a
+				e.active[key] = cloneAlert(a)
 				e.lastAt[key] = now
 				e.mu.Unlock()
 				if isNew {

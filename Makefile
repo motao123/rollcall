@@ -82,7 +82,9 @@ linux:
 	$(call cross_build,rollsign,rollsign,arm64)
 	$(call cross_build,rollsign,rollsign,arm)
 	$(call cross_build,rollsign,rollsign,386)
-	@cd dist && sha256sum rollcall-server-linux-* rollcall-agent-linux-* rollsign-linux-* > SHA256SUMS
+	# 先写临时文件再原子替换：`> SHA256SUMS` 会在 sha256sum 报错（产物缺失）
+	# 之前就把上一次的校验和截断，留下一个空文件却仍然继续往下走。
+	@cd dist && sha256sum rollcall-server-linux-* rollcall-agent-linux-* rollsign-linux-* > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS
 	@ls -lh dist/
 	@cat dist/SHA256SUMS
 

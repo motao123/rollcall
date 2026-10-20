@@ -462,7 +462,16 @@ func (m *Manager) finish(job *model.NotifyJob, okAny bool, errs string, now int6
 		m.st.NotifyJobFailed(job.ID, errs, now)
 		return
 	}
-	backoff := m.cfg.Backoff[(attempts-1)%len(m.cfg.Backoff)]
+	// 取 min 而不是取模：MaxAttempts 大于退避档数时，取模会让第 5 次重试
+	// 回绕到**最短**间隔（30 秒），把本该 30 分钟的重试变成密集轰炸。
+	idx := attempts - 1
+	if idx >= len(m.cfg.Backoff) {
+		idx = len(m.cfg.Backoff) - 1
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	backoff := m.cfg.Backoff[idx]
 	log.Printf("通知投递失败，%s 后重试（第 %d/%d 次）: %s (%s)",
 		backoff, attempts, m.cfg.MaxAttempts, job.Title, errs)
 	m.st.NotifyJobRetry(job.ID, errs, now+int64(backoff/time.Second))

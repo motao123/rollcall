@@ -186,7 +186,9 @@ func detectVirt() string {
 			return "VMware"
 		case strings.Contains(s, "virtualbox"):
 			return "VirtualBox"
-		case strings.Contains(s, "hyper-v"), strings.Contains(s, "microsoft"):
+		case strings.Contains(s, "hyper-v"), strings.Contains(s, "virtual machine"):
+			// 只认明确的虚拟化标识。不能单看 "microsoft"：Surface 等
+			// 微软裸机的 product_name 里也带这个词，会被误判成 Hyper-V 虚拟机。
 			return "Hyper-V"
 		case strings.Contains(s, "qemu"):
 			return "QEMU"
@@ -458,6 +460,16 @@ func readMounts() []model.MountInfo {
 		"fusectl": true, "mqueue": true, "hugetlbfs": true, "autofs": true,
 		"rpc_pipefs": true, "nsfs": true, "binfmt_misc": true, "squashfs": true,
 		"fuse.gvfsd-fuse": true, "fuse.portal": true,
+		// ★ 网络/分布式文件系统一律跳过容量采集。
+		// 原因不是"不需要"，而是 statfs(2) 不可取消：NFS/CIFS 服务器失联时
+		// 它会阻塞在 D 状态，Go 侧没有任何办法超时或中断，采集协程就此挂死
+		// （后续所有采集都停摆，且没有报错）。这是已知的内核限制，
+		// 唯一安全的做法是不对这类挂载点发起 statfs。
+		// 这类存储的容量请用独立探针或服务商控制台查看。
+		"nfs": true, "nfs4": true, "cifs": true, "smb3": true, "smbfs": true,
+		"sshfs": true, "glusterfs": true, "ceph": true, "lustre": true,
+		"9p": true, "afs": true, "davfs": true, "ncpfs": true, "fuse.sshfs": true,
+		"fuse.rclone": true, "fuse.s3fs": true, "fuse.glusterfs": true,
 	}
 	seen := map[string]bool{}
 	var out []model.MountInfo
@@ -475,18 +487,21 @@ func readMounts() []model.MountInfo {
 		}
 		if dev == "none" || strings.HasPrefix(path, "/snap") ||
 			strings.HasPrefix(path, "/proc") || strings.HasPrefix(path, "/sys") ||
-			strings.HasPrefix(path, "/dev") || strings.HasPrefix(path, "/run") ||
+			strings.HasPrefix(path, "/dev") || isRuntimePath(path) ||
 			strings.HasPrefix(path, "/var/lib/docker") {
 			continue
 		}
+		// 同一设备只取第一个挂载点。★ 必须在 statfs **成功之后**才标记 seen：
+		// 否则首个挂载点因为权限/驱动原因 statfs 失败时，同一设备后面那个
+		// 能正常取到的挂载点也会被跳过，磁盘容量直接缺失。
 		if seen[dev] {
 			continue
 		}
-		seen[dev] = true
 		var st syscall.Statfs_t
 		if err := syscall.Statfs(path, &st); err != nil || st.Blocks == 0 {
 			continue
 		}
+		seen[dev] = true
 		total := st.Blocks * uint64(st.Bsize)
 		used := (st.Blocks - st.Bfree) * uint64(st.Bsize)
 		out = append(out, model.MountInfo{Path: path, Used: used, Total: total})
@@ -521,6 +536,23 @@ var sysClassNet = "/sys/class/net"
 //   - 容器/网桥侧的虚拟网卡按名字前缀跳过（无 master 但同样重复）；
 //   - macvlan/ipvlan/vlan 没有 master，但有 lower_* 链接指向承载网卡，
 //     报文同时计入 lower 设备，必须跳过以免流量翻倍。
+//
+// isRuntimePath 判断是否为内核/运行时专用挂载点。
+//
+// 不能简单用 /run 前缀：/run/media/<user>/<disk> 是 udisks2 挂载的真实
+// 可移动介质，被一起跳过就看不到这些分区。
+func isRuntimePath(path string) bool {
+	for _, p := range []string{
+		"/run/systemd", "/run/snapd", "/run/udev", "/run/lock",
+		"/run/credentials", "/run/user", "/run/dbus", "/run/NetworkManager",
+	} {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func skipIface(name string) bool {
 	if name == "" || name == "lo" {
 		return true

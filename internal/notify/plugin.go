@@ -470,7 +470,7 @@ func runPlugin(p *plugin, ch ChannelConfig, subject, body string, m Message) err
 // 打印整个请求；这些错误会进入 API 响应和 outbox 日志，必须先脱敏。
 func redactPluginOutput(s string, ch ChannelConfig) string {
 	for k, v := range ch.Options {
-		if v == "" || !secretKeys(ch.Type)[k] {
+		if v == "" || !isSecretField(ch.Type, k) {
 			continue
 		}
 		s = strings.ReplaceAll(s, v, "********")

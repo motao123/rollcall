@@ -414,12 +414,20 @@ func shutdown(srv *http.Server, ob *outbox.Manager, st *store.Store, stopProduce
 	}
 	ob.Stop()
 	saveErr := st.Save()
-	if err := st.SaveHistory(); err != nil {
-		log.Printf("退出前保存历史失败: %v", err)
+	histErr := st.SaveHistory()
+	if histErr != nil {
+		log.Printf("退出前保存历史失败: %v", histErr)
 	}
 	if saveErr != nil {
 		log.Printf("退出前保存失败: %v", saveErr)
+	}
+	// 两个都要上报：调用方（systemd / 升级脚本）靠退出码判断数据是否落盘成功。
+	// 只写日志不改返回值会让"历史没存上"静默变成退出码 0。
+	if saveErr != nil {
 		return saveErr
+	}
+	if histErr != nil {
+		return histErr
 	}
 	log.Printf("状态已保存，退出（关停耗时 %.1fs）", time.Since(started).Seconds())
 	return nil

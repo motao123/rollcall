@@ -107,9 +107,11 @@ func (s *Server) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 			"offline": offline, "noData": noData,
 		},
 		"reports": map[string]any{
-			"last60s":     reports,
-			"perSecond":   float64(reports) / 60,
-			"expected":    expectedReportsPerMinute(len(nodes)),
+			"last60s":   reports,
+			"perSecond": float64(reports) / 60,
+			// 预期只统计"可能还在上报"的节点：离线与从未上报的节点
+			// 本来就不会发数据，把它们算进分母会让健康卡永久显示"采集掉队"。
+			"expected":    expectedReportsPerMinute(online + stale),
 			"intervalSec": agentwire.ReportInterval(agentwire.OnlineTTL),
 		},
 		"save": map[string]any{

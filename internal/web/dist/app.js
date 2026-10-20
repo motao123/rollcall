@@ -1660,7 +1660,7 @@ async function viewCompare() {
       ${kpi('平均 CPU', (sum.avgCpu || 0).toFixed(1), '%', `峰值 ${(sum.maxCpu || 0).toFixed(1)}%`)}
       ${kpi('平均内存', (sum.avgMem || 0).toFixed(1), '%', `峰值 ${(sum.maxMem || 0).toFixed(1)}%`)}
       ${kpi('收藏节点', sum.favorites || 0, '台', '收藏优先展示')}
-      ${kpi('月度成本', '$' + (sum.cost || 0).toFixed(1), '', '在线节点合计')}
+      ${kpi('月度成本', '$' + (sum.cost || 0).toFixed(1), '', '全部节点合计')}
     </div>
     <section class="section">
       <div class="section-head">

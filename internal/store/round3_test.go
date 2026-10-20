@@ -30,6 +30,9 @@ func waitSave(t *testing.T, st *Store, what string) {
 // 更新 hosts 之前，于是这期间变化的 hostname / 内核版本永远写不进去。
 func TestAddMetricsUpdatesHostOnDuplicateTimestamp(t *testing.T) {
 	st := New(t.TempDir())
+	// AddMetrics 现在会丢弃"节点不存在"的上报（防止删掉的节点被在途上报复活），
+	// 所以这里必须先建节点 —— 真实上报路径也一定先通过令牌解析出节点。
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n1"})
 	ts := time.Now().Unix()
 	st.AddMetrics("n1", model.HostInfo{Hostname: "old"}, model.Metrics{TS: ts})
 	st.AddMetrics("n1", model.HostInfo{Hostname: "new"}, model.Metrics{TS: ts})

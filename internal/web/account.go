@@ -69,7 +69,15 @@ func failTOTP(w http.ResponseWriter, err error) {
 		// 403 会被 accountChange 计入失败：重放尝试属于攻击行为。
 		fail(w, http.StatusForbidden, err.Error())
 	default:
-		fail(w, http.StatusForbidden, "动态验证码错误")
+		// 只有"验证码本身不对"才是 403；其它错误（写消费标记失败、磁盘只读）
+		// 属于服务端问题。伪装成 403 会让用户反复重输验证码，
+		// 而真正的原因在界面上完全看不出来。
+		if errors.Is(err, errTOTPInvalid) {
+			fail(w, http.StatusForbidden, "动态验证码错误")
+			return
+		}
+		log.Printf("TOTP 校验失败（服务端错误）: %v", err)
+		fail(w, http.StatusInternalServerError, "校验动态验证码失败")
 	}
 }
 

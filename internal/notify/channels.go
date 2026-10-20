@@ -178,7 +178,29 @@ func defOf(t string) (ChannelDef, bool) {
 // 下发前端等于泄露。它们必须和 Field.Secret 一样参与脱敏与还原。
 var urlCredentialKeys = map[string]bool{"url": true, "serverUrl": true}
 
+// isSecretField 判断某通道的某个选项字段是否敏感。
+//
+// 与 secretKeys 的区别：**未知类型返回 true**。插件输出的脱敏路径必须用它——
+// 拿到一个无法识别的通道类型时，secretKeys 返回 nil，所有字段都会被当成
+// 非敏感原样输出（密码/令牌直接进 API 响应与日志）。宁可多抹也不能漏。
+func isSecretField(t, k string) bool {
+	if urlCredentialKeys[k] {
+		return true
+	}
+	d, ok := defOf(t)
+	if !ok {
+		return true
+	}
+	for _, f := range d.Fields {
+		if f.Key == k {
+			return f.Secret
+		}
+	}
+	return false
+}
+
 // secretKeys 返回某通道的敏感字段名集合。
+// 仅供"已通过 Validate 的配置"使用；未知类型返回 nil。
 func secretKeys(t string) map[string]bool {
 	d, ok := defOf(t)
 	if !ok {

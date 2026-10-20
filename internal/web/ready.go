@@ -17,9 +17,11 @@ const readyProbeTTL = 15 * time.Second
 
 // readyProbe 缓存最近一次可写探测结果。
 type readyProbe struct {
-	mu  sync.Mutex
-	at  time.Time
-	err error
+	// lastReason 记录上一次记录过的"不就绪原因"，用于日志去重。
+	lastReason string
+	mu         sync.Mutex
+	at         time.Time
+	err        error
 }
 
 // handleReadyz 是面向升级脚本与编排系统的深度健康检查。
@@ -53,12 +55,12 @@ func (s *Server) readiness() string {
 		return "store not initialized"
 	}
 	if err := s.st.LoadErr(); err != nil {
-		log.Printf("readyz: 状态载入失败: %v", err)
+		s.logReady("state load failed", "readyz: 状态载入失败: %v", err)
 		return "state load failed"
 	}
 	if dir := s.readyDataDir(); dir != "" {
 		if err := s.probeDataDir(dir); err != nil {
-			log.Printf("readyz: 数据目录不可写: %v", err)
+			s.logReady("data dir not writable", "readyz: 数据目录不可写: %v", err)
 			return "data dir not writable"
 		}
 	}
@@ -102,15 +104,37 @@ func (s *Server) readyDataDir() string {
 	return ""
 }
 
-func (s *Server) probeDataDir(dir string) error {
+// logReady 只在"不就绪原因"发生变化时写日志。
+// /readyz 会被探活与监控高频轮询，持续故障时每次请求都打一行会把日志刷满，
+// 真正有用的信息被淹没。
+func (s *Server) logReady(reason, format string, args ...any) {
 	s.ready.mu.Lock()
-	defer s.ready.mu.Unlock()
-	if !s.ready.at.IsZero() && time.Since(s.ready.at) < readyProbeTTL {
-		return s.ready.err
+	changed := s.ready.lastReason != reason
+	s.ready.lastReason = reason
+	s.ready.mu.Unlock()
+	if changed {
+		log.Printf(format, args...)
 	}
+}
+
+func (s *Server) probeDataDir(dir string) error {
+	// 缓存命中直接返回；未命中时**在锁外**做文件探测。
+	// 原来整段持锁，/readyz 并发（探活 + 监控轮询）会排队等磁盘 I/O，
+	// 磁盘慢时连"就绪"本身都变慢。并发未命中最多重复探测一次，可以接受。
+	s.ready.mu.Lock()
+	if !s.ready.at.IsZero() && time.Since(s.ready.at) < readyProbeTTL {
+		err := s.ready.err
+		s.ready.mu.Unlock()
+		return err
+	}
+	s.ready.mu.Unlock()
+
 	err := writeProbeFile(dir)
+
+	s.ready.mu.Lock()
 	s.ready.at = time.Now()
 	s.ready.err = err
+	s.ready.mu.Unlock()
 	return err
 }
 
@@ -122,13 +146,16 @@ func writeProbeFile(dir string) error {
 	name := f.Name()
 	_, werr := f.Write([]byte("ok"))
 	cerr := f.Close()
-	rerr := os.Remove(name)
+	// 删除失败只说明留下了临时文件，写权限本身已经验证通过
+	// （CreateTemp + Write + Close 都成功了）。原来把 Remove 失败当作
+	// "数据目录不可写"，会让 /readyz 在磁盘只读挂载清理失败时误报不就绪。
+	if rerr := os.Remove(name); rerr != nil {
+		log.Printf("readyz: 清理探测文件失败（不影响可写性判定）: %v", rerr)
+	}
 	switch {
 	case werr != nil:
 		return werr
-	case cerr != nil:
-		return cerr
 	default:
-		return rerr
+		return cerr
 	}
 }

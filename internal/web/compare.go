@@ -163,8 +163,14 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		if r.MemPct > sum.MaxMemPct {
 			sum.MaxMemPct = r.MemPct
 		}
-		sum.Cost += monthly(r.Price, r.Currency, s.cnyRate)
+		// 只累加"实时资源"类指标：成本不在这里算（见下）。
 		sum.TrafficIn += r.NetRx
+	}
+	// ★ 成本口径必须与分组一致：分组对**全部节点**累加（成本是资产属性，
+	// 机器离线也照样付钱），这里若只算在线节点，页面上"分组成本之和"
+	// 就会大于"合计成本"，同一页两个数对不上。
+	for _, r := range rows {
+		sum.Cost += monthly(r.Price, r.Currency, s.cnyRate)
 	}
 	for _, g := range grouped {
 		if g.Online > 0 {

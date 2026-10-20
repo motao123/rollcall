@@ -1605,8 +1605,15 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 	if rotate {
 		id = strings.TrimSuffix(id, "/rotate-token")
 	}
+	// ID 直接来自 URL 剩余部分：长度与字符集不设限时，超长 ID 会进入
+	// 日志、错误响应与走查逻辑（且每次都要复制一遍整段路径）。
 	if id == "" {
 		fail(w, 400, "missing node id")
+		return
+	}
+	// 复用 statusadmin.go 的字符集校验：节点 ID 同样会进入日志与 DOM。
+	if !validRecordID(id) {
+		fail(w, 400, "invalid node id")
 		return
 	}
 	if rotate {

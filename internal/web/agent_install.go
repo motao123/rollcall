@@ -137,7 +137,12 @@ esac
 # 不能只打印警告就继续：复制错地址或误用公网 http 时，攻击者可在链路上
 # 替换二进制（脚本本身也经同一明文通道下发）；--allow-insecure 让风险变成明确选择。
 case "$SERVER" in
-    http://127.0.0.1*|http://localhost*|http://\[::1\]*) INSECURE="" ;;
+    # 精确匹配主机名，不能用 127.0.0.1* 这样的前缀：
+    # http://127.0.0.1.evil.com 与 http://127.0.0.1@evil.com 都会命中前缀，
+    # 却把二进制下载指向外部主机（脚本随后以 root 执行它）。
+    http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) INSECURE="" ;;
+    http://localhost|http://localhost/*|http://localhost:*) INSECURE="" ;;
+    http://\[::1\]|http://\[::1\]/*|http://\[::1\]:*) INSECURE="" ;;
     http://*)
         if [ "$ALLOW_INSECURE" != "1" ]; then
             echo "控制端使用明文 HTTP：下载的 Agent 会以 root 身份执行，链路可被窃听/篡改。" >&2
@@ -396,9 +401,12 @@ elif command -v useradd >/dev/null 2>&1; then
 fi
 
 if [ -n "$AS_USER" ]; then
+    # 组名要查主组，不能假定与用户名相同：部分发行版/容器镜像里
+    # USERGROUPS_ENAB=no，useradd 不会创建同名组，Group= 写错会让服务起不来。
+    AS_GROUP=$(id -gn "$AS_USER" 2>/dev/null || echo "$AS_USER")
     SVC_USER="User=$AS_USER
-Group=$AS_USER"
-    install -d -m 0750 -o root -g "$AS_USER" /etc/rollcall
+Group=$AS_GROUP"
+    install -d -m 0750 -o root -g "$AS_GROUP" /etc/rollcall
 else
     echo "⚠ 未能创建低权限用户 $AGENT_USER（可能缺少 useradd），Agent 将以 root 运行" >&2
     SVC_USER=""
@@ -567,7 +575,15 @@ func (s *Server) handleAgentChecksum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := "rollcall-agent-linux-" + arch
-	f, err := os.Open(filepath.Join(s.agentDir, name))
+	full := filepath.Join(s.agentDir, name)
+	// 与下载接口一致：必须是常规文件。目录/设备/FIFO 会让 io.Copy 阻塞
+	// （FIFO 尤其：请求会一直挂住，占住连接直到超时）。
+	fi, serr := os.Stat(full)
+	if serr != nil || !fi.Mode().IsRegular() {
+		fail(w, http.StatusNotFound, "该架构的 Agent 尚未放到分发目录: "+name)
+		return
+	}
+	f, err := os.Open(full)
 	if err != nil {
 		fail(w, http.StatusNotFound, "该架构的 Agent 尚未放到分发目录: "+name)
 		return

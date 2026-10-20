@@ -60,7 +60,12 @@ func (l *authFailureLimiter) allow(ip string) (bool, time.Duration) {
 		return false, st.blockedUntil.Sub(now)
 	}
 	if now.Sub(st.windowStart) > l.window {
-		*st = authFailState{windowStart: now}
+		// 只重置窗口与失败计数，**保留 inflight**：
+		// 整体重建结构体会把其它并发请求刚领取的在途名额清零，
+		// 随后它们的 fail/release 会扣成负数（这里虽然有 >0 保护，
+		// 但名额被抹掉后限速上限会被突破）。
+		inflight := st.inflight
+		*st = authFailState{windowStart: now, inflight: inflight}
 	}
 	// 在途名额给得比失败阈值宽：面板首屏会并发拉多个接口，
 	// 若并发数也卡在 maxFails，正常用户会在慢网络下被误伤。
@@ -138,6 +143,12 @@ func (l *authFailureLimiter) sweepLocked(now time.Time) {
 	}
 	l.lastSweep = now
 	for k, v := range l.state {
+		// 与 evictLocked 一致：有在途名额的条目不能删，
+		// 否则后续 fail/release 找不到条目会重建一个干净状态，
+		// 等于把已累计的失败次数清掉。
+		if v.inflight > 0 {
+			continue
+		}
 		if now.Sub(v.windowStart) > l.window && now.After(v.blockedUntil) {
 			delete(l.state, k)
 		}
@@ -187,9 +198,27 @@ func (l *authFailureLimiter) release(ip string) {
 }
 
 func (l *authFailureLimiter) succeed(ip string) {
+	now := time.Now()
 	l.mu.Lock()
-	delete(l.state, ip)
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	st, ok := l.state[ip]
+	if !ok {
+		return
+	}
+	if st.inflight > 0 {
+		st.inflight--
+	}
+	// ★ 不能整条删除：攻击者手里只要有一个有效凭证（或恰好命中一次
+	// 不需鉴权的成功请求），就能在封禁期间把 blockedUntil 一起清掉。
+	// 仍在封禁中时保留条目，只清失败计数。
+	if now.Before(st.blockedUntil) {
+		st.fails = 0
+		return
+	}
+	st.fails = 0
+	if st.inflight == 0 {
+		delete(l.state, ip)
+	}
 }
 
 // size 返回当前状态表条目数，供「实例健康」观察限速器占用。

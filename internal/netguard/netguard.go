@@ -88,6 +88,18 @@ func (p Policy) CheckIP(ip net.IP) error {
 	if ip == nil {
 		return errors.New("目标地址无法解析")
 	}
+	// ★ 长度必须是 4 或 16。net.IP{} 与截断值（如 net.IP{10,0}）都是非 nil，
+	// 但 To4() 返回 nil、Contains 一律 false —— 旧实现会一路 fail open 放行。
+	if len(ip) != net.IPv4len && len(ip) != net.IPv6len {
+		return fmt.Errorf("目标地址 %s 格式非法", ip)
+	}
+	// ISATAP 把 IPv4 藏在接口标识里（xxxx:5efe:w.x.y.z），
+	// 全局前缀 + ISATAP 不在 reservedIPv6 的网段里，会被当成普通 IPv6 放行。
+	if v4 := isatapIPv4(ip); v4 != nil {
+		if err := p.CheckIP(v4); err != nil {
+			return err
+		}
+	}
 	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return fmt.Errorf("目标地址 %s 属于禁止访问的保留网段", ip)
 	}
@@ -125,6 +137,23 @@ func (p Policy) CheckIP(ip net.IP) error {
 		}
 	}
 	return nil
+}
+
+// isatapIPv4 从 ISATAP 地址的接口标识中取出内嵌的 IPv4。
+//
+// 接口标识形如 0000:5efe:w.x.y.z 或 0200:5efe:w.x.y.z（RFC 5214），
+// 即第 9–12 字节为 00 00 5e fe 或 02 00 5e fe。不是 ISATAP 时返回 nil。
+func isatapIPv4(ip net.IP) net.IP {
+	b := ip.To16()
+	if b == nil || ip.To4() != nil {
+		return nil
+	}
+	isatap := (b[8] == 0x00 && b[9] == 0x00 && b[10] == 0x5e && b[11] == 0xfe) ||
+		(b[8] == 0x02 && b[9] == 0x00 && b[10] == 0x5e && b[11] == 0xfe)
+	if !isatap {
+		return nil
+	}
+	return net.IPv4(b[12], b[13], b[14], b[15]).To4()
 }
 
 // CheckHost 对 IP 字面量立即校验；域名返回 nil，实际地址在拨号时校验。

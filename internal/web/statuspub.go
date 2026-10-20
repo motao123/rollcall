@@ -261,7 +261,13 @@ func (s *Server) buildTimeline(since int64, limit int, nameOf func(string) strin
 	// 1 秒的两条告警拆成两场事故，与文档描述的语义不符。
 	byRule := make(map[string][]*model.Alert)
 	for _, a := range s.st.Alerts(0) {
-		if a == nil || a.StartedAt < since {
+		if a == nil {
+			continue
+		}
+		// 时间窗只筛"已恢复"的历史。未解决的告警必须始终出现：
+		// 一场 90 天前开始、到现在还没恢复的故障，正是访客最需要看到的信息，
+		// 被 since 过滤掉等于公开页"看起来一切正常"。
+		if a.ResolvedAt != 0 && a.StartedAt < since {
 			continue
 		}
 		byRule[a.RuleID] = append(byRule[a.RuleID], a)
@@ -478,7 +484,7 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 	rangeKey, rangeResolution, rangeSince, rangeBucket := parseStatusRange(r.URL.Query().Get("range"), now)
-	m, ts, _ := s.st.Latest(id)
+	m, ts, hasMetrics := s.st.Latest(id)
 	state := store.NodeState(ts, now)
 	maintGlobal, maintNodes := s.st.MaintenanceAt(now)
 	vis := cfg.Visibility
@@ -488,28 +494,34 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	// 因此可见字段用指针 + omitempty：关闭时整个键消失，开启时 0 也会保留。
 	// 进程数、TCP、Swap、核心数属于指纹类信息，保持关闭时彻底省略。
 	type latestOut struct {
-		CPU       *float64 `json:"cpu,omitempty"`
-		MemPct    *float64 `json:"memPct,omitempty"`
-		DiskPct   *float64 `json:"diskPct,omitempty"`
-		Load1     *float64 `json:"load1,omitempty"`
-		Load5     *float64 `json:"load5,omitempty"`
-		Load15    *float64 `json:"load15,omitempty"`
-		Uptime    *uint64  `json:"uptime,omitempty"`
-		Procs     int      `json:"procs,omitempty"`
-		TCPConn   int      `json:"tcpConn,omitempty"`
-		NetRx     *uint64  `json:"netRx,omitempty"` // B/s
-		NetTx     *uint64  `json:"netTx,omitempty"` // B/s
-		TotRx     *uint64  `json:"totRx,omitempty"`
-		TotTx     *uint64  `json:"totTx,omitempty"`
-		MemUsed   *uint64  `json:"memUsed,omitempty"`
-		MemTotal  *uint64  `json:"memTotal,omitempty"`
-		DiskUsed  *uint64  `json:"diskUsed,omitempty"`
-		DiskTotal *uint64  `json:"diskTotal,omitempty"`
-		SwapUsed  *uint64  `json:"swapUsed,omitempty"`
-		SwapTotal *uint64  `json:"swapTotal,omitempty"`
-		Cores     int      `json:"cores,omitempty"`
+		CPU     *float64 `json:"cpu,omitempty"`
+		MemPct  *float64 `json:"memPct,omitempty"`
+		DiskPct *float64 `json:"diskPct,omitempty"`
+		Load1   *float64 `json:"load1,omitempty"`
+		Load5   *float64 `json:"load5,omitempty"`
+		Load15  *float64 `json:"load15,omitempty"`
+		Uptime  *uint64  `json:"uptime,omitempty"`
+		// 指针：0 是有效读数（0 个进程/0 条连接），不能被 omitempty 丢掉
+		Procs     *int    `json:"procs,omitempty"`
+		TCPConn   *int    `json:"tcpConn,omitempty"`
+		NetRx     *uint64 `json:"netRx,omitempty"` // B/s
+		NetTx     *uint64 `json:"netTx,omitempty"` // B/s
+		TotRx     *uint64 `json:"totRx,omitempty"`
+		TotTx     *uint64 `json:"totTx,omitempty"`
+		MemUsed   *uint64 `json:"memUsed,omitempty"`
+		MemTotal  *uint64 `json:"memTotal,omitempty"`
+		DiskUsed  *uint64 `json:"diskUsed,omitempty"`
+		DiskTotal *uint64 `json:"diskTotal,omitempty"`
+		SwapUsed  *uint64 `json:"swapUsed,omitempty"`
+		SwapTotal *uint64 `json:"swapTotal,omitempty"`
+		Cores     *int    `json:"cores,omitempty"`
 	}
 	var lo latestOut
+	// 从未上报过的节点（刚加进资产台账 / Agent 还没装）没有指标：
+	// 下发 cpu 0 / memPct 0 会被读成"机器空闲"，而不是"没有数据"。
+	if !hasMetrics {
+		vis = model.StatusVisibility{}
+	}
 	if vis.Metrics {
 		lo.CPU = floatPtr(round1(m.CPUPct))
 		lo.MemPct = floatPtr(round1(pctF(m.MemUsed, m.MemTotal)))
@@ -524,10 +536,12 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		lo.Uptime = uintPtr(m.Uptime)
 	}
 	if vis.Procs {
-		lo.Procs = m.Procs
+		v := m.Procs
+		lo.Procs = &v
 	}
 	if vis.TCPConn {
-		lo.TCPConn = m.TCPConn
+		v := m.TCPConn
+		lo.TCPConn = &v
 	}
 	if vis.Swap {
 		lo.SwapUsed, lo.SwapTotal = uintPtr(m.SwapUsed), uintPtr(m.SwapTotal)
@@ -540,7 +554,8 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if vis.Cores {
 		if h := s.st.Host(id); h.Cores > 0 {
-			lo.Cores = h.Cores
+			v := h.Cores
+			lo.Cores = &v
 		}
 	}
 

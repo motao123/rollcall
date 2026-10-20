@@ -67,7 +67,13 @@ func (s *Store) SetStatusPage(c model.StatusPage) {
 func (s *Store) Maintenances() []*model.Maintenance {
 	s.spMu.Lock()
 	defer s.spMu.Unlock()
-	out, _ := s.maintenancesLocked()
+	out, err := s.maintenancesLocked()
+	if err != nil {
+		// 不能静默：告警引擎靠这个列表判断"是否在维护窗口内"，
+		// 配置损坏后返回空列表会被读成"当前没有维护"，维护期间照常告警。
+		// 这里保留空列表（不阻断页面），但必须留痕，否则管理员完全看不出原因。
+		log.Printf("维护窗口配置损坏，按空列表处理（维护期间可能误告警）: %v", err)
+	}
 	return out
 }
 

@@ -190,7 +190,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 - 「对比」页按当前实时指标横向比较所有节点：CPU/内存/磁盘、负载、实时网速、
   本周期流量、月摊成本与到期剩余天数
 - 支持只看收藏（`favorite=1`），收藏状态在节点/台账中一键切换
-- `GET /api/compare` 返回聚合行与 `summary`（收藏数、在线数、周期流量合计等），
+- `GET /api/compare` 返回聚合行与 `summary`（收藏数、在线数、在线节点实时下行合计 `trafficIn`（B/s）、全部节点月度成本合计等），
   可直接用于外部报表
 
 ### 4.2 加密配置备份

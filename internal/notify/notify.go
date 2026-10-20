@@ -1020,16 +1020,18 @@ func sendEmail(o map[string]string, subject, body string) error {
 		return fmt.Errorf("发件人地址无效: %w", err)
 	}
 
+	// ★ 用 ParseAddressList 而不是按逗号 Split：
+	// `"Doe, John" <john@example.com>` 这种带引号显示名的地址里就有逗号，
+	// 切开后两半都不是合法地址，配置直接被判为无效。
+	list, err := mail.ParseAddressList(o["to"])
+	if err != nil {
+		return fmt.Errorf("收件人地址无效: %w", err)
+	}
 	var toAddrs []*mail.Address
 	var toHdr []string
-	for _, x := range strings.Split(o["to"], ",") {
-		x = strings.TrimSpace(x)
-		if x == "" {
+	for _, a := range list {
+		if a == nil || strings.TrimSpace(a.Address) == "" {
 			continue
-		}
-		a, err := mail.ParseAddress(x)
-		if err != nil {
-			return fmt.Errorf("收件人地址无效 %q: %w", x, err)
 		}
 		toAddrs = append(toAddrs, a)
 		toHdr = append(toHdr, a.String())

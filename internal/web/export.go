@@ -481,8 +481,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			}
 			return b2f(ok)
 		}},
-		{"rollcall_service_latency_milliseconds", "Last probe latency in ms.", false, func(ok, has bool, lat, cert int, up float64) float64 { return float64(lat) }},
-		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a).", false, func(ok, has bool, lat, cert int, up float64) float64 { return float64(cert) }},
+		// 与 rollcall_service_up 一致：从未探测过输出 NaN。
+		// 原来输出 0 ms / 0 天，看起来像"探测成功且延迟 0"，会让面板告警误判。
+		{"rollcall_service_latency_milliseconds", "Last probe latency in ms (NaN = never probed).", false, func(ok, has bool, lat, cert int, up float64) float64 {
+			if !has {
+				return math.NaN()
+			}
+			return float64(lat)
+		}},
+		{"rollcall_service_certificate_days_remaining", "TLS cert days left (-1 = n/a, NaN = never probed).", false, func(ok, has bool, lat, cert int, up float64) float64 {
+			if !has {
+				return math.NaN()
+			}
+			return float64(cert)
+		}},
 		{"rollcall_service_uptime_percent_24h", "24h availability percent.", true, func(ok, has bool, lat, cert int, up float64) float64 { return up }},
 	}
 	for _, m := range svcMetrics {

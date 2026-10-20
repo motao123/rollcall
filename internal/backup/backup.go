@@ -17,10 +17,12 @@ import (
 )
 
 const (
-	magic    = "RCBK1"
-	iter     = 600_000 // 与 OWASP 对 PBKDF2-HMAC-SHA256 的建议一致
-	minIter  = 100_000 // 解密侧下限：太低的迭代数意味着弱加密，直接拒绝
-	maxIter  = 1_200_000
+	magic   = "RCBK1"
+	iter    = 600_000 // 与 OWASP 对 PBKDF2-HMAC-SHA256 的建议一致
+	minIter = 100_000 // 解密侧下限：太低的迭代数意味着弱加密，直接拒绝
+	// maxIter 由 iter 派生，不再单独硬编码：两个独立常量时，
+	// 一旦为了加固把 iter 调高过 maxIter，本版本加密出的备份自己都解不开。
+	maxIter  = iter * 2
 	saltLen  = 16
 	nonceLen = 12
 	tagLen   = 16 // GCM 默认认证标签长度

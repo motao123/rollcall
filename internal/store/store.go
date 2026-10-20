@@ -137,6 +137,10 @@ type Store struct {
 	alerts   []*model.Alert
 	settings map[string]string
 
+	// dropped 记录"刚被删除的节点 ID"，用于拦住在途上报。
+	// 只在内存里：在途窗口是毫秒级，重启后不可能还有旧上报在路上。
+	dropped map[string]int64
+
 	// spMu 串行化状态页列表（维护窗口/人工事件）的读-改-写。
 	// settings 的读写各自加锁，但「读列表 → 修改 → 写回」跨了两次加锁，
 	// 两个并发管理员操作会互相覆盖。
@@ -201,6 +205,7 @@ func New(dataDir string) *Store {
 		apiTokens:    map[string]*model.APIToken{},
 		expirySent:   map[string]string{},
 		history:      map[string]*nodeHistory{},
+		dropped:      map[string]int64{},
 		path:         filepath.Join(dataDir, "state.json"),
 		historyPath:  filepath.Join(dataDir, "history.json"),
 		saveReq:      make(chan struct{}, 1),
@@ -657,8 +662,45 @@ func NewToken() string {
 	return hex.EncodeToString(b)
 }
 
+// markDroppedLocked 记录墓碑。容量有上限：大量增删时按"最久未用"清掉旧条目，
+// 避免一个只增不减的 map 长期占用内存。
+func (s *Store) markDroppedLocked(id string) {
+	if s.dropped == nil {
+		s.dropped = make(map[string]int64, 8)
+	}
+	s.dropped[id] = time.Now().Unix()
+	const maxDropped = 512
+	if len(s.dropped) > maxDropped {
+		// 删掉最早的一半：墓碑只需要覆盖"删除瞬间"的在途请求。
+		cut := make([]string, 0, len(s.dropped)/2)
+		oldest := time.Now().Unix()
+		for _, ts := range s.dropped {
+			if ts < oldest {
+				oldest = ts
+			}
+		}
+		threshold := oldest + int64(maxDropped/2)
+		for k, ts := range s.dropped {
+			if ts <= threshold {
+				cut = append(cut, k)
+			}
+		}
+		if len(cut) == 0 {
+			for k := range s.dropped {
+				cut = append(cut, k)
+				break
+			}
+		}
+		for _, k := range cut {
+			delete(s.dropped, k)
+		}
+	}
+}
+
 func (s *Store) UpsertNode(n *model.Node) {
 	s.mu.Lock()
+	// 重新创建同 ID 节点时撤销墓碑，否则新节点永远收不到上报。
+	delete(s.dropped, n.ID)
 	if _, ok := s.nodes[n.ID]; !ok {
 		if s.series[n.ID] == nil {
 			s.series[n.ID] = NewRing(RingSize)
@@ -706,6 +748,8 @@ func (s *Store) DeleteNode(id string) bool {
 	delete(s.hosts, id)
 	delete(s.traffic, id)
 	delete(s.expirySent, id)
+	// 墓碑：拦住删除瞬间仍在途的那次上报（见 AddMetrics）。
+	s.markDroppedLocked(id)
 	if _, ok := s.history[id]; ok {
 		delete(s.history, id)
 		s.historyDirty = true
@@ -787,6 +831,11 @@ func cloneRule(r *model.AlertRule) model.AlertRule {
 	if r.Groups != nil {
 		cp.Groups = append([]string(nil), r.Groups...)
 	}
+	// ServiceIDs 同样是引用字段：漏掉它会让快照与运行态共享底层数组，
+	// 后续 append 扩容时与 json.Marshal 的迭代撞车（与 NodeIDs/Groups 同一类问题）。
+	if r.ServiceIDs != nil {
+		cp.ServiceIDs = append([]string(nil), r.ServiceIDs...)
+	}
 	return cp
 }
 
@@ -795,6 +844,14 @@ func cloneRule(r *model.AlertRule) model.AlertRule {
 func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 节点刚被删除时丢弃在途上报：删除与上报是并发的，删完之后再写一次
+	// 会重建 series/hosts/traffic，表现为"删掉的节点又出现在导出与统计里"，
+	// 而且它再也拿不到后续上报，无法自愈。
+	// 只拒"明确删除过"的 ID（墓碑），不拒未知 ID —— 历史回填、demo 播种
+	// 等路径可以先有数据后建节点。
+	if _, dropped := s.dropped[nodeID]; dropped {
+		return
+	}
 	r := s.series[nodeID]
 	if r == nil {
 		r = NewRing(RingSize)
@@ -1475,9 +1532,21 @@ func (s *Store) DeleteService(id string) bool {
 	delete(s.services, id)
 	delete(s.svcRes, id)
 	now := time.Now().Unix()
+	// 顺带收集本次被关闭的告警 ID：NotifyJob 没有 ServiceID 字段，
+	// 只能通过 AlertID 反查它属于哪个服务。
+	closedAlerts := make(map[string]bool, 4)
 	for _, a := range s.alerts {
 		if a.ServiceID == id && a.ResolvedAt == 0 {
 			a.ResolvedAt = now
+			closedAlerts[a.ID] = true
+		}
+	}
+	// 与 DeleteNode 一致：把已排队但未投递的通知标记为抑制。
+	// 否则删掉服务后还会收到它的告警，或留下永不过期的 pending 记录。
+	for _, j := range s.notifyJobs {
+		if j.Status == model.NotifyPending && closedAlerts[j.AlertID] {
+			j.Status = model.NotifySuppressed
+			j.SuppressedBy = "service:" + id
 		}
 	}
 	s.mu.Unlock()

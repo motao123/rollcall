@@ -52,8 +52,10 @@ coverage.out
 *.pfx
 *.p8
 # 签名校验测试需要一次性密钥对作夹具，不属于运行时凭据
-!testdata/**/*.key
-!testdata/**/*.pem
+# 含斜杠的模式相对 .gitignore 所在目录，原来的 !testdata/** 只放行根目录下的
+# 夹具；internal/*/testdata 里的夹具仍被 *.key 挡住。用 **/ 前缀匹配任意层级。
+!**/testdata/**/*.key
+!**/testdata/**/*.pem
 
 # 其他凭据载体：环境变量文件、导出的管理令牌、面板账号文件
 .env
