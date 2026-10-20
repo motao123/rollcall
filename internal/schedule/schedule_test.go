@@ -6,9 +6,32 @@ import (
 	"time"
 
 	"github.com/motao/rollcall/internal/model"
+	"github.com/motao/rollcall/internal/notify"
 	"github.com/motao/rollcall/internal/outbox"
 	"github.com/motao/rollcall/internal/store"
 )
+
+// testWebhookChannel 让通知配置拥有一个可用通道：
+// Enqueue 在没有可用通道时会返回 false，报告/提醒不会写去重标记。
+const testWebhookChannel = `"channels":[{"id":"c1","type":"webhook","name":"test","enabled":true,"options":{"url":"http://127.0.0.1/hook"}}]`
+
+// newTestRunner 构造与生产一致的 Runner：Outbox 必须先拿到通知配置，
+// 否则 Enqueue 会把所有消息当成"通知已停用"直接丢弃。
+func newTestRunner(t *testing.T, st *store.Store) (*Runner, *outbox.Manager) {
+	t.Helper()
+	ob := outbox.New(st, outbox.DefaultConfig())
+	syncNotify(t, st, ob)
+	return New(st, ob, Config{}), ob
+}
+
+func syncNotify(t *testing.T, st *store.Store, ob *outbox.Manager) {
+	t.Helper()
+	cfg, err := notify.Parse(st.GetSetting("notify"))
+	if err != nil {
+		t.Fatalf("解析通知配置: %v", err)
+	}
+	ob.SetConfig(cfg)
+}
 
 func TestDaysUntil(t *testing.T) {
 	now := time.Date(2026, 3, 1, 15, 30, 0, 0, time.Local)
@@ -52,9 +75,9 @@ func TestExpiryTickDedupesPerDay(t *testing.T) {
 	exp := time.Now().AddDate(0, 0, 3).Format("2006-01-02")
 	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", ExpireAt: exp})
 	st.UpsertNode(&model.Node{ID: "bad", Name: "坏日期", ExpireAt: "not-a-date"})
-	st.SetSetting("notify", `{"enabled":true,"expiryDays":7}`)
+	st.SetSetting("notify", `{"enabled":true,"expiryDays":7,`+testWebhookChannel+`}`)
 
-	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+	r, _ := newTestRunner(t, st)
 	countExpiry := func() int {
 		n := 0
 		for _, e := range st.Events(0) {
@@ -79,8 +102,8 @@ func TestExpiryTickDedupesPerDay(t *testing.T) {
 
 func TestReportTickWritesDedupeMarkers(t *testing.T) {
 	st := store.New(t.TempDir())
-	st.SetSetting("notify", `{"enabled":true,"channels":[],"reportDaily":true,"reportWeekly":true,"reportHour":9}`)
-	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+	st.SetSetting("notify", `{"enabled":true,"reportDaily":true,"reportWeekly":true,"reportHour":9,`+testWebhookChannel+`}`)
+	r, _ := newTestRunner(t, st)
 
 	now := time.Date(2026, 10, 19, 9, 30, 0, 0, time.Local) // 周一
 	if now.Weekday() != time.Monday {
@@ -101,8 +124,8 @@ func TestReportTickWritesDedupeMarkers(t *testing.T) {
 	}
 
 	monthlyStore := store.New(t.TempDir())
-	monthlyStore.SetSetting("notify", `{"enabled":true,"channels":[],"reportMonthly":true,"reportHour":9}`)
-	rm := New(monthlyStore, outbox.New(monthlyStore, outbox.DefaultConfig()), Config{})
+	monthlyStore.SetSetting("notify", `{"enabled":true,"reportMonthly":true,"reportHour":9,`+testWebhookChannel+`}`)
+	rm, _ := newTestRunner(t, monthlyStore)
 	first := time.Date(2026, 11, 1, 9, 5, 0, 0, time.Local)
 	rm.reportTick(first)
 	if monthlyStore.GetSetting("report.monthly.2026-11") == "" {
@@ -117,8 +140,8 @@ func TestReportTickWritesDedupeMarkers(t *testing.T) {
 // 当周周报被判为"已发送"而静默跳过。
 func TestWeeklyReportKeyUsesISOYear(t *testing.T) {
 	st := store.New(t.TempDir())
-	st.SetSetting("notify", `{"enabled":true,"channels":[],"reportWeekly":true,"reportHour":9}`)
-	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+	st.SetSetting("notify", `{"enabled":true,"reportWeekly":true,"reportHour":9,`+testWebhookChannel+`}`)
+	r, _ := newTestRunner(t, st)
 
 	now := time.Date(2024, 12, 30, 9, 30, 0, 0, time.Local) // 周一，ISO 2025-W01
 	if now.Weekday() != time.Monday {
@@ -145,8 +168,8 @@ func TestWeeklyReportKeyUsesISOYear(t *testing.T) {
 // 用 Hour()== 判断会让整期报告静默丢失，与"当天内仍可补发"的约定不符。
 func TestReportCatchUpAfterScheduledHour(t *testing.T) {
 	st := store.New(t.TempDir())
-	st.SetSetting("notify", `{"enabled":true,"channels":[],"reportDaily":true,"reportMonthly":true,"reportHour":9}`)
-	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+	st.SetSetting("notify", `{"enabled":true,"reportDaily":true,"reportMonthly":true,"reportHour":9,`+testWebhookChannel+`}`)
+	r, _ := newTestRunner(t, st)
 
 	// 11:30 才启动：日报应补发（当天只发一次）
 	late := time.Date(2026, 11, 2, 11, 30, 0, 0, time.Local)
@@ -167,6 +190,97 @@ func TestReportCatchUpAfterScheduledHour(t *testing.T) {
 	r.reportTick(monthly)
 	if st.GetSetting("report.monthly.2026-12") == "" {
 		t.Error("错过报告时刻后当月 1 日内应补发月报")
+	}
+}
+
+// TestDaysUntilAcrossDST 回归：夏令时切换日的本地零点相差 23/25 小时，
+// 直接除以 24 截断会把「还有 2 天」算成 1 天。
+func TestDaysUntilAcrossDST(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("缺少时区数据: %v", err)
+	}
+	// 2026-03-08 春季前拨，当地这一天只有 23 小时。
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, loc)
+	if got, ok := daysUntil("2026-03-09", now); !ok || got != 2 {
+		t.Fatalf("跨春季切换应为 2 天，实际 %d,%v", got, ok)
+	}
+	if got, ok := daysUntil("2026-03-08", now); !ok || got != 1 {
+		t.Fatalf("次日应为 1 天，实际 %d,%v", got, ok)
+	}
+	// 2026-11-01 秋季回拨，当地这一天有 25 小时。
+	now = time.Date(2026, 10, 31, 12, 0, 0, 0, loc)
+	if got, ok := daysUntil("2026-11-02", now); !ok || got != 2 {
+		t.Fatalf("跨秋季切换应为 2 天，实际 %d,%v", got, ok)
+	}
+}
+
+// TestReportRetriesUntilEnqueueSucceeds 回归：入队失败时不能写去重标记，
+// 否则队列满或没有可用通道会让整期报告静默丢失。
+func TestReportRetriesUntilEnqueueSucceeds(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.SetSetting("notify", `{"enabled":true,"channels":[],"reportDaily":true,"reportHour":9}`)
+	r, ob := newTestRunner(t, st)
+	now := time.Date(2026, 11, 3, 9, 30, 0, 0, time.Local) // 周二
+
+	r.reportTick(now)
+	if st.GetSetting("report.daily.2026-11-03") != "" {
+		t.Fatal("没有可用通道时不应写日报去重标记")
+	}
+	if got := st.NotifyStats().Pending; got != 0 {
+		t.Fatalf("没有可用通道时不应入队，实际 %d", got)
+	}
+
+	st.SetSetting("notify", `{"enabled":true,"reportDaily":true,"reportHour":9,`+testWebhookChannel+`}`)
+	syncNotify(t, st, ob)
+	r.reportTick(now)
+	if st.GetSetting("report.daily.2026-11-03") == "" {
+		t.Fatal("通道恢复后应补发日报并写入标记")
+	}
+	if got := st.NotifyStats().Pending; got != 1 {
+		t.Fatalf("补发的日报应进入队列，实际 %d", got)
+	}
+}
+
+// TestExpiryRetriesUntilEnqueueSucceeds 回归：到期提醒同样只在真正入队后
+// 才记「今天已提醒」并写入活动流，通道恢复后可以补发。
+func TestExpiryRetriesUntilEnqueueSucceeds(t *testing.T) {
+	st := store.New(t.TempDir())
+	now := time.Now()
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", ExpireAt: now.AddDate(0, 0, 3).Format("2006-01-02")})
+	st.SetSetting("notify", `{"enabled":true,"expiryDays":7,"channels":[]}`)
+	r, ob := newTestRunner(t, st)
+	day := now.Format("2006-01-02")
+	countExpiry := func() int {
+		n := 0
+		for _, e := range st.Events(0) {
+			if e.Kind == "expiry" {
+				n++
+			}
+		}
+		return n
+	}
+
+	r.expiryTick()
+	if st.ExpirySentFor("n1", day) {
+		t.Fatal("未入队时不应标记为已提醒")
+	}
+	if got := countExpiry(); got != 0 {
+		t.Fatalf("未入队时不应写活动事件，实际 %d", got)
+	}
+
+	st.SetSetting("notify", `{"enabled":true,"expiryDays":7,`+testWebhookChannel+`}`)
+	syncNotify(t, st, ob)
+	r.expiryTick()
+	if !st.ExpirySentFor("n1", day) {
+		t.Fatal("入队成功后应标记为已提醒")
+	}
+	if got := countExpiry(); got != 1 {
+		t.Fatalf("入队成功后应写 1 条活动事件，实际 %d", got)
+	}
+	r.expiryTick()
+	if got := countExpiry(); got != 1 {
+		t.Fatalf("同一天不应重复提醒，实际 %d 条", got)
 	}
 }
 
@@ -193,7 +307,7 @@ func TestPruneReportMarkers(t *testing.T) {
 	st.SetSetting("theme", `{"mode":"dark"}`)
 	st.SetSetting("report.weekly.garbage", "1") // 格式异常：保持原样，不误删
 
-	r := New(st, outbox.New(st, outbox.DefaultConfig()), Config{})
+	r, _ := newTestRunner(t, st)
 	r.pruneReportMarkers(now)
 
 	for _, k := range stale {
@@ -217,7 +331,8 @@ func TestPruneReportMarkers(t *testing.T) {
 	wired := store.New(t.TempDir())
 	wired.SetSetting("report.daily.2000-01-01", "1")
 	wired.SetSetting("notify", `{"enabled":false}`)
-	New(wired, outbox.New(wired, outbox.DefaultConfig()), Config{}).expiryTick()
+	r, _ = newTestRunner(t, wired)
+	r.expiryTick()
 	if wired.GetSetting("report.daily.2000-01-01") != "" {
 		t.Error("expiryTick 未触发报告标记清理")
 	}

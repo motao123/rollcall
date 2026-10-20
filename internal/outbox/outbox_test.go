@@ -223,7 +223,9 @@ func TestDisabledConfigAndSeverityFilterDropAtEnqueue(t *testing.T) {
 
 	warn := msg()
 	warn.Severity = "warn"
-	m.Enqueue(warn)
+	if m.Enqueue(warn) {
+		t.Fatal("严重度不足时 Enqueue 应返回 false")
+	}
 	if s := st.NotifyStats(); s.Pending != 0 {
 		t.Fatalf("严重度不足的通知不应入队: %+v", s)
 	}
@@ -231,9 +233,32 @@ func TestDisabledConfigAndSeverityFilterDropAtEnqueue(t *testing.T) {
 	off := testNotifyConfig()
 	off.Enabled = false
 	m.SetConfig(off)
-	m.Enqueue(msg())
+	if m.Enqueue(msg()) {
+		t.Fatal("通知停用时 Enqueue 应返回 false")
+	}
 	if s := st.NotifyStats(); s.Pending != 0 {
 		t.Fatalf("通知停用后不应入队: %+v", s)
+	}
+
+	empty := testNotifyConfig()
+	empty.Channels = nil
+	m.SetConfig(empty)
+	if m.Enqueue(msg()) {
+		t.Fatal("没有可用通道时 Enqueue 应返回 false")
+	}
+}
+
+// TestEnqueueReportsAcceptance 回归：调用方（定时报告/到期提醒）
+// 依赖返回值决定是否写去重标记，只有真正入队才算成功。
+func TestEnqueueReportsAcceptance(t *testing.T) {
+	st := store.New(t.TempDir())
+	m := testManager(st)
+	m.SetConfig(testNotifyConfig())
+	if !m.Enqueue(msg()) {
+		t.Fatal("有可用通道时 Enqueue 应返回 true")
+	}
+	if s := st.NotifyStats(); s.Pending != 1 {
+		t.Fatalf("消息应进入队列: %+v", s)
 	}
 }
 

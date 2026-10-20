@@ -91,6 +91,58 @@ func TestTrafficQuotaRuleTriggers(t *testing.T) {
 	}
 }
 
+// TestTrafficQuotaHonorsLtOp 回归：流量配额同样支持 lt（例如"用量异常偏低"
+// 用于发现计数器重置/线路中断），判定必须按 rule.Op 而不是固定 >=。
+func TestTrafficQuotaHonorsLtOp(t *testing.T) {
+	newStore := func(op string, threshold float64) *store.Store {
+		st := store.New(t.TempDir())
+		st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "t", TrafficQuotaGB: 10, TrafficResetDay: 1})
+		now := time.Now().Unix()
+		// 10GB 配额用了 2GB → 20%
+		st.AddMetrics("n1", model.HostInfo{}, model.Metrics{TS: now - 120, NetRx: 0, NetTx: 0})
+		st.AddMetrics("n1", model.HostInfo{}, model.Metrics{TS: now - 60, NetRx: 1 << 30, NetTx: 1 << 30})
+		st.UpsertRule(&model.AlertRule{
+			ID: "rq", Name: "流量配额", Metric: "traffic_quota", Op: op,
+			Threshold: threshold, Duration: 0, Severity: "warn", Enabled: true,
+		})
+		return st
+	}
+
+	lt := newStore("lt", 25) // 20% < 25%
+	New(lt).Evaluate()
+	active := lt.ActiveAlerts()
+	if len(active) != 1 || active[0].RuleID != "rq" {
+		t.Fatalf("lt 规则应在用量低于阈值时触发: %+v", active)
+	}
+	if active[0].Value < 19 || active[0].Value > 21 {
+		t.Errorf("告警值应约为 20%%，实际 %.1f", active[0].Value)
+	}
+
+	gt := newStore("gt", 25) // 20% 不低于 25%
+	New(gt).Evaluate()
+	if got := gt.ActiveAlertCount(); got != 0 {
+		t.Errorf("gt 规则在用量低于阈值时不应触发，实际 %d 条", got)
+	}
+}
+
+// TestTrafficQuotaExactThresholdDoesNotExceed 回归：恰好等于阈值不算"超过"，
+// 与 CPU/内存等指标保持同一语义。
+func TestTrafficQuotaExactThresholdDoesNotExceed(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "t", TrafficQuotaGB: 2, TrafficResetDay: 1})
+	now := time.Now().Unix()
+	st.AddMetrics("n1", model.HostInfo{}, model.Metrics{TS: now - 120, NetRx: 0, NetTx: 0})
+	st.AddMetrics("n1", model.HostInfo{}, model.Metrics{TS: now - 60, NetRx: 1 << 30, NetTx: 1 << 30})
+	st.UpsertRule(&model.AlertRule{
+		ID: "rq", Name: "流量配额", Metric: "traffic_quota", Op: "gt",
+		Threshold: 100, Duration: 0, Severity: "warn", Enabled: true,
+	})
+	New(st).Evaluate()
+	if got := st.ActiveAlertCount(); got != 0 {
+		t.Errorf("用量恰好 100%% 不应触发 gt 规则，实际 %d 条", got)
+	}
+}
+
 func TestQuotaUnsetDoesNotTrigger(t *testing.T) {
 	st := store.New(t.TempDir())
 	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "t"})

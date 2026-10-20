@@ -18,6 +18,8 @@ const state = {
   authRequired: false,
   authenticated: false,
   user: null,
+  rendering: false,
+  renderPending: false,
   timers: [],
 };
 
@@ -3394,7 +3396,12 @@ async function doLogout() {
 }
 
 async function render() {
-  if (state.rendering) return;
+  // 渲染是异步的（含最多 12 秒的请求超时）。期间的导航/刷新请求先记下来，
+  // 等当前渲染结束后补跑，不能直接丢掉——否则点击导航后页面停在旧视图。
+  if (state.rendering) {
+    state.renderPending = true;
+    return;
+  }
   if (state.authRequired) {
     showLoginGate();
     return;
@@ -3439,6 +3446,10 @@ async function render() {
     $('#liveText').textContent = '离线';
   } finally {
     state.rendering = false;
+    if (state.renderPending) {
+      state.renderPending = false;
+      render();
+    }
   }
 }
 
@@ -3633,6 +3644,10 @@ async function boot() {
       const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
       const sig = JSON.stringify([ov, nodes]);
       if (sig === state.liveSig) return; // 数据没变，不重绘
+      state.liveSig = sig;
+      // 节点列表视图直接复用这次拉到的数据；否则 viewNodes 会读到旧缓存，
+      // 每 5 秒用同一份旧数据重绘（并丢掉本次刷新）。
+      state.data.nodes = nodes;
       render();
     } catch (e) {
       // 轮询失败保持旧数据，等下一轮；真正的会话失效由 api() 内的 401 分支处理

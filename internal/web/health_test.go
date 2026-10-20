@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/store"
 )
 
@@ -142,6 +143,99 @@ func TestReportCounterWindow(t *testing.T) {
 	c.hit(base + 60) // 与 base 同一个 slot
 	if got := c.last60s(base + 60); got != 1 {
 		t.Fatalf("同一桶复用时应只剩新计数，实际 %d", got)
+	}
+	// 小幅 NTP 校正产生的"未来"桶仍在窗口内
+	var c2 reportCounter
+	c2.hit(base + 5)
+	if got := c2.last60s(base); got != 1 {
+		t.Fatalf("小幅时钟校正后应保留计数，实际 %d", got)
+	}
+	// 大幅时钟回拨：回拨前写入的远期桶不能一直计入
+	var c3 reportCounter
+	c3.hit(base + 3600)
+	if got := c3.last60s(base); got != 0 {
+		t.Fatalf("远期桶不应计入当前窗口，实际 %d", got)
+	}
+}
+
+// TestUnauthenticatedReportsDoNotCount 回归：上报速率只统计通过鉴权的上报。
+// 否则扫描器或配错令牌的 Agent 会让健康卡片误判"采集正常"。
+func TestUnauthenticatedReportsDoNotCount(t *testing.T) {
+	const tok = "health-test-admin-token-123456"
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n1", Token: "good-token"})
+	h := New(st, nil, nil, Config{AdminToken: tok}).Handler()
+
+	post := func(nodeToken string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/report",
+			bodyOf(`{"nodeId":"n1","host":{},"metrics":{}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Node-Token", nodeToken)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+	reportCount := func() int64 {
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/health", nil)
+		req.Header.Set("X-Admin-Token", tok)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("健康接口应 200，实际 %d: %s", w.Code, w.Body.String())
+		}
+		var got struct {
+			Reports struct {
+				Last60s int64 `json:"last60s"`
+			} `json:"reports"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("响应不是合法 JSON: %v", err)
+		}
+		return got.Reports.Last60s
+	}
+
+	if code := post("wrong-token"); code != http.StatusUnauthorized {
+		t.Fatalf("错误令牌应 401，实际 %d", code)
+	}
+	if got := reportCount(); got != 0 {
+		t.Fatalf("未认证上报不应计入速率，实际 %d", got)
+	}
+	if code := post("good-token"); code != http.StatusOK {
+		t.Fatalf("有效上报应 200，实际 %d", code)
+	}
+	if got := reportCount(); got != 1 {
+		t.Fatalf("有效上报应计入速率，实际 %d", got)
+	}
+}
+
+// TestAdminHealthCountsNeverReportedAsNoData 回归：从未上报的节点
+// 属于"待接入"，不能混入"离线"（离线表示曾经上报后失联）。
+func TestAdminHealthCountsNeverReportedAsNoData(t *testing.T) {
+	const tok = "health-test-admin-token-123456"
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "n1", Token: "t"})
+	h := New(st, nil, nil, Config{AdminToken: tok}).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/health", nil)
+	req.Header.Set("X-Admin-Token", tok)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("健康接口应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Nodes struct {
+			Total   int `json:"total"`
+			Online  int `json:"online"`
+			Offline int `json:"offline"`
+			NoData  int `json:"noData"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if got.Nodes.Total != 1 || got.Nodes.NoData != 1 || got.Nodes.Offline != 0 {
+		t.Fatalf("从未上报的节点应计为 noData，实际 %+v", got.Nodes)
 	}
 }
 

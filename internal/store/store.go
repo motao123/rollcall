@@ -158,7 +158,6 @@ type Store struct {
 	historySaveMu sync.Mutex
 
 	path    string
-	dirty   bool
 	loadErr error
 	saveMu  sync.Mutex
 	saveReq chan struct{}
@@ -967,6 +966,13 @@ func (s *Store) DeleteRenewal(id string) bool {
 		}
 	}
 	return false
+}
+
+// ExpirySentFor 返回今天是否已为该节点发过到期提醒。
+func (s *Store) ExpirySentFor(nodeID, day string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.expirySent[nodeID] == day
 }
 
 // MarkExpirySent 原子地标记「今天已为这个节点发过到期提醒」。

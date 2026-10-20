@@ -149,7 +149,7 @@ func (r *Runner) expiryTick() {
 		if !ok || days < 0 || days > cfg.ExpiryDays {
 			continue
 		}
-		if !r.st.MarkExpirySent(n.ID, day) {
+		if r.st.ExpirySentFor(n.ID, day) {
 			continue
 		}
 		level := "warn"
@@ -159,7 +159,9 @@ func (r *Runner) expiryTick() {
 			level = "critical"
 		}
 		body := fmt.Sprintf("到期日期：%s，剩余 %d 天。请及时续费，避免服务中断。", n.ExpireAt, days)
-		r.ob.Enqueue(notify.Message{
+		// 只有消息真正进了队列才记「今天已提醒」：
+		// 队列满或没有可用通道时先不标记，下个 tick 还能补发。
+		if !r.ob.Enqueue(notify.Message{
 			Title:    title,
 			Body:     body,
 			Severity: level,
@@ -169,7 +171,10 @@ func (r *Runner) expiryTick() {
 			RuleName: "资产到期提醒",
 			TS:       now.Unix(),
 			Link:     r.cfg.PanelLink,
-		})
+		}) {
+			continue
+		}
+		r.st.MarkExpirySent(n.ID, day)
 		r.st.AddEvent(model.Event{
 			Kind: "expiry", Level: level, NodeID: n.ID, NodeName: n.Name,
 			Text: fmt.Sprintf("%s 将在 %d 天后到期（%s）", n.Name, days, n.ExpireAt),
@@ -187,8 +192,7 @@ func (r *Runner) reportTick(now time.Time) {
 	// 去重键保证一个周期只会真正入队一次。
 	if cfg.ReportDaily && now.Hour() >= cfg.ReportHour {
 		key := "report.daily." + now.Format("2006-01-02")
-		if r.st.GetSetting(key) == "" {
-			r.sendReport(cfg, "daily", now)
+		if r.st.GetSetting(key) == "" && r.sendReport(cfg, "daily", now) {
 			r.st.SetSetting(key, "1")
 		}
 	}
@@ -199,22 +203,23 @@ func (r *Runner) reportTick(now time.Time) {
 		// 与 2024-01-01 的键碰撞，导致当周周报被判为"已发送"而整周不发。
 		isoYear, week := now.ISOWeek()
 		key := fmt.Sprintf("report.weekly.%d-W%02d", isoYear, week)
-		if r.st.GetSetting(key) == "" {
-			r.sendReport(cfg, "weekly", now)
+		if r.st.GetSetting(key) == "" && r.sendReport(cfg, "weekly", now) {
 			r.st.SetSetting(key, "1")
 		}
 	}
 	// 月报在每月 1 日发送；与日报同一时刻时两条独立入队。
 	if cfg.ReportMonth && now.Day() == 1 && now.Hour() >= cfg.ReportHour {
 		key := "report.monthly." + now.Format("2006-01")
-		if r.st.GetSetting(key) == "" {
-			r.sendReport(cfg, "monthly", now)
+		if r.st.GetSetting(key) == "" && r.sendReport(cfg, "monthly", now) {
 			r.st.SetSetting(key, "1")
 		}
 	}
 }
 
-func (r *Runner) sendReport(cfg *notify.Config, kind string, now time.Time) {
+// sendReport 生成并投递运行报告，返回消息是否已进入通知队列。
+// 入队失败（队列满/无可用通道/严重度被过滤）时不写去重标记，
+// 下一次 tick 会重试，避免整期报告静默丢失。
+func (r *Runner) sendReport(cfg *notify.Config, kind string, now time.Time) bool {
 	views := r.st.Nodes()
 	online, stale, offline, noData := 0, 0, 0, 0
 	var cpuSum, memSum float64
@@ -268,7 +273,7 @@ func (r *Runner) sendReport(cfg *notify.Config, kind string, now time.Time) {
 	case "monthly":
 		title = "每月运行报告"
 	}
-	r.ob.Enqueue(notify.Message{
+	if !r.ob.Enqueue(notify.Message{
 		Title:    title,
 		Body:     strings.TrimRight(b.String(), "\n"),
 		Severity: "warn",
@@ -276,8 +281,11 @@ func (r *Runner) sendReport(cfg *notify.Config, kind string, now time.Time) {
 		RuleName: "运行报告",
 		TS:       now.Unix(),
 		Link:     r.cfg.PanelLink,
-	})
+	}) {
+		return false
+	}
 	log.Printf("已生成%s", title)
+	return true
 }
 
 func pct(used, total uint64) float64 {
@@ -299,6 +307,11 @@ func daysUntil(date string, now time.Time) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	return int(t.Sub(today).Hours() / 24), true
+	// 按日历日计算：直接对本地零点求差，夏令时切换日只有 23/25 小时，
+	// 截断后会把「还有 2 天」算成 1 天。用 UTC 的日期算术，差值恒为 24h 的整数倍。
+	ty, tm, td := t.Date()
+	ny, nm, nd := now.Date()
+	target := time.Date(ty, tm, td, 0, 0, 0, 0, time.UTC)
+	today := time.Date(ny, nm, nd, 0, 0, 0, 0, time.UTC)
+	return int(target.Sub(today).Hours() / 24), true
 }

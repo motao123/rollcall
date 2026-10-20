@@ -147,7 +147,7 @@ func (s *Server) applyNotifyConfig(cfg *notify.Config) {
 	s.engine.SetRepeat(cfg.RepeatInterval)
 	s.engine.SetLink(s.panelLink)
 	if s.outbox != nil {
-		s.engine.SetNotifier(s.outbox.Enqueue)
+		s.engine.SetNotifier(func(m notify.Message) { s.outbox.Enqueue(m) })
 		return
 	}
 	s.engine.SetNotifier(nil)
@@ -607,14 +607,16 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.reports.hit(time.Now().Unix())
-
 	token := r.Header.Get("X-Node-Token")
 	node, ok := s.st.NodeByToken(token, rep.NodeID)
 	if !ok {
 		fail(w, 401, "invalid token")
 		return
 	}
+
+	// 只统计通过鉴权的上报：健康卡片用它与预期值对比判断采集是否掉队，
+	// 未认证请求（扫描器、错误配置的 Agent）混进来会让速率虚高。
+	s.reports.hit(time.Now().Unix())
 
 	// Agent 版本走请求头，避免给上报 JSON 加字段：旧服务端用
 	// DisallowUnknownFields 解码，先升级 Agent 会让整份上报被拒。

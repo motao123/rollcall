@@ -128,12 +128,15 @@ func (m *Manager) SetConfig(cfg *notify.Config) {
 	m.signal()
 }
 
-// Enqueue 把告警消息写入持久队列。通知未启用或严重度不足时直接忽略。
-func (m *Manager) Enqueue(msg notify.Message) {
+// Enqueue 把告警消息写入持久队列。返回消息是否已被处理：
+// 通知停用、没有可用通道、严重度不足或队列已满时返回 false，
+// 调用方据此决定是否记录「本期已发送」标记，避免消息被丢弃后当天不再重试。
+// 静默中的消息会入队并标记为 suppressed，仍返回 true（重试也不会投递）。
+func (m *Manager) Enqueue(msg notify.Message) bool {
 	now := time.Now().Unix()
 	cfg := m.notifyCfg.Load()
 	if cfg == nil || !cfg.Enabled || len(cfg.EnabledChannels()) == 0 || !cfg.ShouldSend(msg.Severity) {
-		return
+		return false
 	}
 	eventTS := msg.TS
 	if eventTS <= 0 {
@@ -180,11 +183,12 @@ func (m *Manager) Enqueue(msg notify.Message) {
 	}
 	if !m.st.EnqueueNotifyJob(job) {
 		log.Printf("通知入队失败，队列已满: %s", msg.Title)
-		return
+		return false
 	}
 	if job.Status == model.NotifyPending {
 		m.signal()
 	}
+	return true
 }
 
 // Start 启动调度循环。已经 Stop 的 Manager 不会被重新启动：

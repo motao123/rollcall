@@ -40,9 +40,11 @@ func (c *reportCounter) last60s(now int64) int64 {
 	defer c.mu.Unlock()
 	var total int64
 	for i := 0; i < 60; i++ {
-		// now-sec 落在 [0,60) 才是有效窗口；时钟回拨产生的负值也要计入，
-		// 否则 NTP 校正一次窗口就空了。
-		if c.sec[i] != 0 && now-c.sec[i] < 60 {
+		// 有效窗口是 [now-59, now]。允许最多 60 秒的负差值，
+		// 让 NTP 小幅校正后旧桶仍计入；把大幅时钟回拨产生的
+		// 远期桶排除掉，否则窗口会一直虚高到追上那个时间点。
+		d := now - c.sec[i]
+		if c.sec[i] != 0 && d > -60 && d < 60 {
 			total += c.count[i]
 		}
 	}
@@ -65,11 +67,12 @@ func (s *Server) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	runtime.ReadMemStats(&ms)
 
 	nodes := s.st.Nodes()
-	online, stale, offline := 0, 0, 0
+	online, stale, offline, noData := 0, 0, 0, 0
 	for _, n := range nodes {
 		_, lastSeen, ok := s.st.Latest(n.ID)
 		if !ok {
-			offline++
+			// 从未上报的节点是"待接入"，与曾经上报后失联的离线节点分开计数。
+			noData++
 			continue
 		}
 		switch store.NodeState(lastSeen, unix) {
@@ -100,7 +103,8 @@ func (s *Server) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 			"numGC":          ms.NumGC,
 		},
 		"nodes": map[string]any{
-			"total": len(nodes), "online": online, "stale": stale, "offline": offline,
+			"total": len(nodes), "online": online, "stale": stale,
+			"offline": offline, "noData": noData,
 		},
 		"reports": map[string]any{
 			"last60s":     reports,

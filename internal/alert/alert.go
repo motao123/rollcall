@@ -787,7 +787,12 @@ func (e *Engine) check(rule *model.AlertRule, n *model.Node, now int64) (float64
 		used := e.st.TrafficUsage(nodeID)
 		gb := float64(used.UsedRx+used.UsedTx) / (1 << 30)
 		pct := gb / n.TrafficQuotaGB * 100
-		return pct, pct >= rule.Threshold
+		switch rule.Op {
+		case "lt":
+			return pct, pct < rule.Threshold
+		default:
+			return pct, pct > rule.Threshold
+		}
 	}
 
 	if !ok || now-ts > store.OnlineWindow {
