@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.10.2**（`./rollcall-server -version` 可查）。
+当前版本 **v1.10.3**（`./rollcall-server -version` 可查）。
 
 一个**零外部依赖**的自托管服务器监控平台。融合 Nezha 的「服务探测能力」与 Komari 的「极简部署与清爽界面」，并按"Agent 只读"的安全原则重新设计。
 
@@ -83,6 +83,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
   **抖动（jitter）与丢包率（loss）**（基于该服务最近探测样本计算）
 - 24 小时可用率统计 + 最近 2 小时延迟迷你曲线
 - **异常服务自动置顶**，一眼看到哪里坏了
+- 后台可对单个目标点「检测」立即执行一次探测，直接显示延迟、HTTP 状态码与证书剩余天数
 - 探测由**服务端发起**，不经 Agent —— 单个 Agent 沦陷无法污染其他节点的服务状态
 - **默认拒绝内网目标**（回环/RFC1918/链路本地/metadata/CGNAT）：确有内网监控需求时显式加
   `-allow-private-probes`；HTTPS 证书默认严格校验，自签名目标需显式加 `-insecure-probe-tls`
@@ -450,7 +451,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 使用前需要构建机安装 `make`。需要生成自更新签名清单时，在**签名机**上执行
 > `make rollsign` 构建 `./rollsign`（不要复制到被监控节点）。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.2`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.3`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -700,6 +701,8 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | POST | `/api/admin/nodes/{id}/rotate-token` | 轮换上报令牌（旧令牌立即失效） |
 | DELETE | `/api/admin/nodes/{id}` | 删除节点 |
 | GET/POST | `/api/admin/services` | 列出 / 创建探测目标（`enabled` 默认 true） |
+| PUT | `/api/admin/services/{id}` | 编辑探测目标；省略 `enabled` 时保留原状态 |
+| POST | `/api/admin/services/{id}/test` | 立即执行一次探测并返回状态码/延迟/证书天数（不写历史） |
 | DELETE | `/api/admin/services/{id}` | 删除探测目标 |
 | GET/POST | `/api/admin/settings` | 读取（脱敏）/ 保存通知配置 |
 | GET | `/api/admin/health` | 实例自身状态：内存/协程/上报速率/快照分段耗时/通知队列 |
@@ -825,7 +828,7 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 构建机
-make linux VERSION=v1.10.2
+make linux VERSION=v1.10.3
 scp dist/rollcall-server root@<控制端>:/tmp/rollcall-server.new
 ```
 
@@ -1151,18 +1154,19 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十二、实际部署验证
 
-已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.10.2）：
+已在 Ubuntu 22.04 / AMD EPYC 16 核 / 31GB 环境完成控制端 + 被控端同机部署验证（v1.10.3）：
 
 | 项目 | 结果 |
 |---|---|
-| 服务状态 | rollcall-server / rollcall-agent 均 v1.10.2、active + enabled；13/13 节点在线 |
+| 服务状态 | rollcall-server / rollcall-agent 均 v1.10.3、active + enabled；13/13 节点在线 |
 | 回归测试 | Ubuntu 上 `gofmt -l` 干净、`go vet ./...`、`go test ./...`、`CGO_ENABLED=1 go test -race ./...` 全部通过；staticcheck 与 govulncheck 无发现；gosec 仅剩已逐项复核的演示随机数/插件路径类误报；Node 20 对 `app.js`/`status.js` 语法检查通过 |
 | 端到端脚本 | `rollcall-e2e.sh` 隔离实例 116/116 通过：P0–P3 全部新功能、通知模板、摘要/免打扰、证书/服务/流量告警、DNS/抖动/丢包、TOTP、范围化令牌、加密备份、报告、升级/回滚 |
 | 面板账号 | 设置页可直接修改用户名/邮箱与密码，均需当前密码确认；改后当前浏览器续签、其他设备旧会话立即失效；旧用户名/旧密码登录 401，新凭据可登录；`admin-user.json` 仍仅存 PBKDF2 哈希 |
-| 服务端升级脚本 | 生产机用 `deploy/rollcall-server-upgrade.sh`：v1.10.1 → v1.10.2，强制 sha256 校验、`.prev` 保留、健康检查失败自动回滚；升级后 `/healthz` ok、登录 200/未登录 401 |
-| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.10.1 → v1.10.2，配置未改动，`.prev` 保留 v1.10.1；分发目录同步更新 amd64/arm64 二进制 |
-| Agent 版本上报 | 本机 Agent 上报 v1.10.2 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion`（远端节点多为旧版 Agent，未发送版本头） |
+| 服务端升级脚本 | 生产机用 `deploy/rollcall-server-upgrade.sh`：v1.10.2 → v1.10.3，强制 sha256 校验、`.prev` 保留、健康检查失败自动回滚；升级后 `/healthz` ok、登录 200/未登录 401 |
+| Agent 升级脚本 | 生产机执行 `install.sh --upgrade`：v1.10.2 → v1.10.3，配置未改动，`.prev` 保留 v1.10.2；分发目录同步更新 amd64/arm64 二进制 |
+| Agent 版本上报 | 本机 Agent 上报 v1.10.3 且不再提示可升级；公开 `/api/status` 不包含 `agentVersion`（远端节点多为旧版 Agent，未发送版本头） |
 | 审计修复 | 未认证上报不再计入健康速率（生产连发 3 次无效上报，`last60s` 保持 26 不变）；健康卡片区分 noData；流量配额支持 `lt` 且阈值边界与运算符一致；到期提醒/日报/周报/月报仅在真正入队后写去重标记；到期天数跨夏令时按日历日计算；计数器忽略远期时钟回拨桶 |
+| 后台一致性 | 全页面统一输入框/选择框/textarea 规格（12.5px、7px 圆角、聚焦光晕）；服务、告警、资产、对比、状态页模块顺序调整；路由级搜索框只在支持的列表页显示并带专属占位符；服务目标支持编辑、启停与「检测」即时探测（含延迟/状态码/证书天数）；资产续费、状态页维护窗口与事件均可在面板内编辑/结束/删除 |
 | 轮询刷新 | 隔离实例实测：顶栏同步时间每约 5 秒推进；聚焦搜索框 22 秒内 CPU 连续 30%→35%→40%→45%，轮询不再被输入焦点冻结；节点详情每约 5 秒比对，上报后 1 个周期内更新图表且不重复请求；勾选节点 28 秒内选择保留、数据照常拉取，取消勾选后 5 秒内补上最新值（20%→40%）；390px 视口隐藏同步时间且无横向溢出；全程无控制台错误 |
 | 新告警闭环 | 服务宕机、TLS 证书剩余天数、月度流量配额三条默认规则在生产创建成功（201）；告警触发 Webhook 与恢复通知、到期提醒均进入 Outbox |
 | 网络质量 | DNS/HTTPS/TCP 探测返回延迟、抖动与丢包；公开页展示「可用率 · 抖动 · 丢包」，探测全失败时标记「探测失败」 |

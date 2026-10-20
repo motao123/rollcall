@@ -17,6 +17,7 @@ import (
 	"github.com/motao/rollcall/internal/auth"
 	"github.com/motao/rollcall/internal/model"
 	"github.com/motao/rollcall/internal/notify"
+	"github.com/motao/rollcall/internal/probe"
 	"github.com/motao/rollcall/internal/store"
 )
 
@@ -172,6 +173,107 @@ func TestRenewalsAPI(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("删除后应为空: %+v", rows)
+	}
+}
+
+func TestServiceUpdateAPI(t *testing.T) {
+	st := store.New(t.TempDir())
+	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "t"})
+	st.UpsertService(&model.Service{
+		ID: "s1", NodeID: "n1", Name: "旧站点", Type: "http",
+		Target: "https://example.com/", Interval: 60, Enabled: true,
+	})
+	h := New(st, nil, nil, Config{AdminToken: testAdminToken}).Handler()
+
+	w := adminReq(h, http.MethodPut, "/api/admin/services/s1",
+		`{"nodeId":"n1","name":"新站点","type":"https","target":"https://example.com/health","interval":30,"enabled":false}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("编辑服务应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var got model.Service
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "s1" || got.Name != "新站点" || got.Type != "https" || got.Interval != 30 || got.Enabled {
+		t.Errorf("响应未反映更新: %+v", got)
+	}
+	if sv, ok := st.Service("s1"); !ok || sv.Name != "新站点" || sv.Target != "https://example.com/health" || sv.Enabled {
+		t.Fatalf("更新未落库: %+v", sv)
+	}
+
+	// 未提供 enabled 时保持停用状态，不能被一次编辑悄悄启用。
+	w = adminReq(h, http.MethodPut, "/api/admin/services/s1",
+		`{"nodeId":"n1","name":"再改一次","type":"http","target":"https://example.com/"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("二次编辑应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	sv, _ := st.Service("s1")
+	if sv.Enabled || sv.Interval != 60 || sv.Name != "再改一次" {
+		t.Errorf("省略字段处理错误: %+v", sv)
+	}
+
+	if w := adminReq(h, http.MethodPut, "/api/admin/services/missing",
+		`{"name":"x","type":"http","target":"https://example.com"}`); w.Code != http.StatusNotFound {
+		t.Errorf("更新不存在的服务应 404，实际 %d", w.Code)
+	}
+
+	for _, body := range []string{
+		`{"name":"","type":"http","target":"https://example.com"}`,
+		`{"name":"x","type":"icmp","target":"example.com"}`,
+		`{"name":"x","type":"http","target":"  "}`,
+		`{"name":"x","type":"http","target":"https://example.com","interval":9}`,
+		`{"name":"x","type":"http","target":"https://example.com","interval":86401}`,
+		`{"name":"x","type":"http","target":"https://example.com","oops":1}`,
+	} {
+		if w := adminReq(h, http.MethodPut, "/api/admin/services/s1", body); w.Code != http.StatusBadRequest {
+			t.Errorf("非法请求 %s 应 400，实际 %d", body, w.Code)
+		}
+	}
+	if sv, _ := st.Service("s1"); sv.Name != "再改一次" || sv.Interval != 60 {
+		t.Errorf("被拒绝的请求不应改动服务: %+v", sv)
+	}
+}
+
+func TestServiceProbeTestAPI(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	st := store.New(t.TempDir())
+	st.UpsertService(&model.Service{
+		ID: "s1", Name: "本地站点", Type: "http",
+		Target: target.URL, Interval: 60, Enabled: true,
+	})
+	runner := probe.NewRunner(probe.Config{AllowPrivate: true})
+	h := New(st, runner, nil, Config{AdminToken: testAdminToken}).Handler()
+
+	w := adminReq(h, http.MethodPost, "/api/admin/services/s1/test", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("立即检测应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var res model.ServiceResult
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.ServiceID != "s1" || res.Status != http.StatusNoContent {
+		t.Errorf("检测结果错误: %+v", res)
+	}
+	if sv, _ := st.Service("s1"); !sv.Enabled || sv.Interval != 60 {
+		t.Errorf("立即检测不应改动服务定义: %+v", sv)
+	}
+
+	if w := adminReq(h, http.MethodGet, "/api/admin/services/s1/test", ""); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET 检测端点应 405，实际 %d", w.Code)
+	}
+	if w := adminReq(h, http.MethodPost, "/api/admin/services/missing/test", ""); w.Code != http.StatusNotFound {
+		t.Errorf("不存在的服务应 404，实际 %d", w.Code)
+	}
+
+	// 探测执行器未启用时明确返回 503，不 panic。
+	h2 := New(st, nil, nil, Config{AdminToken: testAdminToken}).Handler()
+	if w := adminReq(h2, http.MethodPost, "/api/admin/services/s1/test", ""); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("缺少执行器应 503，实际 %d", w.Code)
 	}
 }
 

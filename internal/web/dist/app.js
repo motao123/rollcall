@@ -13,6 +13,7 @@ const state = {
   param: null,
   range: '1h',
   search: '',
+  nodeFilter: { provider: '', group: '', state: '' },
   data: {},
   panelLink: '',
   authRequired: false,
@@ -132,6 +133,19 @@ function tone(v, warnAt, critAt) {
   if (v >= critAt) return 'crit';
   if (v >= warnAt) return 'warn';
   return 'ok';
+}
+
+// 顶栏搜索是全局的：各列表页只需要声明参与匹配的字段。
+function matchesSearch(parts) {
+  if (!state.search) return true;
+  return parts.some((v) => String(v ?? '').toLowerCase().includes(state.search));
+}
+
+function sectionActions(meta, buttons = '') {
+  return `<div class="section-actions">
+    ${meta ? `<span class="section-meta">${meta}</span>` : ''}
+    ${buttons}
+  </div>`;
 }
 
 /* ---------------- 请求 ---------------- */
@@ -343,7 +357,7 @@ async function viewOverview() {
   setAlertBadge(ov.activeAlert || 0);
 
   const expiring = ov.expiring || [];
-  const lists = nodes.filter((n) => !state.search || n.name.toLowerCase().includes(state.search));
+  const lists = nodes.filter((n) => matchesSearch([n.name, n.provider, n.region, n.group]));
   const alerting = nodes.filter((n) => n.alerts > 0);
   const countParts = [`在线 ${ov.online}`];
   if (ov.stale) countParts.push(`数据延迟 ${ov.stale}`);
@@ -405,8 +419,7 @@ async function viewOverview() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">节点状态</h2>
-        <span class="section-meta">${lists.length} 台 · 按服务商分组</span>
-        <button class="btn primary" id="wizBtn" style="padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
+        ${sectionActions(`${lists.length} 台 · 按服务商分组`, '<button class="btn sm primary" id="wizBtn">＋ 接入节点</button>')}
       </div>
       <div class="prov-strip">
         ${providerRows.map((r) => `
@@ -468,15 +481,39 @@ async function viewOverview() {
 async function viewNodes() {
   const nodes = state.data.nodes || await api('/api/nodes');
   state.data.nodes = nodes;
-  const list = nodes.filter((n) => !state.search || n.name.toLowerCase().includes(state.search));
+  const providers = [...new Set(nodes.map((n) => n.provider).filter(Boolean))].sort();
+  const groups = [...new Set(nodes.map((n) => n.group).filter(Boolean))].sort();
+  const f = state.nodeFilter;
+  // 台账里已不存在的选项自动失效，避免筛选后永远为空。
+  if (f.provider && !providers.includes(f.provider)) f.provider = '';
+  if (f.group && !groups.includes(f.group)) f.group = '';
+  const list = nodes.filter((n) => {
+    const st = n.state || (n.online ? 'online' : 'offline');
+    if (f.provider && (n.provider || '') !== f.provider) return false;
+    if (f.group && (n.group || '') !== f.group) return false;
+    if (f.state && st !== f.state) return false;
+    return matchesSearch([n.name, n.provider, n.region, n.group, n.host?.os]);
+  });
+  const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
 
   $('#view').innerHTML = `
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
-        <span class="section-meta">${list.length} 台</span>
-        <button class="btn" id="batchBtn" style="padding:6px 14px;font-size:12.5px">批量操作</button>
-        <button class="btn primary" id="wizBtn2" style="padding:6px 14px;font-size:12.5px">＋ 接入节点</button>
+        ${sectionActions(`${list.length} / ${nodes.length} 台`, '<button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
+      </div>
+      <div class="filter-bar">
+        <select id="filterProvider" aria-label="按服务商筛选">${opt('', '全部服务商', f.provider)}${providers.map((p) => opt(p, p, f.provider)).join('')}</select>
+        <select id="filterGroup" aria-label="按分组筛选">${opt('', '全部分组', f.group)}${groups.map((g) => opt(g, g, f.group)).join('')}</select>
+        <select id="filterState" aria-label="按状态筛选">
+          ${opt('', '全部状态', f.state)}
+          ${opt('online', '在线', f.state)}
+          ${opt('stale', '数据延迟', f.state)}
+          ${opt('offline', '离线', f.state)}
+          ${opt('no_data', '待接入', f.state)}
+        </select>
+        <button class="btn sm" id="filterReset" type="button">重置筛选</button>
+        ${(f.provider || f.group || f.state || state.search) ? `<span class="section-meta">已启用筛选</span>` : ''}
       </div>
       <div id="batchBar" hidden class="batch-bar">
         <span style="font-size:12px;color:var(--fg-2)">已选 <b id="batchCount" class="mono">0</b> 台</span>
@@ -490,10 +527,10 @@ async function viewNodes() {
       </div>
       <div class="table-wrap"><table class="nodes-table">
         <thead><tr>
-          <th style="width:26px"><input type="checkbox" id="selAll" aria-label="全选"></th>
+          <th class="col-check"><input type="checkbox" id="selAll" aria-label="全选"></th>
           <th>状态</th><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
-          <th class="num">负载</th><th class="num">运行时长</th><th class="num">流量</th>
+          <th class="num">负载</th><th class="num">运行时长</th><th class="num">流量</th><th class="num">操作</th>
         </tr></thead>
         <tbody>${list.map((n) => {
           const hasData = hasNodeData(n);
@@ -502,28 +539,60 @@ async function viewNodes() {
           const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
           const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
           const dash = '—';
-          return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
+          return `<tr class="row-click" data-node="${esc(n.id)}">
             <td><input type="checkbox" class="row-sel" data-id="${esc(n.id)}" aria-label="选择 ${esc(n.name)}"></td>
             <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
             <td class="strong">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
             <td>${esc(n.provider || '—')}</td>
             <td>${esc(n.region || '—')}</td>
-            <td style="font-size:11.5px">${esc(n.host?.os || '—')}</td>
-            <td class="num mono" style="color:${cpu > 85 ? 'var(--crit)' : 'inherit'}">${cpu == null ? dash : cpu.toFixed(0) + '%'}</td>
+            <td class="os-cell">${esc(n.host?.os || '—')}</td>
+            <td class="num mono${cpu > 85 ? ' text-crit' : ''}">${cpu == null ? dash : cpu.toFixed(0) + '%'}</td>
             <td class="num mono">${mem == null ? dash : mem.toFixed(0) + '%'}</td>
-            <td class="num mono" style="color:${disk > 88 ? 'var(--crit)' : 'inherit'}">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
+            <td class="num mono${disk > 88 ? ' text-crit' : ''}">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
             <td class="num mono">${hasData ? (n.latest.load1 || 0).toFixed(2) : dash}</td>
             <td class="num mono">${hasData ? dur(n.latest.uptime) : dash}</td>
             <td class="num mono">${hasData ? bytes(n.latest.netRx) : dash}</td>
+            <td class="num"><div class="row-actions">
+              <button class="btn tiny" data-node-edit="${esc(n.id)}">编辑</button>
+              <button class="btn tiny" data-node-agent="${esc(n.id)}">接入</button>
+            </div></td>
           </tr>`;
-        }).join('') || `<tr><td colspan="12"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
+        }).join('') || `<tr><td colspan="13"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
       </table></div>
     </section>`;
   bindNodeClicks();
   const wiz2 = document.getElementById('wizBtn2');
   if (wiz2) wiz2.onclick = showAgentWizard;
+  const bindFilter = (id, key) => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = () => { state.nodeFilter[key] = el.value; viewNodes(); };
+  };
+  bindFilter('filterProvider', 'provider');
+  bindFilter('filterGroup', 'group');
+  bindFilter('filterState', 'state');
+  const reset = document.getElementById('filterReset');
+  if (reset) reset.onclick = () => {
+    state.nodeFilter = { provider: '', group: '', state: '' };
+    viewNodes();
+  };
+  $$('[data-node-edit]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await editNodeById(b.dataset.nodeEdit, viewNodes);
+      } catch (err) { toast('读取节点失败：' + err.message, 'err'); }
+    };
+  });
+  $$('[data-node-agent]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        const n = await adminApi('/api/admin/nodes/' + encodeURIComponent(b.dataset.nodeAgent));
+        showAgentConfig(n);
+      } catch (err) { toast('读取接入信息失败：' + err.message, 'err'); }
+    };
+  });
   bindBatchOps(list);
-
 }
 
 // bindBatchOps 节点多选与批量操作。
@@ -663,8 +732,12 @@ async function viewNodeDetail(id) {
           ${esc(host.hostname || '—')} · ${esc(host.os || '—')} · ${esc(host.kernel || '')} · ${host.cores || '?'} 核
         </p>
       </div>
-      <div class="range-tabs">
-        ${['1h', '6h', '24h', '7d', '30d', '365d'].map((r) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${r}</button>`).join('')}
+      <div class="detail-actions">
+        <div class="range-tabs">
+          ${['1h', '6h', '24h', '7d', '30d', '365d'].map((r) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${r}</button>`).join('')}
+        </div>
+        <button class="btn sm" id="nodeEditBtn" type="button">编辑资产</button>
+        <button class="btn sm" id="nodeAgentBtn" type="button">接入 / 令牌</button>
       </div>
     </div>
 
@@ -697,9 +770,9 @@ async function viewNodeDetail(id) {
         </div>
       </div>
 
-      <div>
-        <div class="panel panel-pad" style="margin-bottom:12px">
-          <div class="section-title" style="margin-bottom:8px">系统信息</div>
+      <div class="panel-stack">
+        <div class="panel panel-pad">
+          <div class="panel-head"><span class="panel-title">系统信息</span></div>
           <div class="info-list">
             <div class="info-row"><span class="info-k">主机名</span><span class="info-v mono">${esc(host.hostname || '—')}</span></div>
             <div class="info-row"><span class="info-k">操作系统</span><span class="info-v">${esc(host.os || '—')}</span></div>
@@ -717,7 +790,10 @@ async function viewNodeDetail(id) {
         </div>
 
         <div class="panel panel-pad">
-          <div class="section-title" style="margin-bottom:8px">资产</div>
+          <div class="panel-head">
+            <span class="panel-title">资产</span>
+            <button class="btn tiny" id="assetEditBtn" type="button">编辑</button>
+          </div>
           <div class="info-list">
             <div class="info-row"><span class="info-k">服务商</span><span class="info-v">${esc(n.provider || '—')}</span></div>
             <div class="info-row"><span class="info-k">位置</span><span class="info-v">${esc(n.region || '—')}</span></div>
@@ -727,8 +803,11 @@ async function viewNodeDetail(id) {
           </div>
         </div>
 
-        <div class="panel panel-pad" style="margin-top:12px">
-          <div class="section-title" style="margin-bottom:8px">流量配额</div>
+        <div class="panel panel-pad">
+          <div class="panel-head">
+            <span class="panel-title">流量配额</span>
+            <button class="btn tiny" id="quotaEditBtn" type="button">设置</button>
+          </div>
           ${quotaBytes > 0 ? `
             <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
               <span class="mono">${bytes(trafficUsed)}</span>
@@ -741,8 +820,8 @@ async function viewNodeDetail(id) {
           `}
         </div>
 
-        <div class="panel panel-pad" style="margin-top:12px">
-          <div class="section-title" style="margin-bottom:8px">采集明细</div>
+        <div class="panel panel-pad">
+          <div class="panel-head"><span class="panel-title">采集明细</span></div>
           <div class="info-list">
             <div class="info-row"><span class="info-k">磁盘 I/O（累计）</span><span class="info-v mono" style="font-size:11.5px">读 ${bytes(last.diskReadBytes || 0)}<br>写 ${bytes(last.diskWriteBytes || 0)}</span></div>
           </div>
@@ -761,6 +840,25 @@ async function viewNodeDetail(id) {
     </div>`;
 
   $('#backToNodes').onclick = () => { location.hash = '#/nodes'; };
+  const openDetailEdit = async () => {
+    try {
+      const an = await adminApi('/api/admin/nodes/' + encodeURIComponent(id));
+      showNodeEdit(an, render);
+    } catch (e) { toast('读取资产信息失败：' + e.message, 'err'); }
+  };
+  const nodeEditBtn = $('#nodeEditBtn');
+  const assetEditBtn = $('#assetEditBtn');
+  const quotaEditBtn = $('#quotaEditBtn');
+  if (nodeEditBtn) nodeEditBtn.onclick = openDetailEdit;
+  if (assetEditBtn) assetEditBtn.onclick = openDetailEdit;
+  if (quotaEditBtn) quotaEditBtn.onclick = openDetailEdit;
+  const nodeAgentBtn = $('#nodeAgentBtn');
+  if (nodeAgentBtn) nodeAgentBtn.onclick = async () => {
+    try {
+      const an = await adminApi('/api/admin/nodes/' + encodeURIComponent(id));
+      showAgentConfig(an);
+    } catch (e) { toast('读取接入信息失败：' + e.message, 'err'); }
+  };
   $$('.range-tabs button', $('#view')).forEach((b) => {
     b.onclick = () => {
       state.range = b.dataset.range;
@@ -771,20 +869,26 @@ async function viewNodeDetail(id) {
 }
 
 async function viewServices() {
-  const svcs = await api('/api/services');
+  const [svcs, nodes] = await Promise.all([
+    api('/api/services'),
+    api('/api/nodes').catch(() => []),
+  ]);
+  state.data.nodes = nodes;
+  const list = svcs.filter((s) => matchesSearch([s.name, s.target, s.type, s.enabled === false ? '已停用' : '']));
   $('#view').innerHTML = `
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">服务探测</h2>
-        <span class="section-meta">${svcs.length} 个目标 · 由服务端主动探测</span>
+        ${sectionActions(`${list.length} / ${svcs.length} 个目标 · 由服务端主动探测`, '<button class="btn sm primary" id="svcAdd">＋ 新增探测</button>')}
       </div>
       <div class="table-wrap"><table class="services-table">
         <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th>
-          <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24h 可用率</th><th>最近 2 小时</th></tr></thead>
-        <tbody>${svcs.map((s) => {
+          <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24h 可用率</th><th>最近 2 小时</th><th class="num">操作</th></tr></thead>
+        <tbody>${list.map((s) => {
           const spark = (s.spark || []).slice(-120).map((p) => p[1]);
           const up = s.uptime || 0;
           const cd = s.certDays;
+          const enabled = s.enabled !== false;
           const certCell = cd === 0
             ? '<span class="badge crit">已过期</span>'
             : cd > 0
@@ -793,21 +897,142 @@ async function viewServices() {
           const loss = Number(s.lossPct || 0);
           const jitter = Number(s.jitterMs || 0);
           return `<tr>
-            <td><span class="dot ${s.ok ? 'ok' : 'crit'}"></span></td>
+            <td><span class="dot ${!enabled ? 'off' : s.ok ? 'ok' : 'crit'}"></span>${enabled ? '' : ' <span class="badge mute">已停用</span>'}</td>
             <td class="strong">${esc(s.name)}</td>
             <td><span class="badge mute">${esc(s.type.toUpperCase())}</span></td>
-            <td class="mono" style="font-size:11.5px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.target)}</td>
+            <td class="mono target-cell" title="${esc(s.target)}">${esc(s.target)}</td>
             <td class="num mono">${s.latencyMs ? s.latencyMs + 'ms' : '—'}</td>
-            <td class="num mono" style="font-size:11.5px">${loss > 0 ? `<span style="color:${loss >= 10 ? 'var(--crit)' : 'var(--warn)'}">${loss.toFixed(1)}%</span>` : '0%'} / ${jitter ? jitter.toFixed(0) + 'ms' : '—'}</td>
+            <td class="num mono cell-compact">${loss > 0 ? `<span class="${loss >= 10 ? 'text-crit' : 'text-warn'}">${loss.toFixed(1)}%</span>` : '0%'} / ${jitter ? jitter.toFixed(0) + 'ms' : '—'}</td>
             <td class="num">${certCell}</td>
             <td class="num"><span class="badge ${up >= 99 ? 'ok' : up >= 95 ? 'warn' : 'crit'}">${up.toFixed(1)}%</span></td>
-            <td style="width:150px;padding:6px 14px">
-              <div style="height:22px">${sparkline(spark, s.ok ? 'var(--ok)' : 'var(--crit)', 22)}</div>
-            </td>
+            <td class="spark-cell"><div class="spark-box">${sparkline(spark, s.ok ? 'var(--ok)' : 'var(--crit)', 22)}</div></td>
+            <td class="num"><div class="row-actions">
+              <button class="btn tiny" data-svc-test="${esc(s.id)}">检测</button>
+              <button class="btn tiny" data-svc-edit="${esc(s.id)}">编辑</button>
+              <button class="btn tiny" data-svc-toggle="${esc(s.id)}">${enabled ? '停用' : '启用'}</button>
+              <button class="btn tiny danger" data-svc-del="${esc(s.id)}">删除</button>
+            </div></td>
           </tr>`;
-        }).join('') || `<tr><td colspan="9"><div class="empty">尚未配置服务探测目标</div></td></tr>`}</tbody>
+        }).join('') || `<tr><td colspan="10"><div class="empty">尚未配置服务探测目标</div></td></tr>`}</tbody>
       </table></div>
     </section>`;
+
+  $('#svcAdd').onclick = () => openServiceDialog(null, nodes);
+  $$('[data-svc-test]').forEach((b) => {
+    b.onclick = () => {
+      const svc = svcs.find((x) => x.id === b.dataset.svcTest);
+      if (svc) testServiceNow(svc, b);
+    };
+  });
+  $$('[data-svc-edit]').forEach((b) => {
+    b.onclick = () => {
+      const svc = svcs.find((x) => x.id === b.dataset.svcEdit);
+      if (svc) openServiceDialog(svc, nodes);
+    };
+  });
+  $$('[data-svc-toggle]').forEach((b) => {
+    b.onclick = async () => {
+      const svc = svcs.find((x) => x.id === b.dataset.svcToggle);
+      if (!svc) return;
+      b.disabled = true;
+      try {
+        await adminApi('/api/admin/services/' + encodeURIComponent(svc.id), {
+          method: 'PUT',
+          body: JSON.stringify({
+            name: svc.name, type: svc.type, target: svc.target,
+            interval: svc.interval, nodeId: svc.nodeId || '', enabled: svc.enabled === false,
+          }),
+        });
+        toast(svc.enabled === false ? '探测已启用' : '探测已停用');
+        viewServices();
+      } catch (e) {
+        toast('操作失败：' + e.message, 'err');
+        b.disabled = false;
+      }
+    };
+  });
+  $$('[data-svc-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('确认删除该探测目标？其历史探测数据会一并删除。')) return;
+      b.disabled = true;
+      try {
+        await adminApi('/api/admin/services/' + encodeURIComponent(b.dataset.svcDel), { method: 'DELETE' });
+        toast('探测目标已删除');
+        viewServices();
+      } catch (e) {
+        toast('删除失败：' + e.message, 'err');
+        b.disabled = false;
+      }
+    };
+  });
+}
+
+// openServiceDialog 新增或编辑探测目标。后端用 PUT 更新，保留探测历史。
+async function testServiceNow(svc, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '检测中…';
+  try {
+    const r = await adminApi('/api/admin/services/' + encodeURIComponent(svc.id) + '/test', { method: 'POST' });
+    if (!r.ok) {
+      toast(`${svc.name} 检测失败：${r.detail || '目标不可达'}`, 'err');
+      return;
+    }
+    const bits = ['连通正常'];
+    if (r.latencyMs) bits.push(r.latencyMs + ' ms');
+    if (r.status) bits.push('HTTP ' + r.status);
+    if (r.certDays >= 0) bits.push(r.certDays === 0 ? '证书已过期' : '证书 ' + r.certDays + ' 天');
+    toast(`${svc.name}：${bits.join(' · ')}`);
+  } catch (e) {
+    toast('检测失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function openServiceDialog(svc, nodes, after) {
+  const editing = !!svc;
+  const dlg = openDialog(editing ? '编辑探测目标' : '新增探测目标', `
+    <p class="modal-sub">HTTP/HTTPS 会同时校验证书；TCP/DNS 只判断连通性。间隔最小 10 秒。</p>
+    <form id="svcDialogForm" class="form-grid">
+      ${field('名称', 'name', svc?.name || '', { required: true, placeholder: '例如 imotao.com' })}
+      ${selectField('类型', 'type', svc?.type || 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }, { v: 'dns', t: 'DNS' }])}
+      ${field('目标', 'target', svc?.target || '', { required: true, placeholder: 'https://example.com / 1.2.3.4:3306' })}
+      ${field('间隔（秒）', 'interval', String(svc?.interval || 60), { type: 'number', hint: '10–86400 秒' })}
+      ${selectField('归属节点', 'nodeId', svc?.nodeId || '', [{ v: '', t: '不关联' }].concat(nodes.map((n) => ({ v: n.id, t: n.name }))))}
+      ${checkbox('启用探测', 'enabled', editing ? svc.enabled !== false : true)}
+      <div class="form-actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">${editing ? '保存修改' : '添加'}</button>
+      </div>
+    </form>`);
+  const form = dlg.querySelector('#svcDialogForm');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(form);
+    const body = JSON.stringify({
+      name: d.name, type: d.type, target: d.target,
+      interval: Number(d.interval) || 60, nodeId: d.nodeId || '', enabled: !!d.enabled,
+    });
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      if (editing) {
+        await adminApi('/api/admin/services/' + encodeURIComponent(svc.id), { method: 'PUT', body });
+        toast('探测目标已更新');
+      } else {
+        await adminApi('/api/admin/services', { method: 'POST', body });
+        toast('探测目标已添加');
+      }
+      dlg.close();
+      (after || viewServices)();
+    } catch (err) {
+      toast('保存失败：' + err.message, 'err');
+      btn.disabled = false;
+    }
+  };
+  form.querySelector('input[name=name]').focus();
 }
 
 async function viewAlerts() {
@@ -820,6 +1045,9 @@ async function viewAlerts() {
   ]);
   const items = d.items || [];
   setAlertBadge(d.active || 0);
+  const rulesAll = rules || [];
+  const filteredRules = rulesAll.filter((r) => matchesSearch([r.name, r.metric, r.severity, ...(r.groups || [])]));
+  const filteredItems = items.filter((a) => matchesSearch([a.ruleName, a.nodeName, a.message, a.severity]));
 
   const metricMap = {};
   (meta.metrics || []).forEach((m) => { metricMap[m.value] = m; });
@@ -842,28 +1070,12 @@ async function viewAlerts() {
 
     <section class="section">
       <div class="section-head">
-        <h2 class="section-title">通知投递</h2>
-        <span class="section-meta">告警始终记录；静默仅拦截通知</span>
-      </div>
-      <div class="panel panel-pad" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-        <span class="badge ${globalSil ? 'warn' : 'ok'}">${globalSil ? '全局静默 ' + esc(silLabel(globalSil)) : '全局通知正常'}</span>
-        <span class="section-meta">队列：待投递 ${nq.pending || 0} · 已送达 ${nq.sent || 0} · 失败 ${nq.failed || 0} · 重试 ${nq.retries || 0}</span>
-        <span class="section-meta">${nq.lastSuccess ? '最近成功 ' + clock(nq.lastSuccess) : '尚无成功记录'}</span>
-        ${canManage ? `<div style="margin-left:auto;display:flex;gap:8px">
-          <button class="btn tiny" id="globalSilenceBtn">${globalSil ? '调整全局静默' : '全局静默'}</button>
-          ${globalSil ? '<button class="btn tiny danger" id="globalUnsilenceBtn">取消静默</button>' : ''}
-        </div>` : ''}
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
         <h2 class="section-title">告警规则</h2>
-        <span class="section-meta">阈值、持续时间与级别均可在此调整</span>
+        ${sectionActions(`${filteredRules.length} / ${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
       </div>
       <div class="table-wrap"><table class="alerts-table">
         <thead><tr><th>规则</th><th>条件</th><th class="num">持续</th><th>级别</th><th class="num">启用</th><th class="num">操作</th></tr></thead>
-        <tbody>${(rules || []).map((r) => {
+        <tbody>${filteredRules.map((r) => {
           const m = metricMap[r.metric];
           const unit = m ? m.unit : '';
           const cond = r.metric === 'offline'
@@ -887,15 +1099,15 @@ async function viewAlerts() {
           </tr>`;
         }).join('') || `<tr><td colspan="6"><div class="empty">暂无规则</div></td></tr>`}</tbody>
       </table></div>
-      <div style="margin-top:10px">
-        <button class="btn primary" id="addRuleBtn">＋ 新增规则</button>
-      </div>
     </section>
 
     <section class="section">
-      <div class="section-head"><h2 class="section-title">告警记录</h2></div>
+      <div class="section-head">
+        <h2 class="section-title">告警记录</h2>
+        ${sectionActions(`${filteredItems.length} / ${items.length} 条 · 最近 200 条`)}
+      </div>
       <div class="panel">
-        ${items.map((a) => {
+        ${filteredItems.map((a) => {
           const active = !a.resolvedAt;
           return `<div class="alert-item">
             <div class="alert-bar ${a.severity}"></div>
@@ -903,20 +1115,39 @@ async function viewAlerts() {
               <div class="alert-title">
                 ${esc(a.ruleName)}
                 <span class="badge ${active ? (a.severity === 'critical' ? 'crit' : 'warn') : 'mute'}">${active ? '进行中' : '已恢复'}</span>
-                <span style="font-size:11px;color:var(--fg-3);font-weight:400">${esc(a.nodeName)}</span>
+                ${a.nodeId
+                  ? `<a class="alert-link" href="#/nodes/${encodeURIComponent(a.nodeId)}">${esc(a.nodeName)}</a>`
+                  : `<span class="alert-node">${esc(a.nodeName)}</span>`}
+                ${a.serviceName ? `<span class="alert-node">· ${esc(a.serviceName)}</span>` : ''}
               </div>
               <div class="alert-msg">${esc(a.message)}</div>
               <div class="alert-time mono">${clock(a.startedAt)} 开始${a.resolvedAt ? ` · ${clock(a.resolvedAt)} 恢复` : ''}</div>
             </div>
           </div>`;
-        }).join('') || `<div class="empty">暂无告警记录</div>`}
+        }).join('') || `<div class="empty">${items.length ? '没有匹配的告警记录' : '暂无告警记录'}</div>`}
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">通知投递</h2>
+        <span class="section-meta">告警始终记录；静默仅拦截通知</span>
+      </div>
+      <div class="panel panel-pad" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <span class="badge ${globalSil ? 'warn' : 'ok'}">${globalSil ? '全局静默 ' + esc(silLabel(globalSil)) : '全局通知正常'}</span>
+        <span class="section-meta">队列：待投递 ${nq.pending || 0} · 已送达 ${nq.sent || 0} · 失败 ${nq.failed || 0} · 重试 ${nq.retries || 0}</span>
+        <span class="section-meta">${nq.lastSuccess ? '最近成功 ' + clock(nq.lastSuccess) : '尚无成功记录'}</span>
+        ${canManage ? `<div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn tiny" id="globalSilenceBtn">${globalSil ? '调整全局静默' : '全局静默'}</button>
+          ${globalSil ? '<button class="btn tiny danger" id="globalUnsilenceBtn">取消静默</button>' : ''}
+        </div>` : ''}
       </div>
     </section>`;
 
   // ---- 事件绑定 ----
   $$('[data-rule-toggle]').forEach((el) => {
     el.onchange = async () => {
-      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); el.checked = !el.checked; return; }
+      if (!canManage) { toast('当前会话没有管理权限', 'err'); el.checked = !el.checked; return; }
       try {
         await adminApi('/api/admin/rules/' + el.dataset.ruleToggle, {
           method: 'PUT', body: JSON.stringify({ enabled: el.checked }),
@@ -931,7 +1162,7 @@ async function viewAlerts() {
 
   $$('[data-rule-del]').forEach((b) => {
     b.onclick = async () => {
-      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
       if (!confirm('确认删除该规则？其进行中的告警会一并关闭。')) return;
       try {
         await adminApi('/api/admin/rules/' + b.dataset.ruleDel, { method: 'DELETE' });
@@ -942,7 +1173,7 @@ async function viewAlerts() {
 
   $$('[data-rule-edit]').forEach((b) => {
     b.onclick = () => {
-      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
       const r = (rules || []).find((x) => x.id === b.dataset.ruleEdit);
       if (r) openRuleDialog(r, meta, nodes);
     };
@@ -956,14 +1187,14 @@ async function viewAlerts() {
   const globalSilenceBtn = $('#globalSilenceBtn');
   if (globalSilenceBtn) {
     globalSilenceBtn.onclick = () => {
-      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
       openSilenceDialog('global', '全局通知', globalSil);
     };
   }
   const globalUnsilenceBtn = $('#globalUnsilenceBtn');
   if (globalUnsilenceBtn) {
     globalUnsilenceBtn.onclick = async () => {
-      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
       try {
         await adminApi('/api/admin/silences/global', { method: 'DELETE' });
         toast('全局静默已取消');
@@ -973,7 +1204,7 @@ async function viewAlerts() {
   }
   $$('[data-rule-silence]').forEach((b) => {
     b.onclick = () => {
-      if (!canManage) { toast('请先在「设置」页配置管理令牌', 'err'); return; }
+      if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
       const r = (rules || []).find((x) => x.id === b.dataset.ruleSilence);
       if (r) openSilenceDialog(r.id, r.name, silenceMap[r.id]);
     };
@@ -1115,7 +1346,7 @@ function openRuleDialog(rule, meta, nodes) {
       ${selectField('告警级别', 'severity', r.severity, severities.map((x) => ({ v: x.value, t: x.label })))}
       <label class="field" id="nodeScope">
         <span class="field-label">定向节点（可多选，留空=全部）</span>
-        <select name="nodeIds" multiple size="4" style="min-height:86px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">${nodeOptions}</select>
+        <select name="nodeIds" multiple size="4">${nodeOptions}</select>
         <span class="field-hint">按住 Ctrl / Cmd 多选</span>
       </label>
       <label class="field" id="groupScope">
@@ -1125,7 +1356,7 @@ function openRuleDialog(rule, meta, nodes) {
       </label>
       <label class="field" id="svcScope" style="display:none">
         <span class="field-label">定向服务（可多选，留空=全部服务）</span>
-        <select name="serviceIds" multiple size="4" style="min-height:86px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">${svcOptions}</select>
+        <select name="serviceIds" multiple size="4">${svcOptions}</select>
         <span class="field-hint">仅服务类指标生效；服务未配置时保持为空</span>
       </label>
       ${checkbox('启用该规则', 'enabled', r.enabled)}
@@ -1224,7 +1455,8 @@ async function viewAssets() {
     api('/api/assets'),
     api('/api/renewals').catch(() => []),
   ]);
-  const rows = d.rows || [];
+  const rowsAll = d.rows || [];
+  const rows = rowsAll.filter((r) => matchesSearch([r.name, r.provider, r.region, r.os, r.expireAt]));
   const renewRows = Array.isArray(renewals) ? renewals : [];
   const total = d.monthlyTotal || 0;
 
@@ -1283,39 +1515,42 @@ async function viewAssets() {
     </div>
     <section class="section">
       <div class="section-head">
-        <h2 class="section-title">续费日历</h2>
-        <span class="section-meta">未来 12 个月 · 到期日与续费记录</span>
-        <button class="btn primary" id="addRenewBtn" style="padding:6px 14px;font-size:12.5px">＋ 登记续费</button>
-      </div>
-      <div class="renew-grid">${monthHTML}</div>
-    </section>
-    <section class="section">
-      <div class="section-head">
         <h2 class="section-title">资产台账</h2>
-        <span class="section-meta">按到期时间排序</span>
+        ${sectionActions(`${rows.length} / ${rowsAll.length} 台 · 按到期时间排序`)}
       </div>
       <div class="table-wrap"><table class="assets-table">
         <thead><tr><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
-          <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th></tr></thead>
+          <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th><th class="num">操作</th></tr></thead>
         <tbody>${rows.map((r) => {
           const d2 = r.days;
           const cls = !d2 ? 'mute' : d2 <= 7 ? 'crit' : d2 <= 30 ? 'warn' : 'ok';
           return `<tr>
-            <td class="strong">${esc(r.name)}</td>
+            <td class="strong"><a class="row-link" href="#/nodes/${encodeURIComponent(r.id)}">${esc(r.name)}</a></td>
             <td>${esc(r.provider || '—')}</td>
             <td>${esc(r.region || '—')}</td>
-            <td style="font-size:11.5px">${esc(r.os || '—')}</td>
+            <td class="os-cell">${esc(r.os || '—')}</td>
             <td class="mono">${esc(r.expireAt || '未登记')}</td>
             <td class="num"><span class="badge ${cls}">${d2 ? d2 + ' 天' : '—'}</span></td>
             <td class="num mono">${r.price ? (r.currency === 'CNY' ? '¥' : '$') + r.price : '—'}</td>
             <td class="num mono">$${(r.monthly || 0).toFixed(1)}</td>
+            <td class="num row-actions">
+              <button class="btn tiny" data-asset-renew="${esc(r.id)}">续费</button>
+              <button class="btn tiny" data-asset-edit="${esc(r.id)}">编辑</button>
+            </td>
           </tr>`;
-        }).join('') || `<tr><td colspan="8"><div class="empty">台账为空</div></td></tr>`}</tbody>
+        }).join('') || `<tr><td colspan="9"><div class="empty">${rowsAll.length ? '没有匹配的资产' : '台账为空'}</div></td></tr>`}</tbody>
       </table></div>
+    </section>
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">续费日历</h2>
+        ${sectionActions('未来 12 个月 · 到期日与续费记录', '<button class="btn sm primary" id="addRenewBtn">＋ 登记续费</button>')}
+      </div>
+      <div class="renew-grid">${monthHTML}</div>
     </section>`;
 
-  $('#addRenewBtn').onclick = () => {
-    const opts = rows.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('');
+  const openRenew = (preselect) => {
+    const opts = rowsAll.map((r) => `<option value="${esc(r.id)}"${r.id === preselect ? ' selected' : ''}>${esc(r.name)}</option>`).join('');
     const dlg = openDialog('登记续费', `
       <p class="modal-sub">续费记录只用于日历与成本回溯，不会自动修改节点的到期日。</p>
       <form id="renewForm" class="form-grid">
@@ -1346,6 +1581,18 @@ async function viewAssets() {
     };
   };
 
+  $('#addRenewBtn').onclick = () => openRenew('');
+  $$('[data-asset-renew]').forEach((b) => {
+    b.onclick = () => openRenew(b.dataset.assetRenew);
+  });
+  $$('[data-asset-edit]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await editNodeById(b.dataset.assetEdit, viewAssets);
+      } catch (err) { toast('读取资产信息失败：' + err.message, 'err'); }
+    };
+  });
+
   $$('[data-del-renew]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
@@ -1372,7 +1619,8 @@ async function viewCompare() {
     api('/api/compare' + (qs.toString() ? '?' + qs.toString() : '')),
     api('/api/nodes'),
   ]);
-  const rows = d.nodes || [];
+  const rowsAll = d.nodes || [];
+  const rows = rowsAll.filter((n) => matchesSearch([n.name, n.group, n.region, n.country, n.state]));
   const sum = d.summary || {};
   const groups = [...new Set(nodes.map((n) => n.group).filter(Boolean))].sort();
 
@@ -1391,7 +1639,7 @@ async function viewCompare() {
     const qp = quota > 0 ? (used / (quota * 1024 * 1024 * 1024)) * 100 : 0;
     const st = nodeState({ state: n.state, online: n.state === 'online', alerts: 0 });
     const days = n.expireAt ? Math.ceil((new Date(n.expireAt + 'T00:00:00') - Date.now()) / 86400000) : null;
-    return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
+    return `<tr class="row-click" data-node="${esc(n.id)}">
       <td><button class="fav-btn ${n.favorite ? 'on' : ''}" data-fav-node="${esc(n.id)}" data-fav="${n.favorite ? '1' : '0'}" title="${n.favorite ? '取消收藏' : '收藏'}">${n.favorite ? '★' : '☆'}</button></td>
       <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days <= 7 ? 'crit' : 'warn'}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}</td>
       <td><span class="dot ${st.tone}"></span> ${esc(st.text)}</td>
@@ -1400,8 +1648,8 @@ async function viewCompare() {
       <td class="num">${n.state === 'no_data' ? '—' : tbar(n.memPct, 80, 92)}</td>
       <td class="num">${n.state === 'no_data' ? '—' : tbar(n.diskPct, 80, 90)}</td>
       <td class="num mono">${n.state === 'no_data' ? '—' : n.load1.toFixed(2)}</td>
-      <td class="num mono" style="font-size:11.5px">${n.state === 'no_data' ? '—' : '↓' + rate(n.netRx) + ' ↑' + rate(n.netTx)}</td>
-      <td class="num mono" style="font-size:11.5px">${bytes(used)}${quota > 0 ? `<div class="field-hint">${qp.toFixed(0)}% / ${quota} GB</div>` : ''}</td>
+      <td class="num mono cell-compact">${n.state === 'no_data' ? '—' : '↓' + rate(n.netRx) + ' ↑' + rate(n.netTx)}</td>
+      <td class="num mono cell-compact">${bytes(used)}${quota > 0 ? `<div class="field-hint">${qp.toFixed(0)}% / ${quota} GB</div>` : ''}</td>
       <td class="num mono">${n.price ? (n.currency === 'CNY' ? '¥' : '$') + n.price : '—'}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="11"><div class="empty">没有匹配的节点</div></td></tr>`;
@@ -1417,7 +1665,7 @@ async function viewCompare() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">对比范围</h2>
-        <span class="section-meta">${rows.length} 台节点</span>
+        ${sectionActions(`${rows.length} / ${rowsAll.length} 台节点`)}
       </div>
       <div class="panel panel-pad compare-filter">
         <label class="field" style="margin:0">
@@ -1432,16 +1680,6 @@ async function viewCompare() {
     </section>
     <section class="section">
       <div class="section-head">
-        <h2 class="section-title">分组聚合</h2>
-        <span class="section-meta">仅在线节点参与均值</span>
-      </div>
-      <div class="table-wrap"><table class="assets-table">
-        <thead><tr><th>分组</th><th class="num">在线 / 总数</th><th class="num">平均 CPU</th><th class="num">平均内存</th><th class="num">月度成本</th><th class="num">实时下行</th></tr></thead>
-        <tbody>${groupRows}</tbody>
-      </table></div>
-    </section>
-    <section class="section">
-      <div class="section-head">
         <h2 class="section-title">节点对比</h2>
         <span class="section-meta">点击星标收藏，点击行查看详情</span>
       </div>
@@ -1450,6 +1688,16 @@ async function viewCompare() {
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th><th class="num">负载</th>
           <th class="num">实时流量</th><th class="num">周期用量</th><th class="num">年付价</th></tr></thead>
         <tbody>${nodeRows}</tbody>
+      </table></div>
+    </section>
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">分组聚合</h2>
+        <span class="section-meta">仅在线节点参与均值</span>
+      </div>
+      <div class="table-wrap"><table class="assets-table">
+        <thead><tr><th>分组</th><th class="num">在线 / 总数</th><th class="num">平均 CPU</th><th class="num">平均内存</th><th class="num">月度成本</th><th class="num">实时下行</th></tr></thead>
+        <tbody>${groupRows}</tbody>
       </table></div>
     </section>`;
 
@@ -2033,133 +2281,6 @@ async function viewSettings() {
 
     <section class="section">
       <div class="section-head">
-        <h2 class="section-title">管理员账号</h2>
-        <span class="section-meta">密码仅以 PBKDF2 哈希保存在服务端</span>
-      </div>
-      <div class="panel panel-pad account-panel">
-        <span class="account-avatar" aria-hidden="true">${esc(accountInitial)}</span>
-        <div class="account-info">
-          <div class="account-name">${esc(accountName)}</div>
-          <div class="field-hint">${esc(accountEmail)} · 会话有效期 7 天</div>
-        </div>
-        <div class="account-actions">
-          <button class="btn" id="editAccountBtn" type="button">编辑账号</button>
-          <button class="btn" id="changePasswordBtn" type="button">修改密码</button>
-          <a class="btn" href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
-          <button class="btn danger" id="logoutBtn" type="button">退出登录</button>
-        </div>
-      </div>
-      <p class="field-hint" style="margin:8px 0 0">
-        账号资料与密码可在此直接修改，保存时需验证当前密码；修改后当前浏览器自动续签，其他设备需重新登录。
-        忘记密码时可在服务端执行 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
-      </p>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2 class="section-title">安全与自动化</h2>
-        <span class="section-meta">两步验证与范围化 API 令牌</span>
-      </div>
-      <div class="panel panel-pad" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-        <span class="badge ${totpOn ? 'ok' : 'mute'}">${totpOn ? '两步验证已启用' : '两步验证未启用'}</span>
-        <span class="section-meta">登录时在密码之外额外校验身份验证器动态码（TOTP，30 秒轮换）。</span>
-        <button class="btn ${totpOn ? 'danger' : 'primary'}" id="totpBtn" type="button" style="margin-left:auto">${totpOn ? '停用两步验证' : '启用两步验证'}</button>
-      </div>
-      <div class="panel panel-pad">
-        <div class="ch-add">
-          <input id="tokenName" type="text" maxlength="64" placeholder="令牌名称，例如 CI 只读" style="flex:0 0 220px">
-          <select id="tokenScope">
-            <option value="read">只读（read）</option>
-            <option value="admin">管理（admin）</option>
-          </select>
-          <input id="tokenDays" type="number" min="0" max="3650" placeholder="有效天数（0=永久）" style="flex:0 0 170px">
-          <button class="btn primary" id="createTokenBtn" type="button">创建令牌</button>
-        </div>
-        <p class="field-hint" style="margin:8px 0 10px">
-          使用 <code>Authorization: Bearer rct_…</code> 调用 API；令牌只保存 SHA-256 摘要，明文仅在创建时显示一次。
-          管理范围可执行写操作，请仅授予可信自动化。
-        </p>
-        <div class="table-wrap"><table class="queue-table">
-          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
-          <tbody>${tokenRows}</tbody>
-        </table></div>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2 class="section-title">加密备份与恢复</h2>
-        <span class="section-meta">AES-256-GCM · 仅配置文件，不含监控历史</span>
-      </div>
-      <div class="panel panel-pad">
-        <div class="grid-2">
-          <div>
-            <div class="sub-title" style="margin-bottom:8px">导出备份</div>
-            <div class="form-grid">
-              ${field('备份密码', 'backupPwd', '', { type: 'password', hint: '至少 8 个字符；恢复时需要同一密码' })}
-            </div>
-            <div class="form-actions" style="justify-content:flex-start">
-              <button class="btn primary" id="backupBtn" type="button">下载加密备份</button>
-            </div>
-          </div>
-          <div>
-            <div class="sub-title" style="margin-bottom:8px">导入备份</div>
-            <div class="form-grid">
-              ${field('备份密码', 'restorePwd', '', { type: 'password' })}
-              <label class="field">
-                <span class="field-label">备份文件（.rcbk）</span>
-                <input type="file" id="restoreFile" accept=".rcbk,text/plain">
-              </label>
-              ${checkbox('我确认导入会替换当前全部配置', 'restoreConfirm', false)}
-            </div>
-            <div class="form-actions" style="justify-content:flex-start">
-              <button class="btn danger" id="restoreBtn" type="button">导入并覆盖配置</button>
-            </div>
-          </div>
-        </div>
-        <p class="field-hint" style="margin:10px 0 0">
-          备份包含节点、探测、规则、静默、续费与设置（含节点令牌）；导入不会修改监控历史与告警记录。
-          导入后通知配置与节点令牌立即生效，请妥善保管备份文件与密码。
-        </p>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2 class="section-title">外观主题</h2>
-        <span class="section-meta">仅固定字段，不下发 CSS 文本</span>
-      </div>
-      <div class="panel panel-pad">
-        <form id="themeForm" class="form-grid">
-          ${selectField('默认模式', 'mode', themeCfg.mode || 'auto',
-            [{ v: 'auto', t: '跟随系统' }, { v: 'light', t: '浅色' }, { v: 'dark', t: '深色' }])}
-          <label class="field">
-            <span class="field-label">浅色强调色</span>
-            <input type="color" name="accent" value="${esc(themeCfg.accent || THEME_DEFAULT_ACCENT)}">
-          </label>
-          <label class="field">
-            <span class="field-label">深色强调色</span>
-            <input type="color" name="accentDark" value="${esc(themeCfg.accentDark || THEME_DEFAULT_ACCENT_DARK)}">
-          </label>
-          <label class="field">
-            <span class="field-label">圆角（px）</span>
-            <input type="number" name="radius" min="0" max="24" value="${themeCfg.radius == null ? 10 : esc(themeCfg.radius)}">
-          </label>
-          ${checkbox('紧凑布局', 'themeCompact', !!themeCfg.compact)}
-          <div class="form-actions">
-            <button class="btn" type="button" id="themePreview">预览</button>
-            <button class="btn" type="button" id="themeReset">恢复默认</button>
-            <button class="btn primary" type="submit">保存外观</button>
-          </div>
-        </form>
-        <p class="field-hint" style="margin:10px 0 0">
-          强调色、圆角与紧凑密度对仪表盘和公开状态页生效；默认模式只是访客的初始值，右上角手动切换过则优先本机选择。
-        </p>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
         <h2 class="section-title">节点管理</h2>
         <span class="section-meta">${nodes.length} 台${serverVersion ? ' · 控制端 ' + esc(serverVersion) : ''}</span>
       </div>
@@ -2208,29 +2329,27 @@ async function viewSettings() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">服务探测</h2>
-        <span class="section-meta">${services.length} 个目标</span>
+        ${sectionActions(`${services.length} 个目标 · 与「服务」页共用同一份配置`, '<button class="btn sm primary" id="settingsSvcAdd">＋ 新增探测</button>')}
       </div>
-      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-services-table">
-        <thead><tr><th>名称</th><th>类型</th><th>目标</th><th class="num">间隔</th><th class="num">操作</th></tr></thead>
-        <tbody>${services.map((s) => `<tr>
+      <div class="table-wrap"><table class="settings-services-table">
+        <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th><th class="num">间隔</th><th class="num">操作</th></tr></thead>
+        <tbody>${services.map((s) => {
+          const on = s.enabled !== false;
+          return `<tr>
+          <td><span class="dot ${on ? 'ok' : 'off'}"></span>${on ? '' : ' <span class="badge mute">已停用</span>'}</td>
           <td class="strong">${esc(s.name)}</td>
           <td><span class="badge mute">${esc(s.type.toUpperCase())}</span></td>
-          <td class="mono" style="font-size:11.5px">${esc(s.target)}</td>
+          <td class="mono target-cell" title="${esc(s.target)}">${esc(s.target)}</td>
           <td class="num mono">${s.interval}s</td>
-          <td class="num"><button class="btn tiny danger" data-del-svc="${esc(s.id)}">删除</button></td>
-        </tr>`).join('') || `<tr><td colspan="5"><div class="empty">暂无探测目标</div></td></tr>`}</tbody>
+          <td class="num"><div class="row-actions">
+            <button class="btn tiny" data-svc-setting-test="${esc(s.id)}">检测</button>
+            <button class="btn tiny" data-svc-setting-edit="${esc(s.id)}">编辑</button>
+            <button class="btn tiny" data-svc-setting-toggle="${esc(s.id)}">${on ? '停用' : '启用'}</button>
+            <button class="btn tiny danger" data-del-svc="${esc(s.id)}">删除</button>
+          </div></td>
+        </tr>`;
+        }).join('') || `<tr><td colspan="6"><div class="empty">暂无探测目标</div></td></tr>`}</tbody>
       </table></div>
-      <details class="panel panel-pad">
-        <summary class="sum">＋ 新增探测目标</summary>
-        <form id="svcForm" class="form-grid">
-          ${field('名称', 'name', '', { required: true, placeholder: '例如 imotao.com' })}
-          ${selectField('类型', 'type', 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }, { v: 'dns', t: 'DNS' }])}
-          ${field('目标', 'target', '', { required: true, placeholder: 'https://example.com / 1.2.3.4:3306 / example.com@1.1.1.1' })}
-          ${field('间隔（秒）', 'interval', '60', { type: 'number', hint: 'DNS 目标可写 name 或 name@server' })}
-          ${selectField('归属节点', 'nodeId', '', [{ v: '', t: '不关联' }].concat(nodes.map((n) => ({ v: n.id, t: n.name }))))}
-          <div class="form-actions"><button class="btn primary" type="submit">添加</button></div>
-        </form>
-      </details>
     </section>
 
     <section class="section">
@@ -2328,17 +2447,144 @@ async function viewSettings() {
 
     <section class="section">
       <div class="section-head">
+        <h2 class="section-title">管理员账号</h2>
+        <span class="section-meta">密码仅以 PBKDF2 哈希保存在服务端</span>
+      </div>
+      <div class="panel panel-pad account-panel">
+        <span class="account-avatar" aria-hidden="true">${esc(accountInitial)}</span>
+        <div class="account-info">
+          <div class="account-name">${esc(accountName)}</div>
+          <div class="field-hint">${esc(accountEmail)} · 会话有效期 7 天</div>
+        </div>
+        <div class="account-actions">
+          <button class="btn" id="editAccountBtn" type="button">编辑账号</button>
+          <button class="btn" id="changePasswordBtn" type="button">修改密码</button>
+          <a class="btn" href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
+          <button class="btn danger" id="logoutBtn" type="button">退出登录</button>
+        </div>
+      </div>
+      <p class="field-hint section-hint">
+        账号资料与密码可在此直接修改，保存时需验证当前密码；修改后当前浏览器自动续签，其他设备需重新登录。
+        忘记密码时可在服务端执行 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
+      </p>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">安全与自动化</h2>
+        <span class="section-meta">两步验证与范围化 API 令牌</span>
+      </div>
+      <div class="panel panel-pad inline-panel">
+        <span class="badge ${totpOn ? 'ok' : 'mute'}">${totpOn ? '两步验证已启用' : '两步验证未启用'}</span>
+        <span class="section-meta">登录时在密码之外额外校验身份验证器动态码（TOTP，30 秒轮换）。</span>
+        <button class="btn ${totpOn ? 'danger' : 'primary'}" id="totpBtn" type="button">${totpOn ? '停用两步验证' : '启用两步验证'}</button>
+      </div>
+      <div class="panel panel-pad">
+        <div class="toolbar token-form">
+          <input id="tokenName" type="text" maxlength="64" placeholder="令牌名称，例如 CI 只读" class="w-name">
+          <select id="tokenScope">
+            <option value="read">只读（read）</option>
+            <option value="admin">管理（admin）</option>
+          </select>
+          <input id="tokenDays" type="number" min="0" max="3650" placeholder="有效天数（0=永久）" class="w-days">
+          <button class="btn primary" id="createTokenBtn" type="button">创建令牌</button>
+        </div>
+        <p class="field-hint section-hint">
+          使用 <code>Authorization: Bearer rct_…</code> 调用 API；令牌只保存 SHA-256 摘要，明文仅在创建时显示一次。
+          管理范围可执行写操作，请仅授予可信自动化。
+        </p>
+        <div class="table-wrap"><table class="queue-table">
+          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
+          <tbody>${tokenRows}</tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">外观主题</h2>
+        <span class="section-meta">仅固定字段，不下发 CSS 文本</span>
+      </div>
+      <div class="panel panel-pad">
+        <form id="themeForm" class="form-grid">
+          ${selectField('默认模式', 'mode', themeCfg.mode || 'auto',
+            [{ v: 'auto', t: '跟随系统' }, { v: 'light', t: '浅色' }, { v: 'dark', t: '深色' }])}
+          <label class="field">
+            <span class="field-label">浅色强调色</span>
+            <input type="color" name="accent" value="${esc(themeCfg.accent || THEME_DEFAULT_ACCENT)}">
+          </label>
+          <label class="field">
+            <span class="field-label">深色强调色</span>
+            <input type="color" name="accentDark" value="${esc(themeCfg.accentDark || THEME_DEFAULT_ACCENT_DARK)}">
+          </label>
+          <label class="field">
+            <span class="field-label">圆角（px）</span>
+            <input type="number" name="radius" min="0" max="24" value="${themeCfg.radius == null ? 10 : esc(themeCfg.radius)}">
+          </label>
+          ${checkbox('紧凑布局', 'themeCompact', !!themeCfg.compact)}
+          <div class="form-actions">
+            <button class="btn" type="button" id="themePreview">预览</button>
+            <button class="btn" type="button" id="themeReset">恢复默认</button>
+            <button class="btn primary" type="submit">保存外观</button>
+          </div>
+        </form>
+        <p class="field-hint section-hint">
+          强调色、圆角与紧凑密度对仪表盘和公开状态页生效；默认模式只是访客的初始值，右上角手动切换过则优先本机选择。
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">加密备份与恢复</h2>
+        <span class="section-meta">AES-256-GCM · 仅配置文件，不含监控历史</span>
+      </div>
+      <div class="panel panel-pad">
+        <div class="grid-2">
+          <div>
+            <div class="sub-title">导出备份</div>
+            <div class="form-grid">
+              ${field('备份密码', 'backupPwd', '', { type: 'password', hint: '至少 8 个字符；恢复时需要同一密码' })}
+            </div>
+            <div class="form-actions start">
+              <button class="btn primary" id="backupBtn" type="button">下载加密备份</button>
+            </div>
+          </div>
+          <div>
+            <div class="sub-title">导入备份</div>
+            <div class="form-grid">
+              ${field('备份密码', 'restorePwd', '', { type: 'password' })}
+              <label class="field">
+                <span class="field-label">备份文件（.rcbk）</span>
+                <input type="file" id="restoreFile" accept=".rcbk,text/plain">
+              </label>
+              ${checkbox('我确认导入会替换当前全部配置', 'restoreConfirm', false)}
+            </div>
+            <div class="form-actions start">
+              <button class="btn danger" id="restoreBtn" type="button">导入并覆盖配置</button>
+            </div>
+          </div>
+        </div>
+        <p class="field-hint section-hint">
+          备份包含节点、探测、规则、静默、续费与设置（含节点令牌）；导入不会修改监控历史与告警记录。
+          导入后通知配置与节点令牌立即生效，请妥善保管备份文件与密码。
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
         <h2 class="section-title">数据导出</h2>
         <span class="section-meta">CSV 带 BOM，Excel 可直接打开；指标导出含 24 小时全量采样</span>
       </div>
       <div class="panel panel-pad">
-        <div class="form-actions" style="padding-top:0">
+        <div class="toolbar">
           <button class="btn" data-exp="assets">资产台账 CSV</button>
           <button class="btn" data-exp="alerts">告警历史 CSV</button>
-          <select id="expNode" style="padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">
+          <select id="expNode">
             ${nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.name)}</option>`).join('')}
           </select>
-          <select id="expRange" style="padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font-size:12.5px">
+          <select id="expRange">
             <option value="1h">最近 1 小时</option>
             <option value="6h">最近 6 小时</option>
             <option value="24h" selected>最近 24 小时</option>
@@ -2348,8 +2594,8 @@ async function viewSettings() {
           </select>
           <button class="btn" data-exp="metrics">指标 CSV</button>
         </div>
-        <p class="field-hint" style="margin:10px 0 0">
-          Prometheus 抓取端点：<code style="font-size:11.5px;background:var(--panel-2);padding:1px 5px;border-radius:4px">GET /metrics</code>
+        <p class="field-hint section-hint">
+          Prometheus 抓取端点：<code class="code-inline">GET /metrics</code>
           （Basic Auth 密码填管理令牌，用户名任意）
         </p>
       </div>
@@ -2595,17 +2841,40 @@ async function viewSettings() {
     } catch (err) { toast('创建失败：' + err.message, 'err'); }
   };
 
-  $('#svcForm').onsubmit = async (e) => {
-    e.preventDefault();
-    const d = formData(e.target);
-    try {
-      await adminApi('/api/admin/services', { method: 'POST', body: JSON.stringify({
-        name: d.name, type: d.type, target: d.target,
-        interval: Number(d.interval) || 60, nodeId: d.nodeId || '', enabled: true,
-      }) });
-      toast('探测目标已添加'); viewSettings();
-    } catch (err) { toast('添加失败：' + err.message, 'err'); }
-  };
+  $('#settingsSvcAdd').onclick = () => openServiceDialog(null, nodes, viewSettings);
+  $$('[data-svc-setting-test]').forEach((b) => {
+    b.onclick = () => {
+      const svc = services.find((x) => x.id === b.dataset.svcSettingTest);
+      if (svc) testServiceNow(svc, b);
+    };
+  });
+  $$('[data-svc-setting-edit]').forEach((b) => {
+    b.onclick = () => {
+      const svc = services.find((x) => x.id === b.dataset.svcSettingEdit);
+      if (svc) openServiceDialog(svc, nodes, viewSettings);
+    };
+  });
+  $$('[data-svc-setting-toggle]').forEach((b) => {
+    b.onclick = async () => {
+      const svc = services.find((x) => x.id === b.dataset.svcSettingToggle);
+      if (!svc) return;
+      b.disabled = true;
+      try {
+        await adminApi('/api/admin/services/' + encodeURIComponent(svc.id), {
+          method: 'PUT',
+          body: JSON.stringify({
+            name: svc.name, type: svc.type, target: svc.target,
+            interval: svc.interval, nodeId: svc.nodeId || '', enabled: svc.enabled === false,
+          }),
+        });
+        toast(svc.enabled === false ? '探测已启用' : '探测已停用');
+        viewSettings();
+      } catch (e) {
+        toast('操作失败：' + e.message, 'err');
+        b.disabled = false;
+      }
+    };
+  });
 
   /* ---- 通道动态渲染 ---- */
   let chState = JSON.parse(JSON.stringify(cfg.channels || []));
@@ -2933,30 +3202,47 @@ async function viewStatusPage() {
   const blockBoxes = STATUS_BLOCK_ITEMS.map(([k, label]) =>
     checkbox(label, 'blk_' + k, !!blocks[k])).join('');
 
-  const mtRows = (mtRes.items || []).map((m) => {
+  const nowSec = Date.now() / 1000;
+  const mts = mtRes.items || [];
+  const incs = incRes.items || [];
+  const sevText = { info: '信息', warn: '警告', critical: '严重' };
+
+  const mtRows = mts.map((m) => {
     const scope = (m.nodeIds && m.nodeIds.length)
       ? m.nodeIds.map((id) => { const n = nodes.find((x) => x.id === id); return n ? n.name : id; }).join('、')
       : '全部节点';
-    const active = Date.now() / 1000 >= m.startAt && Date.now() / 1000 < m.endAt;
+    const active = nowSec >= m.startAt && nowSec < m.endAt;
+    const status = active
+      ? '<span class="badge ok">进行中</span>'
+      : nowSec < m.startAt ? '<span class="badge mute">未开始</span>' : '<span class="badge mute">已结束</span>';
     return `<tr>
-      <td class="strong">${esc(m.title)}</td>
+      <td class="strong">${esc(m.title)}${m.reason ? `<div class="cell-sub">${esc(m.reason)}</div>` : ''}</td>
       <td>${esc(scope)}</td>
-      <td class="mono" style="font-size:11.5px">${esc(fullTs(m.startAt))}<br>${esc(fullTs(m.endAt))}</td>
-      <td>${active ? '<span class="dot info"></span> 进行中' : m.startAt > Date.now() / 1000 ? '未开始' : '已结束'}</td>
-      <td class="num"><button class="btn danger" data-del-mt="${esc(m.id)}" style="padding:3px 10px;font-size:11.5px">删除</button></td>
+      <td class="mono cell-compact">${esc(fullTs(m.startAt))}<br>${esc(fullTs(m.endAt))}</td>
+      <td>${status}</td>
+      <td class="num"><div class="row-actions">
+        ${active ? `<button class="btn tiny" data-end-mt="${esc(m.id)}">结束</button>` : ''}
+        <button class="btn tiny" data-edit-mt="${esc(m.id)}">编辑</button>
+        <button class="btn tiny danger" data-del-mt="${esc(m.id)}">删除</button>
+      </div></td>
     </tr>`;
   }).join('');
 
-  const incRows = (incRes.items || []).map((it) => {
+  const incRows = incs.map((it) => {
     const scope = (it.nodeIds && it.nodeIds.length)
       ? it.nodeIds.map((id) => { const n = nodes.find((x) => x.id === id); return n ? n.name : id; }).join('、')
       : '全局';
+    const ongoing = !it.endAt;
     return `<tr>
-      <td class="strong">${esc(it.title)}<div style="font-size:11px;color:var(--fg-3);font-weight:400">${esc((it.body || '').slice(0, 60))}</div></td>
-      <td><span class="dot ${it.level === 'critical' ? 'crit' : it.level === 'warn' ? 'warn' : 'ok'}"></span> ${esc(it.level)}</td>
+      <td class="strong">${esc(it.title)}${it.body ? `<div class="cell-sub">${esc(it.body.slice(0, 60))}</div>` : ''}</td>
+      <td><span class="badge ${it.level === 'critical' ? 'crit' : it.level === 'warn' ? 'warn' : 'mute'}">${sevText[it.level] || esc(it.level)}</span></td>
       <td>${esc(scope)}</td>
-      <td class="mono" style="font-size:11.5px">${esc(fullTs(it.startAt))}${it.endAt ? '<br>→ ' + esc(fullTs(it.endAt)) : '<br>进行中'}</td>
-      <td class="num"><button class="btn danger" data-del-inc="${esc(it.id)}" style="padding:3px 10px;font-size:11.5px">删除</button></td>
+      <td class="mono cell-compact">${esc(fullTs(it.startAt))}${it.endAt ? '<br>→ ' + esc(fullTs(it.endAt)) : '<br><span class="text-warn">进行中</span>'}</td>
+      <td class="num"><div class="row-actions">
+        ${ongoing && nowSec >= it.startAt ? `<button class="btn tiny" data-end-inc="${esc(it.id)}">结束</button>` : ''}
+        <button class="btn tiny" data-edit-inc="${esc(it.id)}">编辑</button>
+        <button class="btn tiny danger" data-del-inc="${esc(it.id)}">删除</button>
+      </div></td>
     </tr>`;
   }).join('');
 
@@ -2964,35 +3250,34 @@ async function viewStatusPage() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">展示配置</h2>
-        <span class="section-meta">公开页 /status</span>
-        <a class="btn" href="/status" target="_blank" rel="noopener" style="padding:6px 14px;font-size:12.5px">打开公开页 ↗</a>
+        ${sectionActions('公开页 /status', '<a class="btn sm" href="/status" target="_blank" rel="noopener">打开公开页 ↗</a>')}
       </div>
-      <form id="spForm" class="panel panel-pad">
+      <form id="spForm" class="panel panel-pad form-stack">
         <div class="grid-2">
           ${field('站点标题', 'title', cfg.title || '', { required: true, hint: '浏览器标签页与页面主标题' })}
           ${selectField('可用率日柱天数', 'historyDays', String(cfg.historyDays || 90),
             [{ v: '30', t: '30 天' }, { v: '60', t: '60 天' }, { v: '90', t: '90 天' }])}
         </div>
-        <div class="field" style="margin-top:10px">
+        <div class="field">
           <span class="field-label">置顶公告</span>
           <textarea name="annText" rows="2" placeholder="例如：今晚 23:00 主控迁移，期间可能短暂不可用。">${esc(ann.text || '')}</textarea>
         </div>
-        <div class="grid-2" style="margin-top:10px">
+        <div class="grid-2">
           ${checkbox('启用公告', 'annEnabled', !!ann.enabled)}
           ${selectField('公告级别', 'annLevel', ann.level || 'info',
             [{ v: 'info', t: '信息' }, { v: 'warn', t: '警告' }, { v: 'critical', t: '严重' }])}
         </div>
-        <div style="margin-top:14px">
+        <div>
           <div class="field-label">公开字段（未勾选的字段不会出现在公开页，关闭是安全的默认值）</div>
           <div class="check-grid">${visBoxes}</div>
         </div>
-        <div style="margin-top:14px">
+        <div>
           <div class="field-label">显示区块</div>
           <div class="check-grid">${blockBoxes}</div>
         </div>
-        <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+        <div class="form-footer">
           <button class="btn primary" type="submit">保存配置</button>
-          <span id="spSaved" style="font-size:12px;color:var(--ok)"></span>
+          <span id="spSaved" class="form-note"></span>
         </div>
       </form>
     </section>
@@ -3000,8 +3285,7 @@ async function viewStatusPage() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">维护窗口</h2>
-        <span class="section-meta">窗口内不产生新告警，公开页显示"维护中"</span>
-        <button class="btn primary" id="mtAdd" style="padding:6px 14px;font-size:12.5px">＋ 新建维护窗口</button>
+        ${sectionActions('窗口内不产生新告警，公开页显示「维护中」', '<button class="btn sm primary" id="mtAdd">＋ 新建维护窗口</button>')}
       </div>
       <div class="table-wrap"><table class="maint-table">
         <thead><tr><th>标题</th><th>范围</th><th>起止</th><th>状态</th><th class="num">操作</th></tr></thead>
@@ -3012,8 +3296,7 @@ async function viewStatusPage() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">人工事件</h2>
-        <span class="section-meta">与告警一起出现在公开页时间线</span>
-        <button class="btn primary" id="incAdd" style="padding:6px 14px;font-size:12.5px">＋ 登记事件</button>
+        ${sectionActions('与告警一起出现在公开页时间线', '<button class="btn sm primary" id="incAdd">＋ 登记事件</button>')}
       </div>
       <div class="table-wrap"><table class="maint-table">
         <thead><tr><th>标题</th><th>级别</th><th>影响范围</th><th>时间</th><th class="num">操作</th></tr></thead>
@@ -3052,6 +3335,30 @@ async function viewStatusPage() {
 
   // ---- 维护窗口 ----
   $('#mtAdd').onclick = () => openMaintenanceDialog(nodes);
+  $$('[data-edit-mt]').forEach((b) => {
+    b.onclick = () => {
+      const m = mts.find((x) => x.id === b.dataset.editMt);
+      if (m) openMaintenanceDialog(nodes, m);
+    };
+  });
+  $$('[data-end-mt]').forEach((b) => {
+    b.onclick = async () => {
+      const m = mts.find((x) => x.id === b.dataset.endMt);
+      if (!m) return;
+      if (!confirm(`立即结束维护窗口「${m.title}」？`)) return;
+      try {
+        await adminApi('/api/admin/maintenance', {
+          method: 'POST',
+          body: JSON.stringify({
+            id: m.id, title: m.title, reason: m.reason, nodeIds: m.nodeIds || [],
+            startAt: m.startAt, endAt: Math.max(m.startAt + 1, Math.floor(Date.now() / 1000)),
+          }),
+        });
+        toast('维护窗口已结束');
+        viewStatusPage();
+      } catch (err) { toast('结束失败：' + err.message, 'err'); }
+    };
+  });
   $$('[data-del-mt]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('删除该维护窗口？窗口内正在进行的维护不会再显示。')) return;
@@ -3065,6 +3372,31 @@ async function viewStatusPage() {
 
   // ---- 人工事件 ----
   $('#incAdd').onclick = () => openIncidentDialog(nodes);
+  $$('[data-edit-inc]').forEach((b) => {
+    b.onclick = () => {
+      const it = incs.find((x) => x.id === b.dataset.editInc);
+      if (it) openIncidentDialog(nodes, it);
+    };
+  });
+  $$('[data-end-inc]').forEach((b) => {
+    b.onclick = async () => {
+      const it = incs.find((x) => x.id === b.dataset.endInc);
+      if (!it) return;
+      if (!confirm(`将事件「${it.title}」标记为已结束？`)) return;
+      try {
+        await adminApi('/api/admin/incidents', {
+          method: 'POST',
+          body: JSON.stringify({
+            id: it.id, title: it.title, body: it.body, level: it.level,
+            nodeIds: it.nodeIds || [], startAt: it.startAt,
+            endAt: Math.max(it.startAt + 1, Math.floor(Date.now() / 1000)),
+          }),
+        });
+        toast('事件已结束');
+        viewStatusPage();
+      } catch (err) { toast('结束失败：' + err.message, 'err'); }
+    };
+  });
   $$('[data-del-inc]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('删除该事件？它会同时从公开页时间线消失。')) return;
@@ -3083,30 +3415,40 @@ function fullTs(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// dtLocal 把 Unix 秒转成 datetime-local 输入框需要的本地时间格式。
+function dtLocal(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = (n) => (n < 10 ? '0' : '') + n;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // nodePicker 生成"影响范围"多选框列表（全部节点 + 分组归类展示）。
-function nodePicker(nodes, name) {
+function nodePicker(nodes, name, selected = []) {
   if (!nodes.length) return '<div class="empty">暂无节点</div>';
+  const picked = new Set(selected);
   return `<div class="check-grid">${nodes.map((n) =>
-    `<label class="check"><input type="checkbox" name="${name}" value="${esc(n.id)}"><span>${esc(n.name)}</span></label>`
+    `<label class="check"><input type="checkbox" name="${name}" value="${esc(n.id)}"${picked.has(n.id) ? ' checked' : ''}><span>${esc(n.name)}</span></label>`
   ).join('')}</div>`;
 }
 function pickedIDs(form, name) {
   return $$(`input[name="${name}"]:checked`, form).map((c) => c.value);
 }
 
-function openMaintenanceDialog(nodes) {
-  const dlg = openDialog('新建维护窗口', `
-    <form id="mtForm">
-      ${field('标题', 'title', '', { required: true, placeholder: '例如：主控迁移' })}
-      ${field('说明（可选）', 'reason', '', { placeholder: '访客会在公开页看到这段说明' })}
-      <div class="field"><span class="field-label">影响范围（不选 = 全部节点）</span>${nodePicker(nodes, 'mtNode')}</div>
+function openMaintenanceDialog(nodes, mt) {
+  const editing = !!mt;
+  const dlg = openDialog(editing ? '编辑维护窗口' : '新建维护窗口', `
+    <form id="mtForm" class="form-stack">
+      ${field('标题', 'title', mt?.title || '', { required: true, placeholder: '例如：主控迁移' })}
+      ${field('说明（可选）', 'reason', mt?.reason || '', { placeholder: '访客会在公开页看到这段说明' })}
+      <div class="field"><span class="field-label">影响范围（不选 = 全部节点）</span>${nodePicker(nodes, 'mtNode', mt?.nodeIds || [])}</div>
       <div class="grid-2">
-        ${field('开始（留空 = 立即）', 'startAt', '', { type: 'datetime-local' })}
-        ${field('持续（分钟，默认 60）', 'minutes', '', { type: 'number', placeholder: '60' })}
+        ${field('开始（留空 = 立即）', 'startAt', editing ? dtLocal(mt.startAt) : '', { type: 'datetime-local' })}
+        ${field('持续（分钟，默认 60）', 'minutes', editing ? String(Math.max(1, Math.round((mt.endAt - mt.startAt) / 60))) : '', { type: 'number', placeholder: '60' })}
       </div>
-      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+      <div class="form-actions">
         <button class="btn" type="button" data-close>取消</button>
-        <button class="btn primary" type="submit">创建</button>
+        <button class="btn primary" type="submit">${editing ? '保存修改' : '创建'}</button>
       </div>
     </form>`);
   const f = dlg.querySelector('#mtForm');
@@ -3118,6 +3460,7 @@ function openMaintenanceDialog(nodes) {
       await adminApi('/api/admin/maintenance', {
         method: 'POST',
         body: JSON.stringify({
+          id: editing ? mt.id : '',
           title: f.title.value.trim(),
           reason: f.reason.value.trim(),
           nodeIds: pickedIDs(f, 'mtNode'),
@@ -3125,28 +3468,29 @@ function openMaintenanceDialog(nodes) {
           minutes,
         }),
       });
-      close();
-      toast('维护窗口已创建');
+      dlg.close();
+      toast(editing ? '维护窗口已更新' : '维护窗口已创建');
       viewStatusPage();
-    } catch (err) { toast('创建失败：' + err.message, 'err'); }
+    } catch (err) { toast((editing ? '保存失败：' : '创建失败：') + err.message, 'err'); }
   };
 }
 
-function openIncidentDialog(nodes) {
-  const dlg = openDialog('登记事件', `
-    <form id="incForm">
-      ${field('标题', 'title', '', { required: true, placeholder: '例如：上游出口抖动' })}
+function openIncidentDialog(nodes, inc) {
+  const editing = !!inc;
+  const dlg = openDialog(editing ? '编辑事件' : '登记事件', `
+    <form id="incForm" class="form-stack">
+      ${field('标题', 'title', inc?.title || '', { required: true, placeholder: '例如：上游出口抖动' })}
       <div class="field"><span class="field-label">详情（可选）</span>
-        <textarea name="body" rows="3" placeholder="发生了什么、影响什么、怎么处理"></textarea></div>
+        <textarea name="body" rows="3" placeholder="发生了什么、影响什么、怎么处理">${esc(inc?.body || '')}</textarea></div>
       <div class="grid-2">
-        ${selectField('级别', 'level', 'info',
+        ${selectField('级别', 'level', inc?.level || 'info',
           [{ v: 'info', t: '信息' }, { v: 'warn', t: '警告' }, { v: 'critical', t: '严重' }])}
-        ${field('结束时间（留空 = 进行中）', 'endAt', '', { type: 'datetime-local' })}
+        ${field('结束时间（留空 = 进行中）', 'endAt', inc?.endAt ? dtLocal(inc.endAt) : '', { type: 'datetime-local' })}
       </div>
-      <div class="field"><span class="field-label">受影响节点（不选 = 全局）</span>${nodePicker(nodes, 'incNode')}</div>
-      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+      <div class="field"><span class="field-label">受影响节点（不选 = 全局）</span>${nodePicker(nodes, 'incNode', inc?.nodeIds || [])}</div>
+      <div class="form-actions">
         <button class="btn" type="button" data-close>取消</button>
-        <button class="btn primary" type="submit">登记</button>
+        <button class="btn primary" type="submit">${editing ? '保存修改' : '登记'}</button>
       </div>
     </form>`);
   const f = dlg.querySelector('#incForm');
@@ -3157,22 +3501,30 @@ function openIncidentDialog(nodes) {
       await adminApi('/api/admin/incidents', {
         method: 'POST',
         body: JSON.stringify({
+          id: editing ? inc.id : '',
           title: f.title.value.trim(),
           body: f.body.value.trim(),
           level: f.level.value,
           nodeIds: pickedIDs(f, 'incNode'),
+          startAt: editing ? inc.startAt : 0,
           endAt: end,
         }),
       });
-      close();
-      toast('事件已登记');
+      dlg.close();
+      toast(editing ? '事件已更新' : '事件已登记');
       viewStatusPage();
-    } catch (err) { toast('登记失败：' + err.message, 'err'); }
+    } catch (err) { toast((editing ? '保存失败：' : '登记失败：') + err.message, 'err'); }
   };
 }
 
 // showNodeEdit 编辑节点台账，避免为了改名/改价删除节点、丢失历史。
-function showNodeEdit(n) {
+// editNodeById 拉取完整节点台账后打开编辑弹窗，完成后刷新调用方页面。
+async function editNodeById(id, after) {
+  const n = await adminApi('/api/admin/nodes/' + encodeURIComponent(id));
+  showNodeEdit(n, after);
+}
+
+function showNodeEdit(n, after) {
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
   dlg.innerHTML = `<div class="modal">
@@ -3219,7 +3571,7 @@ function showNodeEdit(n) {
       });
       close();
       toast('节点已更新');
-      viewSettings();
+      (after || viewSettings)();
     } catch (err) {
       toast('保存失败：' + err.message, 'err');
     }
@@ -3229,12 +3581,12 @@ function showNodeEdit(n) {
 /* ---------------- 路由 ---------------- */
 
 const ROUTES = {
-  overview: { title: '概览', sub: '机群健康状态与关键指标', fn: viewOverview },
-  nodes: { title: '节点', sub: '全部受监控服务器', fn: viewNodes },
-  compare: { title: '节点对比', sub: '跨节点指标对比与分组聚合', fn: viewCompare },
-  services: { title: '服务', sub: '网站与端口可用性探测', fn: viewServices },
-  alerts: { title: '告警', sub: '规则触发与历史记录', fn: viewAlerts },
-  assets: { title: '台账', sub: '资产、到期与成本', fn: viewAssets },
+  overview: { title: '概览', sub: '机群健康状态与关键指标', fn: viewOverview, search: '搜索节点 / 服务商…' },
+  nodes: { title: '节点', sub: '全部受监控服务器', fn: viewNodes, search: '搜索名称 / 服务商 / 地区…' },
+  compare: { title: '节点对比', sub: '跨节点指标对比与分组聚合', fn: viewCompare, search: '搜索节点 / 分组…' },
+  services: { title: '服务', sub: '网站与端口可用性探测', fn: viewServices, search: '搜索服务 / 目标…' },
+  alerts: { title: '告警', sub: '规则触发与历史记录', fn: viewAlerts, search: '搜索规则 / 节点 / 告警…' },
+  assets: { title: '台账', sub: '资产、到期与成本', fn: viewAssets, search: '搜索资产 / 服务商 / 到期日…' },
   statuspage: { title: '状态页', sub: '公开页 /status 的展示、维护窗口与事件', fn: viewStatusPage },
   settings: { title: '设置', sub: '节点、探测与通知配置', fn: viewSettings },
 };
@@ -3467,6 +3819,12 @@ async function render() {
     $('#pageTitle').textContent = meta.title;
     $('#pageSub').textContent = meta.sub;
     setActiveNav(route);
+  }
+  // 搜索只对支持筛选的列表页展示，避免在设置/状态页输入后毫无反应。
+  const searchBox = $('.topbar .search');
+  if (searchBox) {
+    searchBox.hidden = (route === 'nodes' && param) || !(meta && meta.search);
+    if (meta && meta.search) $('#searchInput').placeholder = meta.search;
   }
 
   try {

@@ -1712,40 +1712,12 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 		if req.Enabled != nil {
 			in.Enabled = *req.Enabled
 		}
-		if strings.TrimSpace(in.Name) == "" {
-			fail(w, 400, "name is required")
+		if msg := s.normalizeService(&in); msg != "" {
+			fail(w, 400, msg)
 			return
-		}
-		typ := strings.ToLower(strings.TrimSpace(in.Type))
-		if typ != "http" && typ != "https" && typ != "tcp" && typ != "dns" {
-			fail(w, 400, "type 必须是 http / https / tcp / dns")
-			return
-		}
-		in.Type = typ
-		in.Target = strings.TrimSpace(in.Target)
-		if in.Target == "" {
-			fail(w, 400, "target is required")
-			return
-		}
-		if s.runner != nil {
-			if err := s.runner.ValidateService(in); err != nil {
-				fail(w, 400, err.Error())
-				return
-			}
 		}
 		if in.ID == "" {
 			in.ID = store.NewID("s")
-		}
-		if in.Interval <= 0 {
-			in.Interval = 60
-		}
-		if in.Interval < 10 {
-			fail(w, 400, "interval 不能小于 10 秒")
-			return
-		}
-		if in.Interval > 86400 {
-			fail(w, 400, "interval 不能超过 86400 秒")
-			return
 		}
 		// 客户端自带 ID 时按「新建」处理：已存在必须报 409，
 		// 不能让一次复制粘贴的 POST 静默覆盖线上服务配置。
@@ -1763,25 +1735,120 @@ func (s *Server) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// normalizeService 统一校验并规整服务定义，POST 与 PUT 共用。
+func (s *Server) normalizeService(in *model.Service) string {
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" {
+		return "name is required"
+	}
+	typ := strings.ToLower(strings.TrimSpace(in.Type))
+	if typ != "http" && typ != "https" && typ != "tcp" && typ != "dns" {
+		return "type 必须是 http / https / tcp / dns"
+	}
+	in.Type = typ
+	in.Target = strings.TrimSpace(in.Target)
+	if in.Target == "" {
+		return "target is required"
+	}
+	if in.Interval <= 0 {
+		in.Interval = 60
+	}
+	if in.Interval < 10 {
+		return "interval 不能小于 10 秒"
+	}
+	if in.Interval > 86400 {
+		return "interval 不能超过 86400 秒"
+	}
+	if s.runner != nil {
+		if err := s.runner.ValidateService(*in); err != nil {
+			return err.Error()
+		}
+	}
+	return ""
+}
+
 func (s *Server) handleAdminServiceByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/admin/services/")
-	if id == "" {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/services/")
+	if rest == "" || strings.HasPrefix(rest, "/") {
 		fail(w, 400, "missing service id")
 		return
 	}
-	if r.Method != http.MethodDelete {
+	// POST /api/admin/services/{id}/test 立即执行一次探测，不写历史。
+	// 结果只用于后台「检测」按钮核对目标与证书状态。
+	if id, ok := strings.CutSuffix(rest, "/test"); ok {
+		if r.Method != http.MethodPost {
+			fail(w, 405, "method not allowed")
+			return
+		}
+		if id == "" || strings.Contains(id, "/") {
+			fail(w, 404, "service not found")
+			return
+		}
+		sv, found := s.st.Service(id)
+		if !found {
+			fail(w, 404, "service not found")
+			return
+		}
+		if s.runner == nil {
+			fail(w, 503, "探测执行器未启用")
+			return
+		}
+		writeJSON(w, 200, s.runner.Do(*sv))
+		return
+	}
+	id := rest
+	switch r.Method {
+	case http.MethodPut:
+		old, ok := s.st.Service(id)
+		if !ok {
+			fail(w, 404, "service not found")
+			return
+		}
+		body := http.MaxBytesReader(w, r.Body, 16<<10)
+		var req struct {
+			NodeID   string `json:"nodeId"`
+			Name     string `json:"name"`
+			Type     string `json:"type"`
+			Target   string `json:"target"`
+			Interval int    `json:"interval"`
+			Enabled  *bool  `json:"enabled"`
+		}
+		dec := json.NewDecoder(body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			fail(w, 400, "bad json: "+err.Error())
+			return
+		}
+		in := model.Service{
+			ID: id, NodeID: req.NodeID, Name: req.Name,
+			Type: req.Type, Target: req.Target, Interval: req.Interval,
+			// 未提供 enabled 时保持原状态，避免一次编辑把已停用的探测悄悄启用。
+			Enabled: old.Enabled,
+		}
+		if req.Enabled != nil {
+			in.Enabled = *req.Enabled
+		}
+		if msg := s.normalizeService(&in); msg != "" {
+			fail(w, 400, msg)
+			return
+		}
+		s.st.UpsertService(&in)
+		writeJSON(w, 200, in)
+
+	case http.MethodDelete:
+		active := s.st.ActiveAlertsByService(id)
+		if !s.st.DeleteService(id) {
+			fail(w, 404, "service not found")
+			return
+		}
+		if s.engine != nil {
+			s.engine.RecoverClosed(active, "服务已删除")
+		}
+		writeJSON(w, 200, map[string]any{"deleted": id})
+
+	default:
 		fail(w, 405, "method not allowed")
-		return
 	}
-	active := s.st.ActiveAlertsByService(id)
-	if !s.st.DeleteService(id) {
-		fail(w, 404, "service not found")
-		return
-	}
-	if s.engine != nil {
-		s.engine.RecoverClosed(active, "服务已删除")
-	}
-	writeJSON(w, 200, map[string]any{"deleted": id})
 }
 
 // ---------- 通知设置 API ----------

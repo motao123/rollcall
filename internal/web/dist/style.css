@@ -422,9 +422,12 @@ body {
   min-width: 0;
 }
 .panel { min-width: 0; }
+.panel-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 8px;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -439,6 +442,15 @@ body {
   color: var(--fg-3);
   margin-left: auto;
 }
+/* 区块右侧的说明与操作按钮作为一个整体，避免标题、说明、按钮基线错位 */
+.section-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.section-actions .section-meta { margin-left: 0; }
 
 .panel {
   background: var(--panel);
@@ -968,21 +980,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.field textarea {
-  width: 100%;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-  color: var(--fg);
-  font: inherit;
-  font-size: 12.5px;
-  resize: vertical;
-}
-.field textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
+/* textarea 与输入框共用统一规格，仅额外允许纵向缩放 */
+.field textarea { resize: vertical; }
 
 /* 节点批量操作条。★ 必须用类而不是内联 display:flex：
    hidden 属性靠 UA 样式表 [hidden]{display:none} 生效，
@@ -1007,9 +1006,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   color: var(--fg-2);
   letter-spacing: 0.01em;
 }
+/* 表单控件统一规格：字段、工具条、筛选条与通道添加器共用一套外观 */
 .field input,
-.field select {
-  width: 100%;
+.field select,
+.field textarea,
+.toolbar input,
+.toolbar select,
+.filter-bar select,
+.ch-add select {
   padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -1020,12 +1024,72 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
+.field input,
+.field select,
+.field textarea { width: 100%; }
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus,
+.toolbar input:focus,
+.toolbar select:focus,
+.filter-bar select:focus,
+.ch-add select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+.field input:disabled,
+.field select:disabled,
+.field textarea:disabled,
+.toolbar input:disabled,
+.toolbar select:disabled,
+.filter-bar select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+/* 多选列表沿用输入框规格，不再由每个调用点手写边框/内边距 */
+.field select[multiple] {
+  min-height: 92px;
+  padding: 4px;
+  line-height: 1.7;
+}
+.field select[multiple] option { padding: 3px 7px; border-radius: 4px; }
+.field input[type="file"] { padding: 6px 9px; font-size: 12px; }
 .field-hint { font-size: 10.5px; color: var(--fg-3); }
+
+/* 行内工具条：导出、令牌等“控件 + 按钮”混排场景 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.panel-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--fg-2);
+  letter-spacing: 0.01em;
+}
+.alert-link {
+  color: var(--fg-2);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--line-2);
+}
+.alert-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.alert-node { font-size: 11px; color: var(--fg-3); font-weight: 400; }
 
 .check {
   display: flex;
@@ -1050,6 +1114,17 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   padding-top: 4px;
   flex-wrap: wrap;
 }
+.form-stack { display: flex; flex-direction: column; gap: 14px; }
+.form-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.form-note { font-size: 12px; color: var(--ok); }
+.form-actions.start { justify-content: flex-start; }
+.cell-sub { font-size: 11px; color: var(--fg-3); font-weight: 400; margin-top: 2px; }
+.section-hint { margin: 10px 0 0; }
+.inline-panel { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.inline-panel .btn { margin-left: auto; }
+.toolbar .w-name { width: 220px; }
+.toolbar .w-days { width: 170px; }
+.code-inline { font-size: 11.5px; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
 
 .btn {
   display: inline-flex;
@@ -1077,6 +1152,21 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .btn.danger { color: var(--crit); }
 .btn.danger:hover { background: var(--crit-soft); border-color: var(--crit); color: var(--crit); }
 .btn.tiny { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; }
+/* 区块标题旁的操作按钮：比表格行内按钮大一档，又不使用一次性内联样式 */
+.btn.sm { padding: 5px 11px; font-size: 12px; }
+.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+.row-link { color: inherit; text-decoration: none; border-bottom: 1px dotted transparent; }
+.row-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.os-cell { font-size: 11.5px; }
+.row-click { cursor: pointer; }
+.col-check { width: 26px; }
+.cell-compact { font-size: 11.5px; }
+.text-crit { color: var(--crit); }
+.text-warn { color: var(--warn); }
+.target-cell { font-size: 11.5px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spark-cell { width: 150px; padding: 6px 14px; }
+.spark-box { height: 22px; }
+.detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 details.panel { padding: 0; }
 details.panel > summary.sum {
@@ -1208,18 +1298,7 @@ pre.code {
   gap: 9px;
   flex-wrap: wrap;
 }
-.ch-add select {
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  color: var(--fg);
-  font-size: 12.5px;
-  font-family: inherit;
-  outline: none;
-  min-width: 170px;
-}
-.ch-add select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ch-add select { min-width: 170px; }
 
 /* 启用/停用 开关 */
 .switch {
@@ -1398,7 +1477,7 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
 .prov-row .prov-meta { margin-left: 10px; }
 
 /* 节点页列多，窄屏下不再挤压换行，改为容器横向滚动。 */
-.nodes-table { min-width: 980px; }
+.nodes-table { min-width: 1120px; }
 
 /* 其余页面的多列表格同样保底宽度，避免手机上被压成逐字换行。 */
 .services-table { min-width: 900px; }
@@ -1587,6 +1666,7 @@ body.auth-checking .app { visibility: hidden; }
   font-weight: 650;
   color: var(--fg-2);
   letter-spacing: .04em;
+  margin-bottom: 8px;
 }
 
 /* ---------- 进度条 ---------- */

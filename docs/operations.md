@@ -29,7 +29,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.10.2
+make linux VERSION=v1.10.3
 # 或直接使用：
 ./rollcall-server -version
 ./rollcall-agent -version
@@ -161,9 +161,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.10.2
-./rollsign sign -key /root/rollcall-update.key -version v1.10.2 \
-  -base-url https://updates.example.com/agent/v1.10.2 \
+make linux VERSION=v1.10.3
+./rollsign sign -key /root/rollcall-update.key -version v1.10.3 \
+  -base-url https://updates.example.com/agent/v1.10.3 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json

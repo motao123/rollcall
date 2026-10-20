@@ -1143,6 +1143,18 @@ func (s *Store) Services() []*model.Service {
 	return out
 }
 
+// Service 返回单个服务探测目标的副本。
+func (s *Store) Service(id string) (*model.Service, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.services[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *v
+	return &cp, true
+}
+
 // AddServiceResult 记录探测结果（独立于指标的轻量环形缓冲）。
 func (s *Store) AddServiceResult(sr model.ServiceResult) {
 	s.mu.Lock()
