@@ -1563,6 +1563,8 @@ body.auth-checking .app { visibility: hidden; }
 .login-card {
   width: 100%;
   max-width: 400px;
+  /* 内容高于视口时 auto 边距归零，从顶部开始滚动，避免 flex 居中裁掉表单头部。 */
+  margin: auto 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1635,40 +1637,6 @@ body.auth-checking .app { visibility: hidden; }
 }
 @keyframes loginSpin { to { transform: rotate(360deg); } }
 
-.login-notice {
-  margin-top: 18px;
-  padding: 12px 14px 13px;
-  background: var(--panel-2);
-  border: 1px solid var(--line-2);
-  border-radius: 10px;
-  font-size: 12px;
-  line-height: 1.65;
-  color: var(--fg-2);
-}
-.login-notice-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--fg);
-}
-.login-notice-head svg { flex: none; color: var(--accent); }
-.login-notice p { margin: 0; }
-.login-notice p + p { margin-top: 4px; }
-.login-notice code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--fg);
-  background: var(--panel);
-  border: 1px solid var(--line-2);
-  border-radius: 4px;
-  padding: 1px 5px;
-  white-space: nowrap;
-}
-
 .login-foot {
   display: flex; align-items: center; justify-content: space-between;
   margin-top: 18px; font-size: 11.5px; color: var(--fg-3);
@@ -1677,9 +1645,14 @@ body.auth-checking .app { visibility: hidden; }
 .login-foot a:hover { color: var(--accent); }
 .login-foot button {
   border: 0; background: none; color: var(--fg-3);
-  cursor: pointer; font-size: 11.5px; padding: 2px 6px; border-radius: 6px;
+  cursor: pointer; padding: 2px 6px; border-radius: 6px;
 }
 .login-foot button:hover { color: var(--fg); background: var(--accent-soft); }
+.login-foot .login-theme-btn {
+  width: 28px; height: 28px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.login-foot .login-theme-btn svg { width: 16px; height: 16px; }
 
 /* 令牌错误时的抖动反馈：重新触发动画用 reflow 技巧 */
 @keyframes loginShake {

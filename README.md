@@ -582,7 +582,7 @@ sudo systemctl daemon-reload
 ```
 
 **先不要启动服务**。下一步需要选择管理员初始化方式；如果服务已经启动过，
-方式 A 不会再生效，请按方式 B 读取初始密码，或使用重置流程设置密码。
+方式 A 不会再生效，请按方式 B 读取初始密码，或使用下方「重置管理员密码」流程设置密码。
 
 `deploy/rollcall-server.service` 默认**不开启**私网探测/通知。确需监控本机服务或向内网
 webhook 推送时，用 systemd drop-in 追加 `-allow-private-probes` / `-allow-private-notify`
@@ -633,15 +633,28 @@ sudo cat /opt/rollcall/data/initial-admin-password.txt
 > 文件缺失不影响启动），避免明文密码长期留在磁盘。
 
 > 密码只在创建或显式重置时写入。正常重启不会用环境变量覆盖已保存的密码。
-> 忘记密码时**先停止服务**，执行一次重置后再启动：
-> ```bash
-> sudo systemctl stop rollcall-server
-> sudo -u rollcall env ROLLCALL_ADMIN_PASSWORD='<新密码>' \
->   /opt/rollcall/rollcall-server -data /opt/rollcall/data -reset-admin-password
-> sudo systemctl start rollcall-server
-> ```
 
 对外访问请用 SSH 隧道或反向代理，不要直接把 19080 暴露到公网。
+
+#### 重置管理员密码（忘记密码时）
+
+`-reset-admin-password` 是**服务端二进制的启动参数**，不是 shell 命令，不能直接输入执行。
+忘记密码时，先停止服务，再以 `rollcall` 用户执行一次重置（命令完成后立即退出），最后启动服务：
+
+```bash
+read -rsp '新密码: ' PW && echo      # 输入不回显，也不进入 shell history
+sudo systemctl stop rollcall-server
+sudo runuser -u rollcall -- env ROLLCALL_ADMIN_PASSWORD="$PW" \
+  /opt/rollcall/rollcall-server -data /opt/rollcall/data -reset-admin-password
+unset PW
+sudo systemctl start rollcall-server
+```
+
+- 新密码至少 12 位；重置会更新会话版本，旧 Cookie 全部失效，需用新密码重新登录。
+- 必须以 `rollcall` 用户执行，否则 `admin-user.json` 的属主会变成 root，服务将无法写入。
+- 已登录时无需停服，可在「设置 → 管理员账号」直接修改密码。
+
+更完整的运维说明见 [`docs/operations.md`](docs/operations.md)。
 
 ### 5. 接入一台节点
 

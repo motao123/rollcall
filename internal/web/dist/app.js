@@ -2819,7 +2819,7 @@ async function viewSettings() {
       </div>
       <p class="field-hint section-hint">
         账号资料与密码可在此直接修改，保存时需验证当前密码；修改后当前浏览器自动续签，其他设备需重新登录。
-        忘记密码时可在服务端执行 <code>-reset-admin-password -admin-password '新密码'</code> 启动一次来重置。
+        忘记密码时需在服务器上停止服务，执行 <code>rollcall-server -reset-admin-password</code> 重置一次后再启动（见 README「重置管理员密码」）。
       </p>
     </section>
 
@@ -4071,17 +4071,11 @@ function showLoginGate() {
         </label>
         <button class="login-btn" id="gateSubmit" type="submit">登 录</button>
       </form>
-      <aside class="login-notice" aria-label="账号说明">
-        <div class="login-notice-head">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.6v.1"/></svg>
-          <span>账号说明</span>
-        </div>
-        <p>账号、邮箱与密码由服务端统一管理，面板不提供自助找回。</p>
-        <p>忘记密码时，可在服务端用 <code>-reset-admin-password</code> 启动一次来重置；新密码通过 <code>-admin-password</code> 或环境变量 <code>ROLLCALL_ADMIN_PASSWORD</code> 提供。</p>
-      </aside>
       <div class="login-foot">
         <a href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
-        <button type="button" id="loginTheme">深浅色</button>
+        <button type="button" class="login-theme-btn" id="loginTheme" title="切换深浅色" aria-label="切换深浅色">
+          <svg id="loginThemeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+        </button>
       </div>
     </div>`;
 
@@ -4090,13 +4084,17 @@ function showLoginGate() {
   const err = layer.querySelector('#loginError');
   const card = layer.querySelector('#loginCard');
   const btn = layer.querySelector('#gateSubmit');
+  // 复用主界面的主题图标与文案，登录页与首页保持一致。
+  applyTheme(document.documentElement.dataset.theme || 'light', false);
   userInp.focus();
 
   layer.querySelector('#gateEye').onclick = () => {
     passInp.type = passInp.type === 'password' ? 'text' : 'password';
     passInp.focus();
   };
-  layer.querySelector('#loginTheme').onclick = () => $('#themeBtn').click();
+  layer.querySelector('#loginTheme').onclick = () => {
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+  };
 
   const showErr = (msg) => {
     err.textContent = msg;
@@ -4325,6 +4323,14 @@ function applyTheme(t, persist = true) {
   } else {
     icon.innerHTML = '<path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/>';
     if (text) text.textContent = '深色模式';
+  }
+  const loginIcon = $('#loginThemeIcon');
+  if (loginIcon) loginIcon.innerHTML = icon.innerHTML;
+  const loginBtn = $('#loginTheme');
+  if (loginBtn) {
+    const label = t === 'dark' ? '切换到浅色模式' : '切换到深色模式';
+    loginBtn.title = label;
+    loginBtn.setAttribute('aria-label', label);
   }
 }
 
