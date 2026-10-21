@@ -1357,7 +1357,24 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ## 十二、实际部署验证
 
-已在 Debian 13 / AMD EPYC 16 核 / 32GB 环境（Go 1.27.3）完成控制端 + 被控端同机部署验证（v1.10.5）：
+已在 Debian 13 / AMD EPYC 16 核 / 32GB 环境（Go 1.27.3）完成控制端 + 12 台远端被控端的验证与升级（v1.13.1）：
+
+| 项目 | 结果 |
+|---|---|
+| 构建与测试 | 生产机 `gofmt -l` 干净、`go vet ./...`（linux 与 windows 目标）、`go test ./...`（20 包，其中 18 个含测试）、`CGO_ENABLED=1 go test -race ./...` 全部通过 |
+| 发布产物完整性 | `make linux VERSION=v1.13.1` 产出 12 个二进制，`SHA256SUMS` 恰好 12 行且含 4 个 `rollsign-linux-*`，`sha256sum -c` 全过 |
+| CI 发布 | tag `v1.13.1` 触发流水线：test / race / release 三个 job 全绿，Release 含 12 个二进制 + `SHA256SUMS`；发布包 `rollcall-server-linux-amd64` 的 sha256 为 `9d5a391f…`，`rollcall-agent-linux-amd64` 为 `641a1f2f…` |
+| 控制端升级 | 生产机用 `deploy/rollcall-server-upgrade.sh` 从 v1.13.0 升到 v1.13.1（sha256 取自 Release 的 `SHA256SUMS`）：`.prev` 保留、`/readyz` 返回 `{"ready":true,"version":"v1.13.1"}`、服务 active + enabled；升级前数据目录已打包为 `/root/rollcall-data-before-v1.13.1.tar.gz` |
+| Agent 分发目录 | `/opt/rollcall/agent` 四个架构全部换成 v1.13.1，`/agent/download.sha256?arch=` 返回的哈希与 Release 中对应文件一致，新接入的节点不再一装就落后 |
+| 机群升级 | 13/13 节点（1 台本机 + 12 台远端）由 v1.10.4 升到 v1.13.1，面板 `agentOutdated` 为 0；升级后 13 台 online、0 stale / 0 offline / 0 noData |
+| 升级异常与处置 | 腾讯云-上海 到控制端的下载被链路反复截断（`curl: (18) end with N bytes missing`，两次分别停在 ~600KB），改为把 Release 二进制投递到节点、校验 sha256 后按脚本同样的步骤替换（保留属主、备份 `.prev`、systemd 重启失败即回滚），节点最终生效版本仍为 Release 同一哈希 |
+
+> **v1.13.1 的 Agent 侧确有变更**（NFS/CIFS/sshfs 挂载点不再调用不可中断的 `statfs(2)`，
+> 避免网络存储失联时采集协程整体挂死；另含 `readMounts` 设备去重顺序、Hyper-V 误判与日志脱敏修复），
+> 因此本次把 12 台远端节点与分发目录一并升级，而不是继续保留旧版本。
+> 升级后各节点保留 `/usr/local/bin/rollcall-agent.prev` 作为单机回滚点。
+
+以下为 v1.10.5 及更早版本的验证记录：
 
 | 项目 | 结果 |
 |---|---|
@@ -1372,9 +1389,9 @@ certificate_days_remaining,uptime_percent_24h}`
 | 升级后回归 | 13/13 节点在线，0 stale / 0 offline / 0 noData；`admin.token`、`admin-user.json`、`session.key` 均 0600；无 `initial-admin-password.txt` 残留；`/app.js` gzip + `Vary` + 弱 ETag，`If-None-Match` 命中 304；`/agent/install.sh` 从不压缩；未登录 `/api/admin/nodes` 401；`/agent/download.sha256?arch=amd64` 与分发文件、下载内容三者哈希一致（`dcf60967…`）；公开 `/api/status` 不含主机名/IP/价格 |
 | CI 发布任务 | `.github/workflows/ci.yml` YAML 解析通过；新增 `release` job 仅在 tag 上运行、`needs: [test, race]`、`permissions: contents: write`、钉死 Go 1.27.3、校验 `SHA256SUMS` 为 12 行后用 `gh release create --verify-tag` 发布 |
 
-> 本版**没有 Agent 侧行为变更**（唯一涉及 agent 源码的改动是 import 路径字符串，不进二进制），
-> 因此 12 台远端节点与分发目录刻意保留在 v1.10.4，避免一轮没有收益的机群升级，
-> 面板也不会因此出现「可升级」标记。
+> v1.10.5 **没有 Agent 侧行为变更**（唯一涉及 agent 源码的改动是 import 路径字符串，不进二进制），
+> 当时因此没有升级 12 台远端节点与分发目录，避免一轮没有收益的机群升级。
+> v1.11 起 Agent 确有变更（见上方 v1.13.1 记录），机群已在 v1.13.1 全部升级到位。
 
 以下为 v1.10.4 及更早版本的验证记录：
 
