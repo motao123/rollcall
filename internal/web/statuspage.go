@@ -645,7 +645,10 @@ html.js-ok #jsfail{display:none}
   .chart-box{height:126px}
   .detail-bottom{gap:10px}
   .detail-bottom > .card{flex-basis:100%}
-  .upbar{height:34px}
+  /* 90 根柱子按 2px 最小宽度 + 2px 间距需要 358px，375px 手机上会顶出卡片。
+   * 窄屏收紧间距与最小宽度，让 flex 自行压缩到可用宽度内。 */
+  .upbar{height:34px;gap:1px}
+  .upbar i{min-width:1px}
   .card{padding:15px 14px}
   .svc-list{grid-template-columns:1fr}
   .skel-row{grid-template-columns:1fr}
