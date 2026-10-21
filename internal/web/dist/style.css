@@ -1606,7 +1606,6 @@ body.auth-checking .app { visibility: hidden; }
   transition: border-color .15s, box-shadow .15s;
 }
 .login-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.login-input::placeholder { color: var(--fg-3); }
 
 .login-eye {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
@@ -1636,16 +1635,38 @@ body.auth-checking .app { visibility: hidden; }
 }
 @keyframes loginSpin { to { transform: rotate(360deg); } }
 
-.login-hint {
-  margin: 18px 0 0; padding-top: 14px;
-  border-top: 1px solid var(--line);
-  font-size: 12px; color: var(--fg-2);
-}
-.login-hint code {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 11px;
+.login-notice {
+  margin-top: 18px;
+  padding: 12px 14px 13px;
   background: var(--panel-2);
-  padding: 1px 5px; border-radius: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--fg-2);
+}
+.login-notice-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.login-notice-head svg { flex: none; color: var(--accent); }
+.login-notice p { margin: 0; }
+.login-notice p + p { margin-top: 4px; }
+.login-notice code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
 }
 
 .login-foot {

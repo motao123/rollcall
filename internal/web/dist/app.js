@@ -4045,7 +4045,7 @@ function showLoginGate() {
           <span class="login-label">用户名或邮箱</span>
           <span class="login-input-wrap">
             <input class="login-input" id="gateIdentifier" name="identifier" type="text"
-                   placeholder="admin 或 name@example.com" required spellcheck="false"
+                   required spellcheck="false"
                    autocomplete="username" autocapitalize="none" aria-describedby="loginError">
           </span>
         </label>
@@ -4053,7 +4053,7 @@ function showLoginGate() {
           <span class="login-label">密码</span>
           <span class="login-input-wrap">
             <input class="login-input" id="gatePassword" name="password" type="password"
-                   placeholder="请输入密码" required autocomplete="current-password"
+                   required autocomplete="current-password"
                    aria-describedby="loginError">
             <button type="button" class="login-eye" id="gateEye" title="显示 / 隐藏密码" aria-label="显示或隐藏密码">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/></svg>
@@ -4064,17 +4064,21 @@ function showLoginGate() {
           <span class="login-label">动态验证码</span>
           <span class="login-input-wrap">
             <input class="login-input" id="gateTotp" name="totp" type="text"
-                   placeholder="身份验证器中的 6 位数字" inputmode="numeric"
+                   inputmode="numeric"
                    pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
                    aria-describedby="loginError">
           </span>
         </label>
         <button class="login-btn" id="gateSubmit" type="submit">登 录</button>
       </form>
-      <div class="login-hint">
-        账号、邮箱与密码由服务端统一管理；忘记密码时可用
-        <code>-reset-admin-password</code> 启动一次来重置。
-      </div>
+      <aside class="login-notice" aria-label="账号说明">
+        <div class="login-notice-head">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.6v.1"/></svg>
+          <span>账号说明</span>
+        </div>
+        <p>账号、邮箱与密码由服务端统一管理，面板不提供自助找回。</p>
+        <p>忘记密码时，可在服务端用 <code>-reset-admin-password</code> 启动一次来重置；新密码通过 <code>-admin-password</code> 或环境变量 <code>ROLLCALL_ADMIN_PASSWORD</code> 提供。</p>
+      </aside>
       <div class="login-foot">
         <a href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
         <button type="button" id="loginTheme">深浅色</button>
