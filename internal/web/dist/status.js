@@ -423,6 +423,9 @@
     nodes: '节点列表', services: '服务探测', map: '地区分布',
     history: '可用率', incidents: '事件', activity: '最近活动',
   };
+  // 列表页只保留少量预览，完整内容走独立页面，避免时间线把页面拉得过长。
+  var INCIDENT_PREVIEW = 3;
+  var ACTIVITY_PREVIEW = 5;
   // ADMIN 为 true 时才渲染拖拽手柄：公开页是匿名可访问的，
   // 排序属于"对所有访客生效"的配置，不能由任意访客改动。
   var ADMIN = false;
@@ -447,6 +450,7 @@
       try { return { view: 'node', id: decodeURIComponent(m[1]) }; }
       catch (e) { return { view: 'node', id: m[1] }; }
     }
+    if (h === 'events' || h === 'activity') return { view: h, id: null };
     return { view: 'list', id: null };
   }
 
@@ -478,6 +482,8 @@
     var site = (d && d.site) || '服务状态';
     document.getElementById('title').textContent = site;
     if (route.view === 'list') document.title = listTitle();
+    else if (route.view === 'events') document.title = pageTitle('事件');
+    else if (route.view === 'activity') document.title = pageTitle('最近活动');
     if (d) {
       document.getElementById('stamp').textContent = '更新于 ' + clock(d.generatedAt);
       var parts = [d.online + ' / ' + d.total + ' 在线'];
@@ -519,6 +525,8 @@
           patchList();
         } else if (route.view === 'node') {
           patchDetailHeader();
+        } else if (route.view === 'events' || route.view === 'activity') {
+          patchFeedPage();
         }
       })
       .catch(function (e) {
@@ -913,15 +921,24 @@
       historyBody(days) + '</section>';
   }
 
-  function incidentsBody(items) {
+  // moreLink 只在预览被截断时出现，条数直接写在链接里，不用点进去才知道有多少。
+  function moreLink(href, total) {
+    return '<a class="more-link" href="' + href + '">查看全部 ' + total + ' 条' +
+      ' <span aria-hidden="true">→</span></a>';
+  }
+
+  function incidentsBody(items, preview) {
+    var shown = preview ? items.slice(0, INCIDENT_PREVIEW) : items;
+    var more = preview && items.length > shown.length ? moreLink('#/events', items.length) : '';
     return '<div class="card-h"><h2>事件</h2>' +
-      '<span class="hint">告警自动生成 + 人工登记</span></div>' + timelineHTML(items);
+      '<span class="hint">告警自动生成 + 人工登记</span>' + more + '</div>' + timelineHTML(shown);
   }
 
   function incidentsSection() {
     var show = block('incidents');
+    var items = show ? (DATA.incidents || []) : [];
     return '<section class="card" id="incidentsWrap"' + (show ? '' : ' hidden') + '>' +
-      incidentsBody(show ? (DATA.incidents || []) : []) + '</section>';
+      incidentsBody(items, true) + '</section>';
   }
 
   var ACTIVITY_KIND = {
@@ -944,11 +961,61 @@
     }).join('') + '</div>';
   }
 
+  function activityBody(items, preview) {
+    var shown = preview ? items.slice(0, ACTIVITY_PREVIEW) : items;
+    var more = preview && items.length > shown.length ? moreLink('#/activity', items.length) : '';
+    return '<div class="card-h"><h2>最近活动</h2>' +
+      '<span class="hint">节点上下线与告警动态</span>' + more + '</div>' +
+      activityHTML(shown);
+  }
+
   function activitySection() {
     var show = block('activity');
     return '<section class="card" id="activityWrap"' + (show ? '' : ' hidden') + '>' +
-      '<div class="card-h"><h2>最近活动</h2><span class="hint">节点上下线与告警动态</span></div>' +
-      '<div id="actList">' + (show ? activityHTML(DATA.activity || []) : '') + '</div></section>';
+      (show ? activityBody(DATA.activity || [], true) : '') + '</section>';
+  }
+
+  // 事件与活动的完整列表：列表页只放预览，这里展示服务端下发的全部条目。
+  function feedCardHTML(kind) {
+    var isEvents = kind === 'events';
+    var items = DATA ? (isEvents ? (DATA.incidents || []) : (DATA.activity || [])) : [];
+    return '<div class="card-h"><h2>' + (isEvents ? '事件' : '最近活动') + '</h2>' +
+      '<span class="hint">' + (isEvents ? '告警自动生成 + 人工登记' : '节点上下线与告警动态') + '</span>' +
+      '<span class="hint" style="margin-left:auto">共 ' + items.length + ' 条</span></div>' +
+      (isEvents ? timelineHTML(items) : activityHTML(items));
+  }
+
+  function feedPageHTML(kind) {
+    return '<a class="back" href="#/">← 返回总览</a>' +
+      '<section class="card" id="feedPage">' + feedCardHTML(kind) + '</section>';
+  }
+
+  function feedSignature(kind) {
+    var items = DATA ? (kind === 'events' ? (DATA.incidents || []) : (DATA.activity || [])) : [];
+    return JSON.stringify(items);
+  }
+
+  var lastFeedSig = '';
+
+  function renderFeedPage(kind) {
+    app.innerHTML = feedPageHTML(kind);
+    app.setAttribute('data-view', kind);
+    app.removeAttribute('data-detail-id');
+    app.removeAttribute('aria-busy');
+    document.body.classList.remove('sec-admin');
+    lastFeedSig = feedSignature(kind);
+    document.title = pageTitle(kind === 'events' ? '事件' : '最近活动');
+  }
+
+  // 轮询时只替换卡片内容：整页重绘会把滚动位置一起丢掉。
+  function patchFeedPage() {
+    var kind = route.view;
+    var sig = feedSignature(kind);
+    if (sig === lastFeedSig) return;
+    var card = document.getElementById('feedPage');
+    if (!card) { renderFeedPage(kind); return; }
+    lastFeedSig = sig;
+    card.innerHTML = feedCardHTML(kind);
   }
 
   function timelineHTML(items) {
@@ -1171,6 +1238,8 @@
         if (dt) renderDetail(dt, false);
         else if (DETAIL_ERR[route.id + '|' + range]) renderDetailError(route.id, DETAIL_ERR[route.id + '|' + range]);
         else fetchDetail(route.id, true);
+      } else if (route.view === 'events' || route.view === 'activity') {
+        renderFeedPage(route.view);
       } else {
         renderList();
       }
@@ -1533,10 +1602,10 @@
     }
     wrap.hidden = false;
     var items = DATA.incidents || [];
-    var sig = items.length + '|' + (items[0] ? items[0].startAt + '|' + items[0].endAt : '');
+    var sig = JSON.stringify(items);
     if (wrap.getAttribute('data-sig') === sig) return;
     wrap.setAttribute('data-sig', sig);
-    wrap.innerHTML = incidentsBody(items);
+    wrap.innerHTML = incidentsBody(items, true);
   }
 
   function updateMap() {
@@ -1562,21 +1631,25 @@
     }
     wrap.hidden = false;
     var items = DATA.activity || [];
-    var sig = items.length + '|' + (items[0] ? items[0].ts + '|' + items[0].text : '');
+    var sig = JSON.stringify(items);
     if (wrap.getAttribute('data-sig') === sig) return;
     wrap.setAttribute('data-sig', sig);
-    var list = document.getElementById('actList');
-    if (list) list.innerHTML = activityHTML(items);
+    wrap.innerHTML = activityBody(items, true);
   }
 
   /* ---------------- 详情 ---------------- */
 
   function listTitle() {
-  var site = DATA && DATA.site ? DATA.site : '';
-  return !site || site === '服务状态' ? '服务状态' : site + ' · 服务状态';
-}
+    var site = DATA && DATA.site ? DATA.site : '';
+    return !site || site === '服务状态' ? '服务状态' : site + ' · 服务状态';
+  }
 
-function detailTitle(n) {
+  function pageTitle(label) {
+    var site = DATA && DATA.site ? DATA.site : '';
+    return !site || site === '服务状态' ? label : site + ' · ' + label;
+  }
+
+  function detailTitle(n) {
     if (n && n.name) document.title = n.name + ' · ' + ((DATA && DATA.site) || '服务状态');
   }
 
@@ -1920,6 +1993,8 @@ function detailTitle(n) {
         renderDetailShell(route.id);
         fetchDetail(route.id, false);
       }
+    } else if (route.view === 'events' || route.view === 'activity') {
+      if (DATA) renderFeedPage(route.view);
     } else {
       range = '24h';
       if (DATA) { document.title = listTitle(); renderList(); }

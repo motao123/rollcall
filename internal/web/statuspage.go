@@ -188,6 +188,11 @@ body.sec-sorting{user-select:none;cursor:grabbing}
   background:linear-gradient(var(--accent),var(--accent-2))}
 .card-h .hint{font-size:11.5px;color:var(--fg3)}
 .card-h .spacer{flex:1}
+.card-h .more-link{margin-left:auto;font-size:11.5px;font-weight:600;color:var(--accent);
+  text-decoration:none;display:inline-flex;align-items:center;gap:3px;padding:2px 5px;
+  border-radius:6px;white-space:nowrap;transition:background .15s}
+.card-h .more-link:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.card-h .more-link:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 /* ---------- 公告 / 状态横幅 ---------- */
 .banner{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;margin-bottom:12px;
