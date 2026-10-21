@@ -47,7 +47,10 @@ GOOS=linux GOARCH=$(3) CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags
 	-o dist/$(1)-linux-$(3) ./cmd/$(2)
 endef
 
-.PHONY: all server agent rollsign linux clean clean-data demo fmt vet test
+# 发行签名私钥路径（仅 `make sign-release` 使用；私钥绝不能提交）
+ROLLSIGN_KEY ?=
+
+.PHONY: all server agent rollsign linux sign-release clean clean-data demo fmt vet test
 
 all: server agent rollsign
 
@@ -87,6 +90,19 @@ linux:
 	@cd dist && sha256sum rollcall-server-linux-* rollcall-agent-linux-* rollsign-linux-* > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS
 	@ls -lh dist/
 	@cat dist/SHA256SUMS
+
+# 为 dist/ 中的四个服务端二进制生成 Ed25519 发行签名（<文件>.sig）。
+# 先执行 make linux VERSION=v1.14.0，再在签名机上：
+#   make sign-release ROLLSIGN_KEY=/root/rollcall-release.key VERSION=v1.14.0
+# 私钥只留在签名机；公钥安装到控制端 /etc/rollcall/release.pub。
+# -version 必须与构建时的 VERSION 完全一致，否则健康检查会因版本对不上而回滚。
+sign-release: rollsign
+	@test -n "$(ROLLSIGN_KEY)" || { echo "用法: make sign-release ROLLSIGN_KEY=/路径/rollcall-release.key VERSION=v1.14.0"; exit 1; }
+	@test -f "$(ROLLSIGN_KEY)" || { echo "私钥不存在: $(ROLLSIGN_KEY)"; exit 1; }
+	@for arch in amd64 arm64 arm 386; do \
+		./$(BINARY_SIGN) sign-release -key "$(ROLLSIGN_KEY)" -version "$(VERSION)" \
+			-file dist/rollcall-server-linux-$$arch -out dist/rollcall-server-linux-$$arch.sig || exit 1; \
+	done
 
 # -demo 模式会忽略 -data 并改用临时目录，这里不再传 -data。
 demo: server

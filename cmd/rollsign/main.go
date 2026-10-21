@@ -1,15 +1,22 @@
-// Command rollsign 生成 Agent 自更新所需的 Ed25519 密钥与签名清单。
+// Command rollsign 生成 Rollcall 发布签名：Agent 自更新清单与服务端发行签名。
 //
 // 用法：
 //
 //	rollsign keygen -out rollsign.key
+//	rollsign pubkey -key rollsign.key -out rollsign.pub
 //	rollsign sign -key rollsign.key -version 1.7.0 \
 //	  -base-url https://example.com/releases/v1.7.0 \
 //	  -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
 //	  -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
 //	  -out manifest.json
+//	rollsign sign-release -key rollsign.key -version v1.14.0 \
+//	  -file dist/rollcall-server-linux-amd64
+//	rollsign verify-release -pubkey rollsign.pub \
+//	  -signature dist/rollcall-server-linux-amd64.sig \
+//	  -file dist/rollcall-server-linux-amd64
 //
-// 私钥只保存在本机，绝不能提交到仓库；公钥填入 Agent 配置的 update.publicKey。
+// 私钥只保存在本机，绝不能提交到仓库；公钥填入 Agent 配置的 update.publicKey，
+// 或安装到控制端的 /etc/rollcall/release.pub 供升级脚本验签。
 package main
 
 import (
@@ -30,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/motao123/rollcall/internal/releasesig"
 	"github.com/motao123/rollcall/internal/selfupdate"
 )
 
@@ -43,6 +51,12 @@ func main() {
 		keygen(os.Args[2:])
 	case "sign":
 		sign(os.Args[2:])
+	case "pubkey":
+		pubkey(os.Args[2:])
+	case "sign-release":
+		signRelease(os.Args[2:])
+	case "verify-release":
+		verifyRelease(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -53,15 +67,25 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `rollsign — Rollcall Agent 自更新签名工具
+	fmt.Fprint(os.Stderr, `rollsign — Rollcall 发布签名工具
 
   rollsign keygen [-out rollsign.key]
       生成 Ed25519 密钥，打印 base64 公钥；私钥文件权限 0600。
 
+  rollsign pubkey [-key rollsign.key] [-out rollsign.pub]
+      打印或导出 base64 公钥（服务端发行验签 / Agent 更新配置使用）。
+
   rollsign sign -key rollsign.key -version v1.7.0 -base-url URL -asset 平台=文件 ... [-out manifest.json]
-      计算每个资产的 SHA-256 与大小并生成签名清单。
+      计算每个资产的 SHA-256 与大小并生成 Agent 更新清单。
       -asset 可重复，平台键如 linux-amd64、linux-arm64。
       -allow-insecure 仅用于本机 HTTP 测试。
+
+  rollsign sign-release -key rollsign.key -version v1.14.0 -file 服务端二进制 [-out 文件.sig]
+      生成服务端发行签名，签名绑定版本号、SHA-256 与文件大小。
+      -version 必须与构建时的 VERSION 完全一致（含 v 前缀）。
+
+  rollsign verify-release -pubkey rollsign.pub -signature 文件.sig -file 服务端二进制
+      校验发行签名与文件内容，成功时只打印签名中的版本号，失败以非 0 退出。
 `)
 }
 
@@ -89,7 +113,97 @@ func keygen(args []string) {
 
 	fmt.Printf("私钥: %s（权限 0600，切勿提交或外传）\n", *out)
 	fmt.Printf("公钥: %s\n", base64.StdEncoding.EncodeToString(pub))
-	fmt.Println("把上面的公钥填入 agent.json 的 update.publicKey")
+	fmt.Println("把上面的公钥填入 agent.json 的 update.publicKey，或安装为控制端 /etc/rollcall/release.pub")
+}
+
+// pubkey 从私钥导出公钥，方便脚本化部署发行验签公钥。
+func pubkey(args []string) {
+	fs := flag.NewFlagSet("pubkey", flag.ExitOnError)
+	keyPath := fs.String("key", "rollsign.key", "私钥文件")
+	out := fs.String("out", "", "输出文件；留空打印到 stdout")
+	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		fatal("无法识别的参数: %s", strings.Join(fs.Args(), " "))
+	}
+
+	priv := loadKey(*keyPath)
+	line := base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)) + "\n"
+	if *out == "" {
+		fmt.Print(line)
+		return
+	}
+	if samePath(*out, *keyPath) {
+		fatal("-out 不能指向私钥文件: %s", *out)
+	}
+	if err := writeFileAtomic(*out, []byte(line), 0o644); err != nil {
+		fatal("写入公钥失败: %v", err)
+	}
+	fmt.Printf("已写入 %s\n", *out)
+}
+
+// signRelease 为服务端二进制生成发行签名；默认输出 <文件>.sig。
+func signRelease(args []string) {
+	fs := flag.NewFlagSet("sign-release", flag.ExitOnError)
+	keyPath := fs.String("key", "rollsign.key", "私钥文件")
+	ver := fs.String("version", "", "发布版本，必须与构建时的 VERSION 一致")
+	file := fs.String("file", "", "要签名的服务端二进制")
+	out := fs.String("out", "", "签名输出路径；默认 <文件>.sig")
+	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		fatal("无法识别的参数: %s", strings.Join(fs.Args(), " "))
+	}
+	if *file == "" {
+		fatal("-file 必填")
+	}
+	if *out == "" {
+		*out = *file + ".sig"
+	}
+	// 先拦下危险输出路径：writeFileAtomic 的 rename 会让 -out 覆盖目标，
+	// 指向私钥或二进制本身会毁掉签名能力或正在发布的文件。
+	if samePath(*out, *keyPath) {
+		fatal("-out 不能指向私钥文件: %s", *out)
+	}
+	if samePath(*out, *file) {
+		fatal("-out 不能覆盖被签名的文件: %s", *file)
+	}
+
+	priv := loadKey(*keyPath)
+	env, err := releasesig.SignFile(*file, *ver, priv)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if err := writeFileAtomic(*out, append(env, '\n'), 0o644); err != nil {
+		fatal("写入发行签名失败: %v", err)
+	}
+	fmt.Printf("已写入 %s（版本 %s）\n", *out, strings.TrimSpace(*ver))
+}
+
+// verifyRelease 校验签名与文件内容，只把版本号写到 stdout 供脚本读取；
+// 失败信息走 stderr 并返回非 0。
+func verifyRelease(args []string) {
+	fs := flag.NewFlagSet("verify-release", flag.ExitOnError)
+	pubPath := fs.String("pubkey", "", "发行公钥文件（base64）")
+	sigPath := fs.String("signature", "", "签名文件")
+	file := fs.String("file", "", "被校验的服务端二进制")
+	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		fatal("无法识别的参数: %s", strings.Join(fs.Args(), " "))
+	}
+	if *pubPath == "" || *sigPath == "" || *file == "" {
+		fatal("-pubkey、-signature 与 -file 均必填")
+	}
+
+	pubRaw := readSmallFile(*pubPath, 4<<10, "发行公钥")
+	pub, err := releasesig.DecodePublicKey(string(pubRaw))
+	if err != nil {
+		fatal("%v", err)
+	}
+	sigRaw := readSmallFile(*sigPath, releasesig.MaxSignatureSize, "签名文件")
+	rel, err := releasesig.VerifyFile(*file, sigRaw, pub)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Println(rel.Version)
 }
 
 type assetList []string
@@ -332,6 +446,22 @@ func buildManifest(assets []string, version string, publishedAt int64, baseURL s
 		}
 	}
 	return m, nil
+}
+
+// readSmallFile 先按 Stat 大小拦截，避免把误指定的大文件整个读进内存。
+func readSmallFile(path string, max int64, what string) []byte {
+	fi, err := os.Stat(path)
+	if err != nil {
+		fatal("读取%s失败: %v", what, err)
+	}
+	if fi.Size() > max {
+		fatal("%s过大（%d 字节，上限 %d）: %s", what, fi.Size(), max, path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		fatal("读取%s失败: %v", what, err)
+	}
+	return b
 }
 
 func loadKey(path string) ed25519.PrivateKey {

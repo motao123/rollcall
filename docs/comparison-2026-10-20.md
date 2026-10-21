@@ -218,6 +218,10 @@ geoip{...}  last_active  display_index
 2. **采集与控制解耦**：采集只写存储，判定只读存储。我们已满足；不要为了实时性把告警塞进上报路径。
 3. **能力边界写成契约**：heron 把"hub 能影响 agent 的四件事"写进 README 并落到 `agentcompatcontract` 这类包里。我们应在 README 里用同样方式固化"agent 无 exec/listen"的承诺，并保留符号表验证的方法（已有）。
 4. **签名更新 + 自动回滚**：heron 的 `releasesig` + "新版本未确认就绪即回滚"。我们已有 `internal/selfupdate`（pending/rollback/backoff），可以补"发行签名"这一层。
+   **落地修正（2026-10-21）**：新增 `internal/releasesig`，`rollsign` 增加 `pubkey` / `sign-release` /
+   `verify-release`；签名绑定版本号、SHA-256 与大小，`deploy/rollcall-server-upgrade.sh` 在本机公钥
+    `/etc/rollcall/release.pub` 存在时强制验签，并在替换前核对签名版本与二进制 `-version`。
+   自动回滚沿用既有 `.prev` + `/readyz` 版本核对；回滚恢复本机文件，无需重新验签。
 5. **主题即资源**：主题不编译进主程序，按目录分发 + 清单描述。
 6. **告警抑制优先于告警通道**：先有静默/聚合/去重，再谈接多少个 IM。
 

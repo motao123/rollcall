@@ -89,15 +89,38 @@ curl -fsS http://127.0.0.1:19080/readyz
 服务端回滚：停服务，把 `/opt/rollcall/rollcall-server.prev` 装回原位后启动。
 若新版本已把快照写成更高 schema，还必须先恢复上面备份的 `state.json` / `history.json`（见下节）。
 
-### 一键升级/回滚脚本（v1.10+）
+### 一键升级/回滚脚本（v1.10+，v1.14 起支持发行验签）
 
-`deploy/rollcall-server-upgrade.sh` 封装了「校验 → 备份 `.prev` → 原子替换 → 重启 → 健康检查 → 失败自动回滚」：
+`deploy/rollcall-server-upgrade.sh` 封装了「校验 → 备份 `.prev` → 原子替换 → 重启 → 健康检查 → 失败自动回滚」。
+v1.14 起，配置了发行公钥的实例会在替换前强制校验 Ed25519 发行签名。
+
+**一次性配置发行签名**（签名机与控制端分开）：
+
+```bash
+# 签名机：生成独立的发行密钥（不要复用 Agent 更新私钥，也不要把私钥放到控制端）
+make rollsign
+./rollsign keygen -out /root/rollcall-release.key
+./rollsign pubkey -key /root/rollcall-release.key -out /root/rollcall-release.pub
+
+# 构建并签名服务端产物；-version 必须与 VERSION 完全一致（含 v 前缀）
+make linux VERSION=v1.14.0
+make sign-release ROLLSIGN_KEY=/root/rollcall-release.key VERSION=v1.14.0
+# 生成 dist/rollcall-server-linux-<arch>.sig，与对应二进制一起分发
+
+# 控制端：安装公钥与本机验签工具
+sudo install -d -m 0755 /etc/rollcall
+sudo install -m 0644 rollcall-release.pub /etc/rollcall/release.pub
+sudo install -m 0755 rollsign-linux-amd64 /opt/rollcall/rollsign
+```
+
+升级与回滚：
 
 ```bash
 # --sha256 必须填「发布方给出的」校验和（dist/SHA256SUMS 或 Release 页面），
 # 不要在目标机上现算刚下载的那个文件：那样两边永远相等，等于没校验。
 sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file /tmp/rollcall-server.new \
+  --signature /tmp/rollcall-server.new.sig \
   --sha256 <发布记录里的 64 位 hex> \
   --service rollcall-server \
   --health http://127.0.0.1:19080/readyz
@@ -106,7 +129,15 @@ sudo sh deploy/rollcall-server-upgrade.sh rollback \
   --service rollcall-server --health http://127.0.0.1:19080/readyz
 ```
 
-- `--sha256` 为必填；同时检查 ELF 魔数与架构，拒绝把脚本/损坏文件装成服务端
+- **`/etc/rollcall/release.pub` 存在时必须验签**：`--signature` 不可省略。签名覆盖版本号、
+  SHA-256 与文件大小，验签在备份/替换之前完成，失败时当前版本完全不受影响
+- 验签后还会要求「签名中的版本 = 二进制 `-version` = 升级后 `/readyz` 版本」，
+  防止签错架构或旧产物；`-version` 对不上会在替换前中止
+- `--pubkey` / `--rollsign` 可覆盖默认路径。验签工具只从本机路径加载
+  （默认 `/opt/rollcall/rollsign`，其次 PATH 中的 `rollsign`），不从下载源获取
+- 尚未配置公钥的实例必须显式传 `--allow-unsigned` 才能只校验 SHA-256（会打印警告）；
+  该参数与已有公钥/`--signature` 互斥。**不建议长期使用**，它无法抵御下载源被篡改
+- `--sha256` 仍为必填；同时检查 ELF 魔数，拒绝把脚本/损坏文件装成服务端
 - **二进制路径默认从 `--service` 单元的 `ExecStart` 推导**，不是写死的 `/opt/rollcall/...`：
   否则在多实例主机上，`--service B` 配默认路径会替换掉 A 的二进制、再重启 B，
   A 悄悄跑在旧文件上而脚本报告成功。显式传 `--bin` 且与单元 ExecStart 不一致时脚本直接拒绝
@@ -114,10 +145,12 @@ sudo sh deploy/rollcall-server-upgrade.sh rollback \
   （不传就是"跳过检查也算升级成功"，正是脚本要避免的那种假成功）
 - 当前二进制保存为 `rollcall-server.prev`；最多等待 20 秒，要求 `/readyz`
   返回 200 且版本号与目标二进制一致（防止 systemd 仍拉起旧文件）
-- 新版本启动失败时自动换回 `.prev` 并再次重启，脚本返回非 0
+- 新版本启动失败时自动换回 `.prev` 并再次重启，脚本返回非 0；回滚恢复的是本机
+  此前安装过的文件，不需要重新验签
 - 只操作二进制与 systemd 服务，不触碰 unit 文件和数据目录；
   如果新版本已经写入更高 schema，回滚前仍需恢复数据备份
-- 执行期间持有 `/run/rollcall-upgrade.lock`，并发调用直接失败
+- 执行期间持有 `/run/rollcall-upgrade.lock`，并发调用直接失败；因 `kill -9`/断电遗留的
+  锁会按 pid 与进程启动时间自动回收
 
 ### Agent 升级
 
@@ -746,6 +779,9 @@ curl -fsS http://127.0.0.1:19080/metrics \
 - [ ] `rollcall-server -version` / `rollcall-agent -version` 与发布版本一致，产物的 SHA-256 与发布记录一致
 - [ ] `dist/SHA256SUMS` 恰好 12 行（server/agent/rollsign × amd64/arm64/arm/386）；
       少了 `rollsign-linux-*` 就等于发布包里留了一个没人核对的二进制，而它正是签发 Agent 更新清单的工具
+- [ ] 如启用服务端发行签名：`dist/rollcall-server-linux-*.sig` 由离线私钥生成，
+      控制端 `/etc/rollcall/release.pub` 与 `/opt/rollcall/rollsign` 已就位；
+      升级日志中能看到「发行签名校验通过」（临时跳过必须显式 `--allow-unsigned` 并记录原因）
 - [ ] 面板节点列表的 Agent 版本与 `rollcall-agent -version` 一致，无意外「可升级」标记
 - [ ] 两个 systemd 单元均为 `active (running)` 且已 `enable`；无 systemd 时确认 `runuser` 后台进程与日志
 - [ ] `/healthz` 返回 `ok`、`/readyz` 返回 200 且版本号与目标版本一致，`/status` 可匿名访问且不含主机名/IP/价格
@@ -781,8 +817,9 @@ sudo systemctl disable --now rollcall-server
 sudo rm -f /etc/systemd/system/rollcall-server.service
 sudo rm -rf /etc/systemd/system/rollcall-server.service.d
 sudo systemctl daemon-reload
-sudo rm -rf /opt/rollcall                 # 确认备份完成后再执行
+sudo rm -rf /opt/rollcall                 # 确认备份完成后再执行（含 rollsign 验签工具）
 sudo rm -f /etc/rollcall/server.env       # 可能仍留有明文初始密码行
+sudo rm -f /etc/rollcall/release.pub      # 服务端发行验签公钥（公钥不敏感，但已无用途）
 sudo userdel rollcall 2>/dev/null || true
 ```
 

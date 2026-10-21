@@ -1,14 +1,25 @@
 #!/bin/sh
 # Rollcall 服务端一键升级 / 回滚。
 #
-# 升级：先校验新二进制的 SHA-256，备份当前版本为 <bin>.prev，
-#       原子替换后重启 systemd 服务并做健康检查；失败时自动回滚。
-# 回滚：把 <bin>.prev 恢复为当前版本并重启，同样做健康检查。
+# 升级：校验新二进制的 SHA-256；配置了发行公钥时必须先通过 Ed25519
+#       发行签名校验（签名绑定版本号、SHA-256 与大小），再备份当前版本为
+#       <bin>.prev，原子替换后重启 systemd 服务并做健康检查；失败自动回滚。
+# 回滚：把本机此前安装过的 <bin>.prev 恢复为当前版本并重启；
+#       恢复的是本机文件，不需要重新验签。
 #
 # 用法：
-#   rollcall-server-upgrade.sh upgrade --file /tmp/rollcall-server --sha256 <64位hex>
-#   rollcall-server-upgrade.sh upgrade --url https://example.com/rollcall-server --sha256 <64位hex>
+#   rollcall-server-upgrade.sh upgrade --file /tmp/rollcall-server --sha256 <64位hex> \
+#     --signature /tmp/rollcall-server.sig
+#   rollcall-server-upgrade.sh upgrade --url https://example.com/rollcall-server --sha256 <64位hex> \
+#     --signature /tmp/rollcall-server.sig
 #   rollcall-server-upgrade.sh rollback
+#
+# 发行签名：默认公钥为 /etc/rollcall/release.pub；该文件存在时必须验签。
+#           --signature <文件>          新二进制的 .sig 签名文件
+#           --pubkey <路径>             发行公钥；默认 /etc/rollcall/release.pub
+#           --rollsign <路径>           验签工具；默认 /opt/rollcall/rollsign，
+#                                       其次 PATH 中的 rollsign
+#           --allow-unsigned            未配置公钥时显式跳过验签（不推荐）
 #
 # 可选参数：--service rollcall-server   目标 systemd 单元
 #           --bin <路径>                要替换的二进制；默认取该单元 ExecStart
@@ -25,6 +36,11 @@ BIN=/opt/rollcall/rollcall-server
 BIN_EXPLICIT=0
 SERVICE=rollcall-server
 HEALTH=http://127.0.0.1:19080/readyz
+PUBKEY=/etc/rollcall/release.pub
+PUBKEY_EXPLICIT=0
+SIGNATURE=
+ROLLSIGN=
+ALLOW_UNSIGNED=0
 LOCK=/run/rollcall-upgrade.lock
 TMP=
 PREV=
@@ -101,6 +117,38 @@ need_http_client() {
   command -v curl >/dev/null 2>&1 && return 0
   command -v wget >/dev/null 2>&1 && return 0
   die "健康检查需要 curl 或 wget；确实要跳过请用 --health \"\""
+}
+
+# need_rollsign 定位本机的验签工具。验签只信任本机已安装的 rollsign
+# 与公钥，不从下载源获取；找不到时必须在替换任何文件之前失败。
+need_rollsign() {
+  if [ -n "$ROLLSIGN" ]; then
+    [ -x "$ROLLSIGN" ] || die "验签工具不可执行: $ROLLSIGN"
+    return 0
+  fi
+  if [ -x /opt/rollcall/rollsign ]; then
+    ROLLSIGN=/opt/rollcall/rollsign
+    return 0
+  fi
+  if command -v rollsign >/dev/null 2>&1; then
+    ROLLSIGN=$(command -v rollsign)
+    return 0
+  fi
+  die "已启用发行签名校验，但找不到 rollsign：请安装到 /opt/rollcall/rollsign，或用 --rollsign 指定"
+}
+
+# verify_release 校验签名并输出签名中的版本号。
+# 必须在新二进制落位之前调用；失败时当前运行版本不受影响。
+verify_release() {
+  need_rollsign
+  [ -n "$PUBKEY" ] || die "发行公钥路径为空"
+  [ -f "$PUBKEY" ] || die "找不到发行公钥: $PUBKEY"
+  [ -n "$SIGNATURE" ] || die "已配置发行公钥（$PUBKEY），必须提供 --signature"
+  [ -f "$SIGNATURE" ] || die "找不到发行签名文件: $SIGNATURE"
+  signed=$("$ROLLSIGN" verify-release -pubkey "$PUBKEY" -file "$1" -signature "$SIGNATURE") ||
+    die "发行签名校验失败（未改动当前版本）"
+  [ -n "$signed" ] || die "验签工具未返回版本号"
+  printf '%s' "$signed"
 }
 
 # proc_starttime 取进程启动时间（/proc/<pid>/stat 第 22 字段）。
@@ -260,9 +308,30 @@ cmd_upgrade() {
 
   magic=$(od -An -tx1 -N4 "$new" | tr -d ' \n')
   [ "$magic" = "7f454c46" ] || die "新文件不是 Linux ELF 可执行文件"
+
+  # 验签不可被静默跳过：一旦配置了公钥或显式提供签名，
+  # --allow-unsigned 就是参数冲突，而不是"覆盖验签"。
+  if [ "$ALLOW_UNSIGNED" = 1 ] &&
+    { [ -n "$SIGNATURE" ] || [ "$PUBKEY_EXPLICIT" = 1 ] || [ -f "$PUBKEY" ]; }; then
+    die "--allow-unsigned 不能与发行公钥或 --signature 同时使用：验签不可被跳过"
+  fi
+
   chmod 0755 "$new" || die "设置新二进制执行权限失败"
-  EXPECT_VERSION=$(binary_version "$new" || true)
-  [ -n "$EXPECT_VERSION" ] || log "提示: 无法读取新版本号，只校验就绪状态"
+  if [ -n "$SIGNATURE" ] || [ "$PUBKEY_EXPLICIT" = 1 ] || [ -f "$PUBKEY" ]; then
+    # 先验签再执行新二进制：签名版本还必须与二进制自报版本一致，
+    # 防止签的是别的构建产物（例如错误的架构或旧文件）却通过了哈希。
+    EXPECT_VERSION=$(verify_release "$new")
+    reported=$(binary_version "$new" || true)
+    [ "$reported" = "$EXPECT_VERSION" ] ||
+      die "签名版本 $EXPECT_VERSION 与二进制报告的版本 ${reported:-未知} 不一致，已中止（未改动当前版本）"
+    log "发行签名校验通过（版本 $EXPECT_VERSION）"
+  elif [ "$ALLOW_UNSIGNED" = 1 ]; then
+    log "⚠ 未启用发行签名校验（--allow-unsigned）：只校验 SHA-256，无法抵御下载源被篡改"
+    EXPECT_VERSION=$(binary_version "$new" || true)
+    [ -n "$EXPECT_VERSION" ] || log "提示: 无法读取新版本号，只校验就绪状态"
+  else
+    die "未配置发行公钥（$PUBKEY）：请安装公钥并提供 --signature，或在明确接受风险后用 --allow-unsigned 跳过验签"
+  fi
 
   old_ver=$("$BIN" -version 2>/dev/null || printf 'unknown')
   log "当前版本: $old_ver"
@@ -277,6 +346,9 @@ cmd_upgrade() {
   if ! restart_and_check; then
     log "新版本启动失败，自动回滚"
     restore_prev
+    # 必须按恢复后的二进制重新取版本：沿用新版本号会让 /readyz
+    # 的版本核对永远失败，把一次成功的回滚误报成「回滚后仍不健康」。
+    EXPECT_VERSION=$(binary_version "$BIN" || true)
     if restart_and_check; then
       log "已回滚到上一版本，服务恢复正常"
     else
@@ -326,6 +398,10 @@ while [ $# -gt 0 ]; do
     --bin) shift; BIN=${1:-$BIN}; BIN_EXPLICIT=1 ;;
     --service) shift; SERVICE=${1:-$SERVICE} ;;
     --health) shift; HEALTH=${1:-} ;;
+    --signature) shift; SIGNATURE=${1:-} ;;
+    --pubkey) shift; PUBKEY=${1:-}; PUBKEY_EXPLICIT=1 ;;
+    --rollsign) shift; ROLLSIGN=${1:-} ;;
+    --allow-unsigned) ALLOW_UNSIGNED=1 ;;
     -h | --help | help) usage; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac

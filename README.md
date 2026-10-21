@@ -1015,24 +1015,47 @@ sudo systemctl start rollcall-server
 unit 文件只有在该版本明确要求时才需要同步替换；替换后执行 `systemctl daemon-reload`。
 
 **一键升级/回滚脚本**（可选）：`deploy/rollcall-server-upgrade.sh` 把上面的步骤收敛为一条命令，
-适合脚本化发布：
+适合脚本化发布。**先配置发行签名（推荐，首次升级前完成）**：
 
 ```bash
-# 在控制端本机执行；--sha256 为必填，防止传输损坏或拉错文件。
+# 签名机（不要放在被监控节点）：生成独立的发行密钥并签名发布产物
+make rollsign
+./rollsign keygen -out /root/rollcall-release.key
+./rollsign pubkey -key /root/rollcall-release.key -out /root/rollcall-release.pub
+make linux VERSION=v1.14.0
+make sign-release ROLLSIGN_KEY=/root/rollcall-release.key VERSION=v1.14.0
+# dist/rollcall-server-linux-<arch>.sig 与二进制一起分发
+
+# 控制端（一次性）：安装公钥与验签工具
+sudo install -d -m 0755 /etc/rollcall
+sudo install -m 0644 rollcall-release.pub /etc/rollcall/release.pub
+sudo install -m 0755 rollsign-linux-amd64 /opt/rollcall/rollsign
+```
+
+```bash
+# 在控制端本机执行；--sha256 仍为必填，用于快速发现传输损坏/拉错文件。
 # 注意：--sha256 要填「发布方给出的」校验和（dist/SHA256SUMS 或 Release 页面），
 # 不要在目标机上现算刚下载的那个文件——那样两边永远相等，等于没校验。
 sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file /tmp/rollcall-server.new \
+  --signature /tmp/rollcall-server.new.sig \
   --sha256 <发布记录里的 64 位 hex> \
   --service rollcall-server \
   --health http://127.0.0.1:19080/readyz
 
-# 回滚到升级前的 .prev
+# 回滚到升级前的 .prev（恢复本机文件，不需要签名）
 sudo sh deploy/rollcall-server-upgrade.sh rollback --service rollcall-server \
   --health http://127.0.0.1:19080/readyz
 ```
 
-- 升级前校验 ELF 魔数、架构与 SHA-256；当前二进制备份为 `rollcall-server.prev`
+- **`/etc/rollcall/release.pub` 存在时必须验签**：签名覆盖版本号、SHA-256 与文件大小，
+  验签在备份/替换之前完成；签名版本还要与二进制 `-version` 及升级后的 `/readyz` 双重核对。
+  公钥只从本机路径读取，下载源被篡改时不会装上未签名或版本不符的二进制
+- `--pubkey` / `--rollsign` 可覆盖默认路径（公钥默认 `/etc/rollcall/release.pub`，
+  验签工具优先 `/opt/rollcall/rollsign`，其次 PATH 中的 `rollsign`）
+- 尚未配置公钥的实例必须显式加 `--allow-unsigned` 才能只校验 SHA-256（会打印警告）；
+  该参数与已有公钥/`--signature` 互斥，避免「以为验了签」
+- 升级前校验 ELF 魔数与 SHA-256；当前二进制备份为 `rollcall-server.prev`
 - **替换路径默认从 `--service` 单元的 `ExecStart` 推导**，不是写死的 `/opt/rollcall/...`：
   否则多实例主机上 `--service B` 配默认路径会替换掉 A 的二进制、再重启 B，
   A 悄悄跑在旧文件上而脚本报告成功。显式 `--bin` 与单元 ExecStart 不一致时直接拒绝
@@ -1144,7 +1167,7 @@ rollcall/
 ├── cmd/
 │   ├── server/main.go       服务端入口
 │   ├── agent/main.go        只读 Agent 入口
-│   └── rollsign/main.go     更新清单签名工具（keygen / sign）
+│   └── rollsign/main.go     发布签名工具（keygen / pubkey / sign / sign-release / verify-release）
 ├── internal/
 │   ├── model/               数据结构（无依赖）
 │   ├── store/               环形缓冲 + 分层聚合 + JSON 快照
@@ -1156,6 +1179,7 @@ rollcall/
 │   ├── notify/              通知通道 + 本地插件加载/执行
 │   ├── outbox/              持久化通知队列
 │   ├── selfupdate/          Ed25519 清单校验、下载、原子替换与回滚
+│   ├── releasesig/          服务端发行二进制的 Ed25519 签名与验签
 │   ├── theme/               受限主题模型与校验
 │   ├── themepack/           公开页主题包发现与清单校验
 │   ├── version/             构建版本号（ldflags 注入）
@@ -1201,6 +1225,7 @@ rollcall/
 | SSRF（通知） | 不跟随重定向；始终拒绝 metadata/链路本地；自托管允许私网；不回显远端响应体 |
 | 探测 TLS 降级 | 默认严格校验证书；跳过校验必须显式 `-insecure-probe-tls` |
 | Agent 传输窃听 | 非本机服务端强制 HTTPS（或显式 `-allow-insecure`）；不跟随 3xx |
+| 服务端升级被投毒 | 升级脚本用本机公钥验签（Ed25519 绑定版本/哈希/大小），再核对 `-version` 与 `/readyz`；失败自动回滚 |
 | 时序数据被污染 | 服务端覆盖 Agent 时间戳；时间倒退的样本直接丢弃 |
 | 快照损坏 | 自动隔离为 `state.json.corrupt-<时间>` 并拒绝以空库启动，避免令牌/台账静默丢失 |
 
@@ -1336,7 +1361,7 @@ python3 bench/bench_capacity.py --binary /tmp/rollcall-bench --nodes 40 100 200 
 | ~~P10~~ | ~~监控闭环：服务/证书告警、到期提醒、流量配额、续费日历~~ ✅ |
 | ~~P11~~ | ~~告警指标扩展、通知降噪（免打扰/摘要/模板/报告）、DNS 与丢包抖动、TOTP、范围化 API 令牌~~ ✅ |
 | ~~P12~~ | ~~跨节点对比与收藏、加密配置备份、运行报告、公开页地图/活动流、多挂载点/网卡/磁盘 I/O 采集~~ ✅ |
-| ~~P13~~ | ~~控制端一键升级/回滚脚本（校验哈希 + 健康检查 + 自动回滚）~~ ✅ |
+| ~~P13~~ | ~~控制端一键升级/回滚脚本（校验哈希 + 健康检查 + 自动回滚；v1.14 起支持 Ed25519 发行验签）~~ ✅ |
 
 **P5 明细**：
 
