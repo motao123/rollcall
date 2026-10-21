@@ -123,7 +123,7 @@ func TestSavePersistsAllSections(t *testing.T) {
 	// APIToken.Hash 也是 json:"-"，必须像节点令牌一样单独持久化，
 	// 否则重启后 scoped 令牌全部变成永远 401 的幽灵记录。
 	s.AddAPIToken(&model.APIToken{ID: "tk1", Name: "自动化", Hash: "hash-secret",
-		Scopes: []string{"read"}, CreatedAt: 1000})
+		Scopes: []string{"read"}, Paths: []string{"/api/overview"}, CreatedAt: 1000})
 
 	if err := s.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -182,7 +182,8 @@ func TestSavePersistsAllSections(t *testing.T) {
 		t.Error("重启后 API 令牌无法匹配")
 	}
 	toks := s2.APITokens()
-	if len(toks) != 1 || len(toks[0].Scopes) != 1 || toks[0].Scopes[0] != "read" {
+	if len(toks) != 1 || len(toks[0].Scopes) != 1 || toks[0].Scopes[0] != "read" ||
+		len(toks[0].Paths) != 1 || toks[0].Paths[0] != "/api/overview" {
 		t.Errorf("API 令牌元数据丢失: %+v", toks)
 	}
 	if len(toks) == 1 && toks[0].Hash != "" {

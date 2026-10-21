@@ -2417,7 +2417,7 @@ function showRawToken(token, meta) {
   const dlg = openDialog('API 令牌已创建', `
     <p class="modal-sub">明文只显示这一次，关闭后无法再次查看。请立即复制并保存到密钥管理系统。</p>
     <pre class="code" id="rawTokenText" style="word-break:break-all"></pre>
-    <p class="field-hint">名称：${esc((meta && meta.name) || '')} · 范围：${esc(((meta && meta.scopes) || []).join(', '))}</p>
+    <p class="field-hint">名称：${esc((meta && meta.name) || '')} · 范围：${esc(((meta && meta.scopes) || []).join(', '))} · 路径：${esc(((meta && meta.paths) || []).join(', ') || '全部')}</p>
     <div class="form-actions">
       <button class="btn primary" id="copyTokenBtn" type="button">复制令牌</button>
       <button class="btn" type="button" data-close>关闭</button>
@@ -2607,10 +2607,11 @@ async function viewSettings() {
     <td class="strong">${esc(tk.name)}</td>
     <td class="mono" style="font-size:11.5px">${esc(tk.prefix)}…</td>
     <td>${(tk.scopes || []).map((x) => `<span class="badge ${x === 'admin' ? 'warn' : 'mute'}">${esc(x)}</span>`).join(' ')}</td>
+    <td class="mono" style="font-size:11.5px">${(tk.paths && tk.paths.length) ? tk.paths.map((p) => esc(p)).join('<br>') : '<span class="text-faint">全部</span>'}</td>
     <td class="mono" style="font-size:11.5px">${clock(tk.createdAt)}</td>
     <td class="mono" style="font-size:11.5px">${tk.expiresAt ? clock(tk.expiresAt) : '永不过期'}</td>
     <td class="num"><button class="btn tiny danger" data-del-token="${esc(tk.id)}">删除</button></td>
-  </tr>`).join('') || `<tr><td colspan="6"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
+  </tr>`).join('') || `<tr><td colspan="7"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
   const packList = Array.isArray(themePacks.packs) ? themePacks.packs : [];
   const packOpts = [{ v: '', t: '内置（默认）' }].concat(
     packList.filter((p) => !p.error).map((p) => ({
@@ -2838,15 +2839,24 @@ async function viewSettings() {
             <option value="read">只读（read）</option>
             <option value="admin">管理（admin）</option>
           </select>
-          <input id="tokenDays" type="number" min="0" max="3650" placeholder="有效天数（0=永久）" class="w-days">
+          <input id="tokenPaths" type="text" maxlength="400" placeholder="路径限定（可选，逗号分隔）" class="w-paths">
+          <select id="tokenTTL">
+            <option value="30">30 分钟</option>
+            <option value="120">2 小时</option>
+            <option value="1440">24 小时</option>
+            <option value="10080">7 天</option>
+            <option value="43200" selected>30 天</option>
+            <option value="0">永不过期</option>
+          </select>
           <button class="btn primary" id="createTokenBtn" type="button">创建令牌</button>
         </div>
         <p class="field-hint section-hint">
           使用 <code>Authorization: Bearer rct_…</code> 调用 API；令牌只保存 SHA-256 摘要，明文仅在创建时显示一次。
-          管理范围可执行写操作，请仅授予可信自动化。
+          管理范围可执行写操作，请仅授予可信自动化。路径限定可把令牌收窄到
+          <code>/api/overview</code>、<code>/api/nodes/n1</code> 等前缀（留空=全部）。
         </p>
         <div class="table-wrap"><table class="queue-table">
-          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>路径限定</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
           <tbody>${tokenRows}</tbody>
         </table></div>
       </div>
@@ -2996,7 +3006,8 @@ async function viewSettings() {
         body: JSON.stringify({
           name,
           scopes: [$('#tokenScope').value],
-          expiresDays: Number($('#tokenDays').value) || 0,
+          paths: $('#tokenPaths').value.split(',').map((s) => s.trim()).filter(Boolean),
+          expiresMinutes: Number($('#tokenTTL').value) || 0,
         }),
       });
       showRawToken(r.token, r.meta);

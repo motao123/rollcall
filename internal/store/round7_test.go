@@ -130,13 +130,15 @@ func TestAPITokenLifecycle(t *testing.T) {
 	now := time.Now().Unix()
 	tok := &model.APIToken{
 		ID: "tk1", Name: "ci", Prefix: "rct_abcdefgh", Hash: "hash-1",
-		Scopes: []string{"read"}, CreatedAt: now,
+		Scopes: []string{"read"}, Paths: []string{"/api/overview"}, CreatedAt: now,
 	}
 	st.AddAPIToken(tok)
 	tok.Scopes[0] = "admin" // AddAPIToken 必须复制切片，不能共享底层数组
+	tok.Paths[0] = "/api/admin"
 
 	list := st.APITokens()
-	if len(list) != 1 || list[0].Hash != "" || len(list[0].Scopes) != 1 || list[0].Scopes[0] != "read" {
+	if len(list) != 1 || list[0].Hash != "" || len(list[0].Scopes) != 1 || list[0].Scopes[0] != "read" ||
+		len(list[0].Paths) != 1 || list[0].Paths[0] != "/api/overview" {
 		t.Fatalf("令牌列表不应泄露摘要或受入参影响: %+v", list)
 	}
 

@@ -557,6 +557,7 @@ func (s *Store) Save() (err error) {
 		cp := *t
 		cp.Hash = "" // 摘要单独存放，避免意外出现在任何令牌 JSON 视图里
 		cp.Scopes = append([]string(nil), t.Scopes...)
+		cp.Paths = append([]string(nil), t.Paths...)
 		snap.APITokens[k] = &cp
 		snap.APITokenHashes[k] = t.Hash
 	}
@@ -1176,6 +1177,7 @@ func (s *Store) AddAPIToken(t *model.APIToken) {
 	s.mu.Lock()
 	cp := *t
 	cp.Scopes = append([]string(nil), t.Scopes...)
+	cp.Paths = append([]string(nil), t.Paths...)
 	s.apiTokens[cp.ID] = &cp
 	s.mu.Unlock()
 	s.RequestSave()
@@ -1190,6 +1192,7 @@ func (s *Store) APITokens() []*model.APIToken {
 		cp := *t
 		cp.Hash = ""
 		cp.Scopes = append([]string(nil), t.Scopes...)
+		cp.Paths = append([]string(nil), t.Paths...)
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
@@ -1227,6 +1230,7 @@ func (s *Store) MatchAPIToken(hash string, now int64) (*model.APIToken, bool) {
 		}
 		cp := *t
 		cp.Scopes = append([]string(nil), t.Scopes...)
+		cp.Paths = append([]string(nil), t.Paths...)
 		return &cp, true
 	}
 	return nil, false

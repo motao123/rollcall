@@ -489,11 +489,15 @@ sudo systemctl start rollcall-server
 
 - `read`：只读接口；`admin`：全部接口（含写操作）
 - 明文只在创建响应中出现一次，服务端仅保存 SHA-256 摘要；列表只显示前缀
-- `expiresDays` 范围 0–3650（0 表示不过期）；到期后请求返回 401
+- `expiresMinutes` 支持最短 30 分钟的短期令牌（上限 10 年）；`expiresDays` 仍兼容，
+  两者只能二选一（0 表示不过期）；到期后请求返回 401
+- `paths` 可把令牌收窄到 `/api` 下的路径前缀（如 `/api/overview`、`/api/nodes/<id>`）；
+  按路径段边界匹配，`/api/nodes/n1` 不会放行 `/api/nodes/n10`；留空表示全部
 - 使用 `Authorization: Bearer rct_...`；令牌摘要随快照持久化，**重启后仍然有效**
 - 怀疑泄露时立即删除对应令牌，删除即时生效
 
-自动化脚本建议使用 `read` 令牌；只有确实需要写配置时才创建 `admin` 令牌。
+自动化脚本建议使用 `read` 令牌；给 AI 或临时任务可再叠加路径限定和分钟级有效期。
+只有确实需要写配置时才创建 `admin` 令牌。
 Prometheus 仍使用固定的 `X-Admin-Token`/Basic Auth 路径，两者互不影响。
 
 ### 节点令牌

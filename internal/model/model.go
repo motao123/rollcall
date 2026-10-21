@@ -238,6 +238,7 @@ type APIToken struct {
 	Prefix     string   `json:"prefix"`
 	Hash       string   `json:"-"`
 	Scopes     []string `json:"scopes"`
+	Paths      []string `json:"paths,omitempty"` // 允许的 API 路径前缀；空表示不限
 	CreatedAt  int64    `json:"createdAt"`
 	LastUsedAt int64    `json:"lastUsedAt,omitempty"`
 	ExpiresAt  int64    `json:"expiresAt,omitempty"`
@@ -250,6 +251,20 @@ func (t *APIToken) HasScope(scope string) bool {
 			return true
 		}
 		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowsPath 判断令牌是否允许访问该路径。路径按段边界前缀匹配：
+// /api/nodes/n1 放行 /api/nodes/n1 与 /api/nodes/n1/series，但不放行 /api/nodes/n10。
+func (t *APIToken) AllowsPath(path string) bool {
+	if len(t.Paths) == 0 {
+		return true
+	}
+	for _, p := range t.Paths {
+		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
 	}

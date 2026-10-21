@@ -1123,7 +1123,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .inline-panel { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .inline-panel .btn { margin-left: auto; }
 .toolbar .w-name { width: 220px; }
-.toolbar .w-days { width: 170px; }
+.toolbar .w-paths { width: 280px; }
 .code-inline { font-size: 11.5px; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
 
 .btn {

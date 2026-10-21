@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -18,9 +19,11 @@ import (
 const APITokenPrefix = "rct_"
 
 type apiTokenRequest struct {
-	Name        string   `json:"name"`
-	Scopes      []string `json:"scopes"`
-	ExpiresDays int      `json:"expiresDays"`
+	Name           string   `json:"name"`
+	Scopes         []string `json:"scopes"`
+	Paths          []string `json:"paths"`
+	ExpiresDays    int      `json:"expiresDays"`
+	ExpiresMinutes int      `json:"expiresMinutes"`
 }
 
 func hashAPIToken(raw string) string {
@@ -60,8 +63,21 @@ func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, "至少选择一个权限范围")
 			return
 		}
+		paths, ok := normalizeTokenPaths(in.Paths)
+		if !ok {
+			fail(w, http.StatusBadRequest, "paths 无效：仅支持 /api 下的路径前缀，不含查询串或 ..，最多 20 条")
+			return
+		}
 		if in.ExpiresDays < 0 || in.ExpiresDays > 3650 {
 			fail(w, http.StatusBadRequest, "expiresDays 必须在 0–3650 之间（0 表示永不过期）")
+			return
+		}
+		if in.ExpiresMinutes < 0 || in.ExpiresMinutes > 10*365*24*60 {
+			fail(w, http.StatusBadRequest, "expiresMinutes 必须在 0–5256000 之间（0 表示永不过期）")
+			return
+		}
+		if in.ExpiresDays > 0 && in.ExpiresMinutes > 0 {
+			fail(w, http.StatusBadRequest, "expiresDays 与 expiresMinutes 只能二选一")
 			return
 		}
 		raw, err := newAPIToken()
@@ -76,10 +92,15 @@ func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
 			Prefix:    raw[:12],
 			Hash:      hashAPIToken(raw),
 			Scopes:    scopes,
+			Paths:     paths,
 			CreatedAt: now,
 		}
-		if in.ExpiresDays > 0 {
-			t.ExpiresAt = now + int64(in.ExpiresDays)*86400
+		ttl := int64(in.ExpiresDays) * 86400
+		if in.ExpiresMinutes > 0 {
+			ttl = int64(in.ExpiresMinutes) * 60
+		}
+		if ttl > 0 {
+			t.ExpiresAt = now + ttl
 		}
 		s.st.AddAPIToken(t)
 		t.Hash = ""
@@ -130,6 +151,40 @@ func normalizeScopes(in []string) ([]string, bool) {
 	return out, true
 }
 
+// normalizeTokenPaths 归一化路径限定。空输入表示不限路径。
+// 只接受 /api 下的字面前缀，保持与鉴权中间件的按段边界匹配一致。
+func normalizeTokenPaths(in []string) ([]string, bool) {
+	if len(in) > 20 {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		p = strings.TrimSpace(p)
+		if p == "" || len(p) > 200 {
+			return nil, false
+		}
+		if p != "/api" && !strings.HasPrefix(p, "/api/") {
+			return nil, false
+		}
+		if strings.ContainsAny(p, "?#\\ \t\r\n") || strings.Contains(p, "..") || strings.Contains(p, "//") {
+			return nil, false
+		}
+		p = strings.TrimRight(p, "/")
+		if p != "/api" && !strings.HasPrefix(p, "/api/") {
+			return nil, false
+		}
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, true
+}
+
 func newAPIToken() (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
@@ -150,6 +205,10 @@ func (s *Server) apiTokenOK(r *http.Request, needAdmin bool) bool {
 	}
 	t, ok := s.st.MatchAPIToken(hashAPIToken(raw), time.Now().Unix())
 	if !ok {
+		return false
+	}
+	// 先清理路径再比对：/api/nodes/n1/../n10 不能因为前缀命中而越界到 n10。
+	if !t.AllowsPath(path.Clean(r.URL.Path)) {
 		return false
 	}
 	if needAdmin && !t.HasScope("admin") {
