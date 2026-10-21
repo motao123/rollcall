@@ -22,6 +22,7 @@ const state = {
   rendering: false,
   renderPending: false,
   livePending: false,
+  liveNodeSig: null,
   detailSig: '',
   detailCache: null,
   timers: [],
@@ -360,6 +361,228 @@ function setAlertBadge(n) {
   el.textContent = n;
 }
 
+/* ---------------- live 局部更新 ---------------- */
+
+// 单节点签名：轮询拿到新数据后只重绘真正变化的行。
+function nodeLiveSig(n) { return JSON.stringify(n); }
+
+// 记录“当前 DOM 渲染的是哪份数据”，局部更新据此找出变化的节点。
+// sigs 可由调用方传入，避免同一轮里对每个节点重复序列化。
+function rememberLiveNodes(nodes, sigs) {
+  state.liveNodeSig = sigs || new Map((nodes || []).map((n) => [n.id, nodeLiveSig(n)]));
+}
+
+function overviewGroups(nodes) {
+  const lists = nodes.filter((n) => matchesSearch([n.name, n.provider, n.region, n.group]));
+  const byProvider = new Map();
+  for (const n of lists) {
+    const p = n.provider || '未分类';
+    if (!byProvider.has(p)) byProvider.set(p, []);
+    byProvider.get(p).push(n);
+  }
+  return [...byProvider.entries()]
+    .map(([p, ns]) => ({
+      p, ns,
+      online: ns.filter((n) => n.online).length,
+      cpu: ns.filter((n) => hasNodeData(n)).reduce((a, n) => a + (n.latest.cpuPct || 0), 0) / Math.max(1, ns.filter((n) => hasNodeData(n)).length),
+    }))
+    .sort((a, b) => b.ns.length - a.ns.length);
+}
+
+function overviewKpisHTML(ov) {
+  const expiring = ov.expiring || [];
+  const countParts = [`在线 ${ov.online}`];
+  if (ov.stale) countParts.push(`数据延迟 ${ov.stale}`);
+  if (ov.offline) countParts.push(`离线 ${ov.offline}`);
+  if (ov.noData) countParts.push(`待接入 ${ov.noData}`);
+  return `
+      ${kpi('节点总数', ov.nodes, '', countParts.join(' · '))}
+      ${kpi('活跃告警', ov.activeAlert, '', ov.activeAlert > 0 ? '需关注' : '全部正常')}
+      ${kpi('平均 CPU', ov.avgCpu.toFixed(1), '%', '在线节点均值')}
+      ${kpi('平均内存', ov.avgMem.toFixed(1), '%', '在线节点均值')}
+      ${kpi('服务探测', `${ov.services - ov.svcDown}/${ov.services}`, '', ov.svcDown > 0 ? `${ov.svcDown} 个不可用` : '全部可用')}
+      ${kpi('月度成本', '$' + ov.monthlyCost.toFixed(1), '', `${expiring.length} 台 30 天内到期`)}
+      ${kpi('累计流量', bytes(ov.trafficIn || 0), '↓', '↑ ' + bytes(ov.trafficOut || 0))}`;
+}
+
+function alertItemInner(n) {
+  const sev = n.state === 'offline' || n.state === 'no_data' ? 'critical' : 'warn';
+  const detail = n.state === 'stale'
+    ? `数据延迟 · 最后上报 ${ago(n.lastSeen)}`
+    : !n.online
+      ? `已失联 · 最后上报 ${ago(n.lastSeen)}`
+      : `CPU ${(n.latest.cpuPct || 0).toFixed(0)}% · 内存 ${pct(n.latest.memUsed, n.latest.memTotal).toFixed(0)}% · 磁盘 ${pct(n.latest.diskUsed, n.latest.diskTotal).toFixed(0)}%`;
+  return `<div class="alert-bar ${sev}"></div>
+            <div class="alert-main">
+              <div class="alert-title">${esc(n.name)}<span class="badge ${sev === 'critical' ? 'crit' : 'warn'}">${n.alerts} 条</span></div>
+              <div class="alert-msg">${detail}</div>
+            </div>`;
+}
+
+function provChipsHTML(rows) {
+  return rows.map((r) => `
+          <button class="prov-chip" data-prov="${esc(r.p)}" title="CPU 均值 ${r.cpu.toFixed(0)}%">
+            <span class="prov-name">${esc(r.p)}</span>
+            <span class="prov-cnt">${r.online}/${r.ns.length}</span>
+          </button>`).join('');
+}
+
+function provRowInner(r) {
+  return `<span class="prov-title">${esc(r.p)}</span>
+              <span class="prov-meta">${r.ns.length} 台 · 在线 ${r.online} · CPU 均值 ${r.cpu.toFixed(0)}%</span>`;
+}
+
+function bindProvChips() {
+  $$('.prov-chip').forEach((c) => {
+    c.onclick = () => {
+      const g = document.getElementById('provrow-' + c.dataset.prov);
+      if (g) g.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+  });
+}
+
+// 概览表格行：单元格带 data-cell，局部更新时按单元格替换。
+function overviewRowCells(n) {
+  const hasData = hasNodeData(n);
+  const st = nodeState(n);
+  const cpu = hasData ? n.latest.cpuPct || 0 : null;
+  const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
+  const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
+  const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
+  return `<td data-cell="state"><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
+            <td class="strong" data-cell="name">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
+            <td data-cell="region">${esc(n.region || '—')}</td>
+            <td style="font-size:11.5px" data-cell="os">${esc(n.host?.os || '—')}</td>
+            <td class="num" data-cell="cpu">${tbar(cpu)}</td>
+            <td class="num" data-cell="mem">${tbar(mem, 80, 92)}</td>
+            <td class="num" data-cell="disk">${tbar(disk, 80, 90)}</td>
+            <td class="num mono" data-cell="load">${hasData ? (n.latest.load1 || 0).toFixed(2) : '—'}</td>
+            <td class="num mono" style="font-size:11px" data-cell="traffic">${hasData ? bytes(n.latest.netRx) + ' / ' + bytes(n.latest.netTx) : '—'}</td>
+            <td class="num mono" data-cell="uptime">${hasData ? dur(n.latest.uptime) : '—'}</td>
+            <td data-cell="spark"><div class="tspark">${sparkline((n.spark || []).slice(-40).map((p) => p.v), st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)', 26)}</div></td>`;
+}
+
+// 节点列表行：勾选列与操作列由外层保留，只替换数据列。
+function nodesRowCells(n) {
+  const hasData = hasNodeData(n);
+  const st = nodeState(n);
+  const cpu = hasData ? n.latest.cpuPct || 0 : null;
+  const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
+  const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
+  const dash = '—';
+  return `<td data-cell="state"><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
+            <td class="strong" data-cell="name">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
+            <td data-cell="provider">${esc(n.provider || '—')}</td>
+            <td data-cell="region">${esc(n.region || '—')}</td>
+            <td class="os-cell" data-cell="os">${esc(n.host?.os || '—')}</td>
+            <td class="num mono${cpu > 85 ? ' text-crit' : ''}" data-cell="cpu">${cpu == null ? dash : cpu.toFixed(0) + '%'}</td>
+            <td class="num mono" data-cell="mem">${mem == null ? dash : mem.toFixed(0) + '%'}</td>
+            <td class="num mono${disk > 88 ? ' text-crit' : ''}" data-cell="disk">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
+            <td class="num mono" data-cell="load">${hasData ? (n.latest.load1 || 0).toFixed(2) : dash}</td>
+            <td class="num mono" data-cell="uptime">${hasData ? dur(n.latest.uptime) : dash}</td>
+            <td class="num mono" data-cell="traffic">${hasData ? bytes(n.latest.netRx) : dash}</td>`;
+}
+
+function filteredNodes(nodes) {
+  const f = state.nodeFilter;
+  return nodes.filter((n) => {
+    const st = n.state || (n.online ? 'online' : 'offline');
+    if (f.provider && (n.provider || '') !== f.provider) return false;
+    if (f.group && (n.group || '') !== f.group) return false;
+    if (f.state && st !== f.state) return false;
+    return matchesSearch([n.name, n.provider, n.region, n.group, n.host?.os]);
+  });
+}
+
+// 按 data-cell 原位替换行内单元格。结构对不上时返回 false，交给整页重绘兜底。
+function applyLiveCells(row, html) {
+  if (!row) return false;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = '<table><tbody><tr>' + html + '</tr></tbody></table>';
+  const src = tpl.content.querySelector('tr');
+  if (!src) return false;
+  for (const td of src.children) {
+    const cell = row.querySelector('[data-cell="' + td.dataset.cell + '"]');
+    if (!cell) return false;
+    cell.className = td.className;
+    cell.innerHTML = td.innerHTML;
+  }
+  return true;
+}
+
+// patchLive 只更新当前列表页的节点行与概览数字。
+// 节点增删、筛选结果、分组顺序或告警集合变化时返回 false，由调用方整页重绘。
+function patchLive(ov, nodes) {
+  if (!state.liveNodeSig || state.rendering) return false;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const sigs = new Map(nodes.map((n) => [n.id, nodeLiveSig(n)]));
+
+  if (state.route === 'nodes') {
+    // 服务商/分组下拉是渲染时生成的：集合变了就整页重绘，避免筛选项与实际节点脱节。
+    const providers = [...new Set(nodes.map((n) => n.provider).filter(Boolean))].sort();
+    const groups = [...new Set(nodes.map((n) => n.group).filter(Boolean))].sort();
+    const provOpts = $$('#filterProvider option').slice(1).map((o) => o.value);
+    const groupOpts = $$('#filterGroup option').slice(1).map((o) => o.value);
+    if (provOpts.join('\n') !== providers.join('\n') || groupOpts.join('\n') !== groups.join('\n')) return false;
+
+    const list = filteredNodes(nodes);
+    const rows = $$('.nodes-table tbody tr[data-node]');
+    if (rows.length !== list.length) return false;
+    const rowById = new Map(rows.map((tr) => [tr.dataset.node, tr]));
+    for (let i = 0; i < rows.length; i++) if (rows[i].dataset.node !== list[i].id) return false;
+    // 筛选时增删的节点可能不改变可见行，但「x / y 台」的总数会变。
+    const countMeta = document.getElementById('nodesCountMeta');
+    if (countMeta) countMeta.textContent = `${list.length} / ${nodes.length} 台`;
+    for (const n of list) {
+      if (state.liveNodeSig.get(n.id) === sigs.get(n.id)) continue;
+      if (!applyLiveCells(rowById.get(n.id), nodesRowCells(n))) return false;
+    }
+    rememberLiveNodes(nodes, sigs);
+    return true;
+  }
+
+  if (state.route !== 'overview') return false;
+
+  const groups = overviewGroups(nodes);
+  const order = groups.flatMap((r) => r.ns.map((n) => n.id));
+  const rows = $$('.node-table tbody tr[data-node]');
+  if (rows.length !== order.length) return false;
+  const rowById = new Map(rows.map((tr) => [tr.dataset.node, tr]));
+  for (let i = 0; i < rows.length; i++) if (rows[i].dataset.node !== order[i]) return false;
+
+  const alerting = nodes.filter((n) => n.alerts > 0);
+  const alertEls = $$('.alert-item[data-node]');
+  if (alerting.length !== alertEls.length) return false;
+  for (let i = 0; i < alerting.length; i++) if (alertEls[i].dataset.node !== alerting[i].id) return false;
+
+  const kpis = $('.kpis');
+  if (!kpis) return false;
+  kpis.innerHTML = overviewKpisHTML(ov);
+  setAlertBadge(ov.activeAlert || 0);
+
+  const strip = $('.prov-strip');
+  if (strip) {
+    strip.innerHTML = provChipsHTML(groups);
+    bindProvChips();
+  }
+  for (const r of groups) {
+    const head = document.getElementById('provrow-' + r.p);
+    if (!head || !head.firstElementChild) return false;
+    head.firstElementChild.innerHTML = provRowInner(r);
+  }
+
+  const alertById = new Map(alerting.map((n) => [n.id, n]));
+  for (const el of alertEls) el.innerHTML = alertItemInner(alertById.get(el.dataset.node));
+
+  for (const id of order) {
+    const n = byId.get(id);
+    if (state.liveNodeSig.get(id) === sigs.get(id)) continue;
+    if (!applyLiveCells(rowById.get(id), overviewRowCells(n))) return false;
+  }
+  rememberLiveNodes(nodes, sigs);
+  return true;
+}
+
 async function viewOverview() {
   const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
   state.data.nodes = nodes;
@@ -369,39 +592,12 @@ async function viewOverview() {
   state.livePending = false;
   setAlertBadge(ov.activeAlert || 0);
 
-  const expiring = ov.expiring || [];
-  const lists = nodes.filter((n) => matchesSearch([n.name, n.provider, n.region, n.group]));
+  const providerRows = overviewGroups(nodes);
+  const lists = providerRows.flatMap((r) => r.ns);
   const alerting = nodes.filter((n) => n.alerts > 0);
-  const countParts = [`在线 ${ov.online}`];
-  if (ov.stale) countParts.push(`数据延迟 ${ov.stale}`);
-  if (ov.offline) countParts.push(`离线 ${ov.offline}`);
-  if (ov.noData) countParts.push(`待接入 ${ov.noData}`);
-
-  // 服务商分布：按 provider 聚合（空值归「未分类」）
-  const byProvider = new Map();
-  for (const n of lists) {
-    const p = n.provider || '未分类';
-    if (!byProvider.has(p)) byProvider.set(p, []);
-    byProvider.get(p).push(n);
-  }
-  const providerRows = [...byProvider.entries()]
-    .map(([p, ns]) => ({
-      p, ns,
-      online: ns.filter((n) => n.online).length,
-      cpu: ns.filter((n) => hasNodeData(n)).reduce((a, n) => a + (n.latest.cpuPct || 0), 0) / Math.max(1, ns.filter((n) => hasNodeData(n)).length),
-    }))
-    .sort((a, b) => b.ns.length - a.ns.length);
 
   $('#view').innerHTML = `
-    <div class="kpis">
-      ${kpi('节点总数', ov.nodes, '', countParts.join(' · '))}
-      ${kpi('活跃告警', ov.activeAlert, '', ov.activeAlert > 0 ? '需关注' : '全部正常')}
-      ${kpi('平均 CPU', ov.avgCpu.toFixed(1), '%', '在线节点均值')}
-      ${kpi('平均内存', ov.avgMem.toFixed(1), '%', '在线节点均值')}
-      ${kpi('服务探测', `${ov.services - ov.svcDown}/${ov.services}`, '', ov.svcDown > 0 ? `${ov.svcDown} 个不可用` : '全部可用')}
-      ${kpi('月度成本', '$' + ov.monthlyCost.toFixed(1), '', `${expiring.length} 台 30 天内到期`)}
-      ${kpi('累计流量', bytes(ov.trafficIn || 0), '↓', '↑ ' + bytes(ov.trafficOut || 0))}
-    </div>
+    <div class="kpis">${overviewKpisHTML(ov)}</div>
 
     ${alerting.length ? `
     <section class="section">
@@ -410,22 +606,8 @@ async function viewOverview() {
         <span class="section-meta">${alerting.length} 台节点异常</span>
       </div>
       <div class="panel">
-        ${alerting.map((n) => {
-          const sev = n.state === 'offline' || n.state === 'no_data' ? 'critical' : 'warn';
-          const detail = n.state === 'stale'
-            ? `数据延迟 · 最后上报 ${ago(n.lastSeen)}`
-            : !n.online
-              ? `已失联 · 最后上报 ${ago(n.lastSeen)}`
-              : `CPU ${(n.latest.cpuPct || 0).toFixed(0)}% · 内存 ${pct(n.latest.memUsed, n.latest.memTotal).toFixed(0)}% · 磁盘 ${pct(n.latest.diskUsed, n.latest.diskTotal).toFixed(0)}%`;
-          return `
-          <div class="alert-item" style="cursor:pointer" data-node="${esc(n.id)}">
-            <div class="alert-bar ${sev}"></div>
-            <div class="alert-main">
-              <div class="alert-title">${esc(n.name)}<span class="badge ${sev === 'critical' ? 'crit' : 'warn'}">${n.alerts} 条</span></div>
-              <div class="alert-msg">${detail}</div>
-            </div>
-          </div>`;
-        }).join('')}
+        ${alerting.map((n) => `
+          <div class="alert-item" style="cursor:pointer" data-node="${esc(n.id)}">${alertItemInner(n)}</div>`).join('')}
       </div>
     </section>` : ''}
 
@@ -434,13 +616,7 @@ async function viewOverview() {
         <h2 class="section-title">节点状态</h2>
         ${sectionActions(`${lists.length} 台 · 按服务商分组`, '<button class="btn sm primary" id="wizBtn">＋ 接入节点</button>')}
       </div>
-      <div class="prov-strip">
-        ${providerRows.map((r) => `
-          <button class="prov-chip" data-prov="${esc(r.p)}" title="CPU 均值 ${r.cpu.toFixed(0)}%">
-            <span class="prov-name">${esc(r.p)}</span>
-            <span class="prov-cnt">${r.online}/${r.ns.length}</span>
-          </button>`).join('')}
-      </div>
+      <div class="prov-strip">${provChipsHTML(providerRows)}</div>
       <div class="table-wrap"><table class="node-table">
         <thead><tr>
           <th>状态</th><th>节点</th><th>位置</th><th>系统</th>
@@ -449,31 +625,8 @@ async function viewOverview() {
         </tr></thead>
         <tbody>
           ${providerRows.map((r) => `
-            <tr class="prov-row" id="provrow-${esc(r.p)}"><td colspan="11">
-              <span class="prov-title">${esc(r.p)}</span>
-              <span class="prov-meta">${r.ns.length} 台 · 在线 ${r.online} · CPU 均值 ${r.cpu.toFixed(0)}%</span>
-            </td></tr>
-            ${r.ns.map((n) => {
-              const hasData = hasNodeData(n);
-              const st = nodeState(n);
-              const cpu = hasData ? n.latest.cpuPct || 0 : null;
-              const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
-              const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
-              const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
-              return `<tr data-node="${esc(n.id)}" style="cursor:pointer">
-            <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
-            <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
-            <td>${esc(n.region || '—')}</td>
-            <td style="font-size:11.5px">${esc(n.host?.os || '—')}</td>
-            <td class="num">${tbar(cpu)}</td>
-            <td class="num">${tbar(mem, 80, 92)}</td>
-            <td class="num">${tbar(disk, 80, 90)}</td>
-            <td class="num mono">${hasData ? (n.latest.load1 || 0).toFixed(2) : '—'}</td>
-            <td class="num mono" style="font-size:11px">${hasData ? bytes(n.latest.netRx) + ' / ' + bytes(n.latest.netTx) : '—'}</td>
-            <td class="num mono">${hasData ? dur(n.latest.uptime) : '—'}</td>
-            <td><div class="tspark">${sparkline((n.spark || []).slice(-40).map((p) => p.v), st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)', 26)}</div></td>
-          </tr>`;
-            }).join('')}
+            <tr class="prov-row" id="provrow-${esc(r.p)}"><td colspan="11">${provRowInner(r)}</td></tr>
+            ${r.ns.map((n) => `<tr data-node="${esc(n.id)}" style="cursor:pointer">${overviewRowCells(n)}</tr>`).join('')}
           `).join('') || `<tr><td colspan="11"><div class="empty">没有匹配的节点</div></td></tr>`}
         </tbody>
       </table></div>
@@ -482,13 +635,9 @@ async function viewOverview() {
 
   const wiz = $('#wizBtn');
   if (wiz) wiz.onclick = showAgentWizard;
-  $$('.prov-chip').forEach((c) => {
-    c.onclick = () => {
-      const g = document.getElementById('provrow-' + c.dataset.prov);
-      if (g) g.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    };
-  });
+  bindProvChips();
   bindNodeClicks();
+  rememberLiveNodes(nodes);
 }
 
 async function viewNodes() {
@@ -500,20 +649,14 @@ async function viewNodes() {
   // 台账里已不存在的选项自动失效，避免筛选后永远为空。
   if (f.provider && !providers.includes(f.provider)) f.provider = '';
   if (f.group && !groups.includes(f.group)) f.group = '';
-  const list = nodes.filter((n) => {
-    const st = n.state || (n.online ? 'online' : 'offline');
-    if (f.provider && (n.provider || '') !== f.provider) return false;
-    if (f.group && (n.group || '') !== f.group) return false;
-    if (f.state && st !== f.state) return false;
-    return matchesSearch([n.name, n.provider, n.region, n.group, n.host?.os]);
-  });
+  const list = filteredNodes(nodes);
   const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
 
   $('#view').innerHTML = `
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
-        ${sectionActions(`${list.length} / ${nodes.length} 台`, '<button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
+        ${sectionActions(`<span id="nodesCountMeta">${list.length} / ${nodes.length} 台</span>`, '<button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
       </div>
       <div class="filter-bar">
         <select id="filterProvider" aria-label="按服务商筛选">${opt('', '全部服务商', f.provider)}${providers.map((p) => opt(p, p, f.provider)).join('')}</select>
@@ -545,32 +688,14 @@ async function viewNodes() {
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
           <th class="num">负载</th><th class="num">运行时长</th><th class="num">流量</th><th class="num">操作</th>
         </tr></thead>
-        <tbody>${list.map((n) => {
-          const hasData = hasNodeData(n);
-          const st = nodeState(n);
-          const cpu = hasData ? n.latest.cpuPct || 0 : null;
-          const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
-          const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
-          const dash = '—';
-          return `<tr class="row-click" data-node="${esc(n.id)}">
+        <tbody>${list.map((n) => `<tr class="row-click" data-node="${esc(n.id)}">
             <td><input type="checkbox" class="row-sel" data-id="${esc(n.id)}" aria-label="选择 ${esc(n.name)}"></td>
-            <td><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
-            <td class="strong">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
-            <td>${esc(n.provider || '—')}</td>
-            <td>${esc(n.region || '—')}</td>
-            <td class="os-cell">${esc(n.host?.os || '—')}</td>
-            <td class="num mono${cpu > 85 ? ' text-crit' : ''}">${cpu == null ? dash : cpu.toFixed(0) + '%'}</td>
-            <td class="num mono">${mem == null ? dash : mem.toFixed(0) + '%'}</td>
-            <td class="num mono${disk > 88 ? ' text-crit' : ''}">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
-            <td class="num mono">${hasData ? (n.latest.load1 || 0).toFixed(2) : dash}</td>
-            <td class="num mono">${hasData ? dur(n.latest.uptime) : dash}</td>
-            <td class="num mono">${hasData ? bytes(n.latest.netRx) : dash}</td>
+            ${nodesRowCells(n)}
             <td class="num"><div class="row-actions">
               <button class="btn tiny" data-node-edit="${esc(n.id)}">编辑</button>
               <button class="btn tiny" data-node-agent="${esc(n.id)}">接入</button>
             </div></td>
-          </tr>`;
-        }).join('') || `<tr><td colspan="13"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
+          </tr>`).join('') || `<tr><td colspan="13"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
       </table></div>
     </section>`;
   bindNodeClicks();
@@ -606,6 +731,7 @@ async function viewNodes() {
     };
   });
   bindBatchOps(list);
+  rememberLiveNodes(nodes);
 }
 
 // bindBatchOps 节点多选与批量操作。
@@ -4199,7 +4325,14 @@ async function boot() {
         state.livePending = true;
       }
       if (!state.livePending) return; // 数据没变，不重绘
-      // 用户正在勾选或弹窗编辑时先只更新数据，等下一轮再重绘。
+      if (modalOpen()) return;
+      // 列表页优先原位更新变化的行；结构变化（增删节点、筛选结果、告警集合）才整页重绘。
+      // 局部更新只替换数据列，勾选与操作列不动，已勾选时也能安全刷新。
+      if (patchLive(ov, nodes)) {
+        state.livePending = false;
+        return;
+      }
+      // 退回整页重绘：会重建勾选列并清空批量选择，等用户取消勾选后再画。
       if (listBusy()) return;
       state.livePending = false;
       render();
