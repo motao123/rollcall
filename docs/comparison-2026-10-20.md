@@ -156,10 +156,20 @@ geoip{...}  last_active  display_index
    - `GET /api/stream` 推送 `{type:"node", id, state}` 增量事件；
    - 前端 `EventSource` 收到就局部更新卡片，不再整体 `render()`。
    收益：上报到可见 < 1s（现在是 0–5s），且不再需要"数据签名比对"这套规避重绘的补丁。
+   **落地修正（2026-10-21）**：已实现 `GET /api/stream`（标准库 SSE，无第三方依赖），
+   但事件体只带单调递增的 `rev`（`hello` / `change` / `ping`），不逐节点携带内容——
+   客户端收到后自行拉一次当前态，避免为每个订阅者重复序列化。心跳 25 秒、断线 3 秒重连，
+   长连接用 `ResponseController` 清掉写超时；实测上报到界面从 5 秒降到约 0.2 秒。
 
 2. **加一个"当前态"轻量端点**
    学 nezha 的 `state` 覆盖式对象：`GET /api/live` 只返回 `{id, cpu, memPct, diskPct, rx, tx, online, lastSeen}`，
    列表页首屏与 SSE 增量都用它，避免每 5 秒把节点全量（含 22 个 vhost 字段）传一遍。
+   **落地修正（2026-10-21）**：已实现 `GET /api/live`，返回
+   `id / name / group / state / cpu / memPct / diskPct / load1 / netRx / netTx / uptime / lastSeen / alerts`
+   与顶层 `rev`；不含令牌、价格、sparkline 与资产字段，适合脚本与外部只读客户端高频拉取。
+   面板自身的行渲染还需要服务商 / 系统 / 到期日 / sparkline，因此局部刷新仍走
+   `/api/overview` + `/api/nodes`，再用整包签名比对避免无变化时的重绘；
+   把面板切到 `/api/live` 需要一并扩展这些渲染字段，本期未做。
 
 ### P1（差异化，投入产出比高）
 
