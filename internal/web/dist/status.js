@@ -34,8 +34,8 @@
     sec = Number(sec) || 0;
     if (sec <= 0) return '—';
     var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
-    if (d > 0) return d + ' 天 ' + h + ' 小时';
-    if (h > 0) return h + ' 小时 ' + m + ' 分';
+    if (d > 0) return d + ' 天' + (h > 0 ? ' ' + h + ' 小时' : '');
+    if (h > 0) return h + ' 小时' + (m > 0 ? ' ' + m + ' 分' : '');
     return m + ' 分钟';
   };
 
@@ -63,7 +63,7 @@
   };
   var dayMD = function (ts) {
     var d = new Date(ts * 1000);
-    return (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日';
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日';
   };
   var fullTime = function (ts) {
     if (!ts) return '—';
@@ -493,9 +493,9 @@
     else if (route.view === 'activity') document.title = pageTitle('最近活动');
     if (d) {
       document.getElementById('stamp').textContent = '更新于 ' + clock(d.generatedAt);
-      var parts = [d.online + ' / ' + d.total + ' 在线'];
-      if (d.stale > 0) parts.push(d.stale + ' 数据延迟');
-      if (d.noData > 0) parts.push(d.noData + ' 待接入');
+      var parts = [d.online + '/' + d.total + ' 在线'];
+      if (d.stale > 0) parts.push(d.stale + ' 台数据延迟');
+      if (d.noData > 0) parts.push(d.noData + ' 台待接入');
       document.getElementById('foot2').textContent = parts.join(' · ');
     }
   }
@@ -640,8 +640,8 @@
     if (d.stale > 0) foot.push(d.stale + ' 延迟');
     if (d.noData > 0) foot.push(d.noData + ' 待接入');
     var dataNodes = Math.max(0, (s.total || d.total || 0) - (s.noData || d.noData || 0));
-    var html = kpi('在线节点', d.online + ' <small>/ ' + d.total + '</small>', '', foot.join(' · ') || '全部节点', 'online') +
-      kpi('24h 可用率', dataNodes ? fixed(s.avgUptime24, 1) : '—', '%', '有数据节点平均', 'uptime');
+    var html = kpi('在线节点', d.online + '<small>/' + d.total + '</small>', '', foot.join(' · ') || '全部节点', 'online') +
+      kpi('24 小时可用率', dataNodes ? fixed(s.avgUptime24, 1) : '—', '%', '有数据节点平均', 'uptime');
     if (vis('metrics')) {
       html += kpi('平均 CPU', fixed(s.avgCpu, 0), '%', '', 'cpu') +
         kpi('平均内存', fixed(s.avgMem, 0), '%', '', 'mem') +
@@ -651,7 +651,7 @@
       html += kpi('实时下行', rate(s.trafficIn), '', '↑ ' + rate(s.trafficOut), 'net');
     }
     if (s.svcTotal) {
-      html += kpi('服务健康', (s.svcTotal - s.svcDown) + ' <small>/ ' + s.svcTotal + '</small>', '',
+      html += kpi('服务健康', (s.svcTotal - s.svcDown) + '<small>/' + s.svcTotal + '</small>', '',
         s.svcDown > 0 ? '<span class="crit">' + s.svcDown + ' 个异常</span>' : '<span class="ok">全部正常</span>', 'services');
     }
     if (s.activeAlert) {
@@ -731,7 +731,7 @@
           '<div class="health-ring" id="healthRing" role="img" aria-label="节点在线率 ' + fixed(pct, 0) + '%">' +
             healthRingHTML(pct, ringCls) +
           '</div>' +
-          '<div class="health-copy" id="healthCopy"><b>' + (d.online || 0) + ' / ' + total + '</b>节点在线<br>' +
+          '<div class="health-copy" id="healthCopy"><b>' + (d.online || 0) + '/' + total + '</b>节点在线<br>' +
             esc(healthNote(d)) + '</div>' +
         '</div>' +
       '</div>' +
@@ -758,7 +758,7 @@
         '<button type="button" data-filter="attention" class="' + (filters.state === 'attention' ? 'on' : '') + '">非在线 <b data-count="attention">' + attention + '</b></button>' +
       '</div>' +
       (groups.length ? '<label class="select-wrap"><select id="groupFilter" aria-label="按分组筛选">' + opts + '</select></label>' : '') +
-      '<div class="tool-count" id="toolCount">显示 <b>' + filteredNodes().length + '</b> / ' + nodes.length + ' 台</div>' +
+      '<div class="tool-count" id="toolCount">显示 <b>' + filteredNodes().length + '</b>/' + nodes.length + ' 台</div>' +
     '</div>';
   }
 
@@ -835,7 +835,7 @@
         '<div class="nc-id"><span class="nc-dot ' + info.dot + '" data-f="dot"></span>' +
           '<div><div class="nc-name">' + esc(n.name) + '</div>' + tagsHTML(n) + '</div></div>' +
         '<div class="nc-side"><span class="state-badge ' + info.badge + '" data-f="badge">' + esc(info.label) + '</span>' +
-          '<span class="nc-uptime">24h <b class="' + upcls + '" data-f="uptime24">' + upv + '</b></span></div>' +
+          '<span class="nc-uptime">24 小时 <b class="' + upcls + '" data-f="uptime24">' + upv + '</b></span></div>' +
       '</div>' +
       factsHTML(n) +
       resHTML(n) +
@@ -845,7 +845,7 @@
           (peak != null ? '峰值 ' + fixed(peak, 0) + '%' : '') + '</span></div>' +
           '<div class="spark-box" data-f="spark">' + spark + '</div></div>' : '<div class="spark-wrap"></div>') +
         '<div class="avail"><div class="avail-v ' + upcls + '" data-f="avail">' + upv + '</div>' +
-          '<div class="avail-l">24h 可用率</div>' +
+          '<div class="avail-l">24 小时可用率</div>' +
           '<div class="mini-bars" data-f="bars">' + barsHTML(n.bars) + '</div></div>' +
       '</div>' +
     '</article>';
@@ -1028,7 +1028,7 @@
       ? '<a class="pager-btn" href="#/' + kind + '/' + (page + 1) + '" rel="next">下一页 →</a>'
       : '<span class="pager-btn disabled" aria-disabled="true">下一页 →</span>';
     return '<nav class="pager" aria-label="分页">' + prev +
-      '<span class="pager-info">第 ' + page + ' / ' + pages + ' 页</span>' + next + '</nav>';
+      '<span class="pager-info">第 ' + page + '/' + pages + ' 页</span>' + next + '</nav>';
   }
 
   function feedCardHTML(kind, page) {
@@ -1111,7 +1111,7 @@
           (it.auto ? '' : '<span class="tl-badge">人工</span>') + '</div>' +
           '<div class="tl-meta">' + clockHM(it.startAt) +
           (ongoing ? ' 起，持续 ' + dur(it.duration) : ' → ' + clockHM(it.endAt) + '，持续 ' + dur(it.duration)) +
-          (it.nodeNames && it.nodeNames.length ? '　' + esc(it.nodeNames.join('、')) : '') + '</div>' +
+          (it.nodeNames && it.nodeNames.length ? ' · ' + esc(it.nodeNames.join('、')) : '') + '</div>' +
           (it.body ? '<div class="tl-body">' + esc(it.body) + '</div>' : '') +
         '</div>';
       });
@@ -1353,7 +1353,7 @@
       if (counts[k] != null) el.textContent = counts[k];
     });
     var tc = document.getElementById('toolCount');
-    if (tc) tc.innerHTML = '显示 <b>' + filteredNodes().length + '</b> / ' + nodes.length + ' 台';
+    if (tc) tc.innerHTML = '显示 <b>' + filteredNodes().length + '</b>/' + nodes.length + ' 台';
     document.querySelectorAll('#stateFilter button').forEach(function (el) {
       var on = el.getAttribute('data-filter') === filters.state;
       el.classList.toggle('on', on);
@@ -1394,13 +1394,13 @@
     if (ring) ring.setAttribute('aria-label', '节点在线率 ' + fixed(pct, 0) + '%');
     var hc = document.getElementById('healthCopy');
     if (hc) {
-      hc.innerHTML = '<b>' + (DATA.online || 0) + ' / ' + total + '</b>节点在线<br>' +
+      hc.innerHTML = '<b>' + (DATA.online || 0) + '/' + total + '</b>节点在线<br>' +
         esc(healthNote(DATA));
     }
     // 页脚统计
-    var parts = [DATA.online + ' / ' + DATA.total + ' 在线'];
-    if (DATA.stale > 0) parts.push(DATA.stale + ' 数据延迟');
-    if (DATA.noData > 0) parts.push(DATA.noData + ' 待接入');
+    var parts = [DATA.online + '/' + DATA.total + ' 在线'];
+    if (DATA.stale > 0) parts.push(DATA.stale + ' 台数据延迟');
+    if (DATA.noData > 0) parts.push(DATA.noData + ' 台待接入');
     var foot = document.getElementById('foot2');
     if (foot) foot.textContent = parts.join(' · ');
     if (!block('summary')) return;
@@ -1412,7 +1412,7 @@
       return;
     }
     var s = DATA.summary || {};
-    setKPI('online', DATA.online + ' <small>/ ' + DATA.total + '</small>');
+    setKPI('online', DATA.online + '<small>/' + DATA.total + '</small>');
     var kfOnline = document.querySelector('[data-kf="online"]');
     if (kfOnline) {
       var note = [];
@@ -1435,7 +1435,7 @@
       if (kfNet) kfNet.textContent = '↑ ' + rate(s.trafficOut);
     }
     if (s.svcTotal) {
-      setKPI('services', (s.svcTotal - s.svcDown) + ' <small>/ ' + s.svcTotal + '</small>');
+      setKPI('services', (s.svcTotal - s.svcDown) + '<small>/' + s.svcTotal + '</small>');
       var kfSvc = document.querySelector('[data-kf="services"]');
       if (kfSvc) {
         kfSvc.innerHTML = s.svcDown > 0 ?
@@ -1757,7 +1757,7 @@
             '<h2>' + esc(n.name || '节点') + '</h2>' +
             '<span class="state-badge ' + badge + '">' + esc(stateLabel) + '</span>' +
           '</div>' +
-          (meta.length ? '<div class="dmeta">' + meta.join('　') + '</div>' : '') +
+          (meta.length ? '<div class="dmeta">' + meta.join(' · ') + '</div>' : '') +
         '</div>' +
         '<div class="dhead-side">' +
           '<span class="big ' + upcls + '">' + (up != null ? fixed(up, 1) + '%' : '—') + '</span>' +
@@ -1893,7 +1893,7 @@
       var lat = has && s.latencyMs != null ? s.latencyMs : null;
       var cls = lat != null ? latCls(lat) : 'none';
       var stats = [];
-      if (s.uptime != null) stats.push('<span>24h 可用 <b>' + fixed(s.uptime, 1) + '%</b></span>');
+      if (s.uptime != null) stats.push('<span>24 小时可用 <b>' + fixed(s.uptime, 1) + '%</b></span>');
       if (s.failRate) stats.push('<span>失败率 <b>' + fixed(s.failRate, 2) + '%</b></span>');
       if (s.avgLatency != null) stats.push('<span>平均延迟 <b>' + fixed(s.avgLatency, 0) + 'ms</b></span>');
       if (s.samples) stats.push('<span>成功样本 <b>' + s.samples + '</b></span>');
@@ -1973,7 +1973,7 @@
     if (!DATA) return;
     if (route.view === 'node') {
       // 详情页周期性刷新只更新页脚统计，详情本身由 fetchDetail 拉取。
-      var parts = [DATA.online + ' / ' + DATA.total + ' 在线'];
+      var parts = [DATA.online + '/' + DATA.total + ' 在线'];
       document.getElementById('foot2').textContent = parts.join(' · ');
     }
   }

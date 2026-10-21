@@ -69,13 +69,13 @@ function trafficModeLabel(mode) {
 }
 
 function dur(sec) {  sec = Number(sec) || 0;
-  if (sec < 60) return sec + 's';
+  if (sec < 60) return sec + ' 秒';
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (d > 0) return `${d}天${h}时`;
-  if (h > 0) return `${h}时${m}分`;
-  return m + '分';
+  if (d > 0) return d + ' 天' + (h > 0 ? ' ' + h + ' 小时' : '');
+  if (h > 0) return h + ' 小时' + (m > 0 ? ' ' + m + ' 分' : '');
+  return m + ' 分钟';
 }
 
 function ago(ts) {
@@ -299,7 +299,7 @@ function barRow(label, pctVal, warnAt = 75, critAt = 90) {
 function kpi(label, value, unit, foot) {
   return `<div class="kpi">
     <div class="kpi-label">${label}</div>
-    <div class="kpi-value mono">${value}${unit ? `<span class="kpi-unit">${unit}</span>` : ''}</div>
+    <div class="kpi-value"><span class="mono">${value}</span>${unit ? `<span class="kpi-unit">${unit}</span>` : ''}</div>
     ${foot ? `<div class="kpi-foot">${foot}</div>` : ''}
   </div>`;
 }
@@ -341,13 +341,13 @@ function nodeCard(n) {
     </div>
     <div class="nc-spark">${sparkline(spark, st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)')}</div>
     <div class="nc-foot">
-      <span class="mono">${esc(n.region || '—')}</span>
+      <span>${esc(n.region || '—')}</span>
       <span class="sep">·</span>
       <span class="mono" title="累计入站">${hasData ? '↓' + bytes(n.latest.netRx) : '—'}</span>
       <span class="sep">·</span>
       <span class="mono" title="累计出站">${hasData ? '↑' + bytes(n.latest.netTx) : '—'}</span>
       <span class="sep">·</span>
-      <span class="mono">${hasData ? dur(n.latest.uptime) : '—'}</span>
+      <span>${hasData ? dur(n.latest.uptime) : '—'}</span>
     </div>
   </article>`;
 }
@@ -450,7 +450,7 @@ function overviewRowCells(n) {
   const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
   const days = n.expireAt ? Math.ceil((new Date(n.expireAt) - Date.now()) / 86400000) : null;
   return `<td data-cell="state"><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
-            <td class="strong" data-cell="name">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
+            <td class="strong" data-cell="name">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + ' 天'}</span>` : ''}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
             <td data-cell="region">${esc(n.region || '—')}</td>
             <td style="font-size:11.5px" data-cell="os">${esc(n.host?.os || '—')}</td>
             <td class="num" data-cell="cpu">${tbar(cpu)}</td>
@@ -458,7 +458,7 @@ function overviewRowCells(n) {
             <td class="num" data-cell="disk">${tbar(disk, 80, 90)}</td>
             <td class="num mono" data-cell="load">${hasData ? (n.latest.load1 || 0).toFixed(2) : '—'}</td>
             <td class="num mono" style="font-size:11px" data-cell="traffic">${hasData ? bytes(n.latest.netRx) + ' / ' + bytes(n.latest.netTx) : '—'}</td>
-            <td class="num mono" data-cell="uptime">${hasData ? dur(n.latest.uptime) : '—'}</td>
+            <td class="num" data-cell="uptime">${hasData ? dur(n.latest.uptime) : '—'}</td>
             <td data-cell="spark"><div class="tspark">${sparkline((n.spark || []).slice(-40).map((p) => p.v), st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)', 26)}</div></td>`;
 }
 
@@ -479,7 +479,7 @@ function nodesRowCells(n) {
             <td class="num mono" data-cell="mem">${mem == null ? dash : mem.toFixed(0) + '%'}</td>
             <td class="num mono${disk > 88 ? ' text-crit' : ''}" data-cell="disk">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
             <td class="num mono" data-cell="load">${hasData ? (n.latest.load1 || 0).toFixed(2) : dash}</td>
-            <td class="num mono" data-cell="uptime">${hasData ? dur(n.latest.uptime) : dash}</td>
+            <td class="num" data-cell="uptime">${hasData ? dur(n.latest.uptime) : dash}</td>
             <td class="num mono" data-cell="traffic">${hasData ? bytes(n.latest.netRx) : dash}</td>`;
 }
 
@@ -532,7 +532,7 @@ function patchLive(ov, nodes) {
     for (let i = 0; i < rows.length; i++) if (rows[i].dataset.node !== list[i].id) return false;
     // 筛选时增删的节点可能不改变可见行，但「x / y 台」的总数会变。
     const countMeta = document.getElementById('nodesCountMeta');
-    if (countMeta) countMeta.textContent = `${list.length} / ${nodes.length} 台`;
+    if (countMeta) countMeta.textContent = `${list.length}/${nodes.length} 台`;
     for (const n of list) {
       if (state.liveNodeSig.get(n.id) === sigs.get(n.id)) continue;
       if (!applyLiveCells(rowById.get(n.id), nodesRowCells(n))) return false;
@@ -621,7 +621,7 @@ async function viewOverview() {
         <thead><tr>
           <th>状态</th><th>节点</th><th>位置</th><th>系统</th>
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
-          <th class="num">负载</th><th class="num">流量 ↓ / ↑</th><th class="num">在线</th><th>24h CPU</th>
+          <th class="num">负载</th><th class="num">流量 ↓/↑</th><th class="num">在线</th><th>24 小时 CPU</th>
         </tr></thead>
         <tbody>
           ${providerRows.map((r) => `
@@ -656,7 +656,7 @@ async function viewNodes() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
-        ${sectionActions(`<span id="nodesCountMeta">${list.length} / ${nodes.length} 台</span>`, '<button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
+        ${sectionActions(`<span id="nodesCountMeta">${list.length}/${nodes.length} 台</span>`, '<button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
       </div>
       <div class="filter-bar">
         <select id="filterProvider" aria-label="按服务商筛选">${opt('', '全部服务商', f.provider)}${providers.map((p) => opt(p, p, f.provider)).join('')}</select>
@@ -866,7 +866,7 @@ async function viewNodeDetail(id) {
       <div style="flex:1">
         <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
           <span class="dot ${st.tone}"></span>
-          <h2 style="font-size:17px;font-weight:650;margin:0;letter-spacing:-.02em">${esc(n.name)}</h2>
+          <h2 style="font-size:17px;font-weight:700;margin:0;letter-spacing:0">${esc(n.name)}</h2>
           <span class="nc-tag">${esc(n.provider || '—')}</span>
           <span class="nc-tag">${esc(n.group || '—')}</span>
           <span class="badge ${st.tone === 'off' ? 'mute' : st.tone}">${st.text}</span>
@@ -877,10 +877,11 @@ async function viewNodeDetail(id) {
       </div>
       <div class="detail-actions">
         <div class="range-tabs">
-          ${['1h', '6h', '24h', '7d', '30d', '365d'].map((r) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${r}</button>`).join('')}
+          ${[['1h', '1 小时'], ['6h', '6 小时'], ['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['365d', '365 天']]
+            .map(([r, label]) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${label}</button>`).join('')}
         </div>
         <button class="btn sm" id="nodeEditBtn" type="button">编辑资产</button>
-        <button class="btn sm" id="nodeAgentBtn" type="button">接入 / 令牌</button>
+        <button class="btn sm" id="nodeAgentBtn" type="button">接入/令牌</button>
       </div>
     </div>
 
@@ -903,7 +904,7 @@ async function viewNodeDetail(id) {
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">网络吞吐速率</span>
-            <span class="chart-val mono" style="font-size:13px">${hasData ? `↓${bytes(last.netRx)} ↑${bytes(last.netTx)} <span style="color:var(--fg-3);font-weight:400">累计</span>` : '—'}</span></div>
+            <span class="chart-val" style="font-size:13px">${hasData ? `<span class="mono">↓${bytes(last.netRx)} ↑${bytes(last.netTx)}</span> <span style="color:var(--fg-3);font-weight:400;letter-spacing:0">累计</span>` : '—'}</span></div>
           ${areaChart(netVals, 'var(--ok)', { height: 110, fmt: (v) => rate(v) })}
         </div>
         <div class="chart-card">
@@ -924,7 +925,7 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">CPU</span><span class="info-v" title="${esc(host.cpuModel || '')}">${esc((host.cpuModel || '—').slice(0, 22))}</span></div>
             <div class="info-row"><span class="info-k">虚拟化</span><span class="info-v mono">${esc(host.virt || '—')}</span></div>
             <div class="info-row"><span class="info-k">负载 1/5/15</span><span class="info-v mono">${hasData ? `${(last.load1 || 0).toFixed(2)} / ${(last.load5 || 0).toFixed(2)} / ${(last.load15 || 0).toFixed(2)}` : '—'}</span></div>
-            <div class="info-row"><span class="info-k">运行时长</span><span class="info-v mono">${hasData ? dur(last.uptime) : '—'}</span></div>
+            <div class="info-row"><span class="info-k">运行时长</span><span class="info-v">${hasData ? dur(last.uptime) : '—'}</span></div>
             <div class="info-row"><span class="info-k">TCP 连接</span><span class="info-v mono">${hasData ? last.tcpConn || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${hasData ? last.procs || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">Agent 版本</span><span class="info-v mono">${esc(n.agentVersion || '—')}${detail.agentOutdated ? ' <span class="badge warn">可升级</span>' : ''}</span></div>
@@ -966,7 +967,7 @@ async function viewNodeDetail(id) {
         <div class="panel panel-pad">
           <div class="panel-head"><span class="panel-title">采集明细</span></div>
           <div class="info-list">
-            <div class="info-row"><span class="info-k">磁盘 I/O（累计）</span><span class="info-v mono" style="font-size:11.5px">读 ${bytes(last.diskReadBytes || 0)}<br>写 ${bytes(last.diskWriteBytes || 0)}</span></div>
+            <div class="info-row"><span class="info-k">磁盘 I/O（累计）</span><span class="info-v" style="font-size:11.5px">读 <span class="mono">${bytes(last.diskReadBytes || 0)}</span><br>写 <span class="mono">${bytes(last.diskWriteBytes || 0)}</span></span></div>
           </div>
           <div class="sub-title" style="margin:12px 0 6px">挂载点</div>
           ${mounts.length ? mounts.map((m) => `
@@ -1028,7 +1029,7 @@ function serviceCompareSection(data) {
   } else {
     body = `<div class="table-wrap"><table class="services-table svc-compare-table">
       <thead><tr><th>探测</th><th>归属节点</th><th>类型</th><th>目标</th><th>状态</th>
-        <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24h 可用率</th></tr></thead>
+        <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24 小时可用率</th></tr></thead>
       <tbody>${groups.map(serviceCompareGroupHTML).join('')}</tbody>
     </table></div>`;
   }
@@ -1105,11 +1106,11 @@ async function viewServices() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">服务探测</h2>
-        ${sectionActions(`${list.length} / ${svcs.length} 个目标 · 由服务端主动探测`, '<button class="btn sm primary" id="svcAdd">＋ 新增探测</button>')}
+        ${sectionActions(`${list.length}/${svcs.length} 个目标 · 由服务端主动探测`, '<button class="btn sm primary" id="svcAdd">＋ 新增探测</button>')}
       </div>
       <div class="table-wrap"><table class="services-table">
         <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th>
-          <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24h 可用率</th><th>最近 2 小时</th><th class="num">操作</th></tr></thead>
+          <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24 小时可用率</th><th>最近 2 小时</th><th class="num">操作</th></tr></thead>
         <tbody>${list.map((s) => {
           const spark = (s.spark || []).slice(-120).map((p) => p[1]);
           const up = s.uptime || 0;
@@ -1298,7 +1299,7 @@ async function viewAlerts() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">告警规则</h2>
-        ${sectionActions(`${filteredRules.length} / ${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm" id="ruleTplBtn">规则模板</button> <button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
+        ${sectionActions(`${filteredRules.length}/${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm" id="ruleTplBtn">规则模板</button> <button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
       </div>
       <div class="table-wrap"><table class="alerts-table">
         <thead><tr><th>规则</th><th>条件</th><th class="num">持续</th><th>级别</th><th class="num">启用</th><th class="num">操作</th></tr></thead>
@@ -1313,7 +1314,7 @@ async function viewAlerts() {
           return `<tr>
             <td class="strong">${esc(r.name)}${sil ? ` <span class="badge warn" title="${esc(silLabel(sil))}">通知静默中</span>` : ''}</td>
             <td style="font-size:12px">${cond}${scope ? `<div class="field-hint">${esc(scope)}</div>` : ''}</td>
-            <td class="num mono">${durText(r.duration)}</td>
+            <td class="num">${durText(r.duration)}</td>
             <td><span class="badge ${r.severity === 'critical' ? 'crit' : r.severity === 'warn' ? 'warn' : 'mute'}">${sevLabel[r.severity] || r.severity}</span></td>
             <td class="num">
               <label class="switch"><input type="checkbox" data-rule-toggle="${esc(r.id)}"${r.enabled ? ' checked' : ''}><span></span></label>
@@ -1331,7 +1332,7 @@ async function viewAlerts() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">告警记录</h2>
-        ${sectionActions(`${filteredItems.length} / ${items.length} 条 · 最近 200 条`)}
+        ${sectionActions(`${filteredItems.length}/${items.length} 条 · 最近 200 条`)}
       </div>
       <div class="panel">
         ${filteredItems.map((a) => {
@@ -1348,7 +1349,7 @@ async function viewAlerts() {
                 ${a.serviceName ? `<span class="alert-node">· ${esc(a.serviceName)}</span>` : ''}
               </div>
               <div class="alert-msg">${esc(a.message)}</div>
-              <div class="alert-time mono">${clock(a.startedAt)} 开始${a.resolvedAt ? ` · ${clock(a.resolvedAt)} 恢复` : ''}</div>
+              <div class="alert-time">${clock(a.startedAt)} 开始${a.resolvedAt ? ` · ${clock(a.resolvedAt)} 恢复` : ''}</div>
             </div>
           </div>`;
         }).join('') || `<div class="empty">${items.length ? '没有匹配的告警记录' : '暂无告警记录'}</div>`}
@@ -1711,7 +1712,7 @@ function openRuleTemplateDialog(meta, rules) {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <span class="strong">${esc(t.name)}</span>
           <span class="badge ${t.severity === 'critical' ? 'crit' : t.severity === 'warn' ? 'warn' : 'mute'}">${sevLabel[t.severity] || esc(t.severity)}</span>
-          <span class="mono" style="font-size:11.5px;color:var(--fg-3)">${esc(ruleCondText(t, metricMap))}${t.duration > 0 ? ' · 持续 ' + durText(t.duration) : ''}</span>
+          <span style="font-size:11.5px;color:var(--fg-3)">${esc(ruleCondText(t, metricMap))}${t.duration > 0 ? ' · 持续 ' + durText(t.duration) : ''}</span>
         </div>
         <div class="field-hint" style="margin-top:3px">${esc(t.desc || '')}</div>
       </div>
@@ -1847,7 +1848,7 @@ async function viewAssets() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">资产台账</h2>
-        ${sectionActions(`${rows.length} / ${rowsAll.length} 台 · 按到期时间排序`)}
+        ${sectionActions(`${rows.length}/${rowsAll.length} 台 · 按到期时间排序`)}
       </div>
       <div class="table-wrap"><table class="assets-table">
         <thead><tr><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
@@ -1860,7 +1861,7 @@ async function viewAssets() {
             <td>${esc(r.provider || '—')}</td>
             <td>${esc(r.region || '—')}</td>
             <td class="os-cell">${esc(r.os || '—')}</td>
-            <td class="mono">${esc(r.expireAt || '未登记')}</td>
+            <td>${esc(r.expireAt || '未登记')}</td>
             <td class="num"><span class="badge ${cls}">${d2 ? d2 + ' 天' : '—'}</span></td>
             <td class="num mono">${r.price ? (r.currency === 'CNY' ? '¥' : '$') + r.price : '—'}</td>
             <td class="num mono">$${(r.monthly || 0).toFixed(1)}</td>
@@ -1973,7 +1974,7 @@ async function viewCompare() {
     const days = n.expireAt ? Math.ceil((new Date(n.expireAt + 'T00:00:00') - Date.now()) / 86400000) : null;
     return `<tr class="row-click" data-node="${esc(n.id)}">
       <td><button class="fav-btn ${n.favorite ? 'on' : ''}" data-fav-node="${esc(n.id)}" data-fav="${n.favorite ? '1' : '0'}" title="${n.favorite ? '取消收藏' : '收藏'}">${n.favorite ? '★' : '☆'}</button></td>
-      <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days <= 7 ? 'crit' : 'warn'}">${days < 0 ? '已过期' : days + '天'}</span>` : ''}</td>
+      <td class="strong">${esc(n.name)}${days != null && days <= 30 ? ` <span class="badge ${days <= 7 ? 'crit' : 'warn'}">${days < 0 ? '已过期' : days + ' 天'}</span>` : ''}</td>
       <td><span class="dot ${st.tone}"></span> ${esc(st.text)}</td>
       <td>${esc(n.group || '—')}</td>
       <td class="num">${n.state === 'no_data' ? '—' : tbar(n.cpuPct, 80, 90)}</td>
@@ -1997,7 +1998,7 @@ async function viewCompare() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">对比范围</h2>
-        ${sectionActions(`${rows.length} / ${rowsAll.length} 台节点`)}
+        ${sectionActions(`${rows.length}/${rowsAll.length} 台节点`)}
       </div>
       <div class="panel panel-pad compare-filter">
         <label class="field" style="margin:0">
@@ -2454,7 +2455,7 @@ function healthBody(h) {
   const upText = up >= 86400
     ? `${Math.floor(up / 86400)} 天 ${Math.floor((up % 86400) / 3600)} 小时`
     : up >= 3600 ? `${Math.floor(up / 3600)} 小时 ${Math.floor((up % 3600) / 60)} 分`
-      : up >= 60 ? `${Math.floor(up / 60)} 分` : `${Math.round(up)} 秒`;
+      : up >= 60 ? `${Math.floor(up / 60)} 分钟` : `${Math.round(up)} 秒`;
 
   const expected = Number(rep.expected) || 0;
   const got = Number(rep.last60s) || 0;
@@ -2607,9 +2608,9 @@ async function viewSettings() {
     <td class="strong">${esc(tk.name)}</td>
     <td class="mono" style="font-size:11.5px">${esc(tk.prefix)}…</td>
     <td>${(tk.scopes || []).map((x) => `<span class="badge ${x === 'admin' ? 'warn' : 'mute'}">${esc(x)}</span>`).join(' ')}</td>
-    <td class="mono" style="font-size:11.5px">${(tk.paths && tk.paths.length) ? tk.paths.map((p) => esc(p)).join('<br>') : '<span class="text-faint">全部</span>'}</td>
+    <td class="${(tk.paths && tk.paths.length) ? 'mono' : ''}" style="font-size:11.5px">${(tk.paths && tk.paths.length) ? tk.paths.map((p) => esc(p)).join('<br>') : '<span class="text-faint">全部</span>'}</td>
     <td class="mono" style="font-size:11.5px">${clock(tk.createdAt)}</td>
-    <td class="mono" style="font-size:11.5px">${tk.expiresAt ? clock(tk.expiresAt) : '永不过期'}</td>
+    <td style="font-size:11.5px">${tk.expiresAt ? `<span class="mono">${clock(tk.expiresAt)}</span>` : '永不过期'}</td>
     <td class="num"><button class="btn tiny danger" data-del-token="${esc(tk.id)}">删除</button></td>
   </tr>`).join('') || `<tr><td colspan="7"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
   const packList = Array.isArray(themePacks.packs) ? themePacks.packs : [];

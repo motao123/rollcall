@@ -68,10 +68,14 @@ html {
 body {
   min-height: 100vh;
   overflow-x: clip;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  /* 与公开状态页保持同一套中文回退顺序：Linux 上没有雅黑/苹方，
+   * 需要显式落到 Noto/思源黑体，避免中文使用替代字形。 */
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC",
+               sans-serif;
   font-size: 13.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   color: var(--fg);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -133,11 +137,12 @@ body {
   text-transform: uppercase;
 }
 
+/* 侧栏分组是中文（监控/资产/配置），不能套英文标签的大写与宽字距。 */
 .nav-label {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--fg-3);
   padding: 14px 10px 6px;
 }
@@ -224,7 +229,7 @@ body {
 .page-title {
   font-size: 16px;
   font-weight: 650;
-  letter-spacing: -0.015em;
+  letter-spacing: 0;
   margin: 0;
 }
 .page-sub {
@@ -432,9 +437,9 @@ body {
   margin-bottom: 12px;
 }
 .section-title {
-  font-size: 13px;
-  font-weight: 650;
-  letter-spacing: -0.005em;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0;
   margin: 0;
 }
 .section-meta {
@@ -480,10 +485,10 @@ body {
 }
 .kpi:hover { border-color: var(--line-2); }
 .kpi-label {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--fg-3);
-  font-weight: 550;
-  letter-spacing: 0.02em;
+  font-weight: 500;
+  letter-spacing: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -500,6 +505,7 @@ body {
   font-weight: 500;
   color: var(--fg-3);
   margin-left: 2px;
+  letter-spacing: 0;
 }
 .kpi-foot {
   font-size: 11px;
@@ -545,7 +551,7 @@ body {
 .nc-name {
   font-size: 13px;
   font-weight: 620;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -553,7 +559,7 @@ body {
   min-width: 0;
 }
 .nc-tag {
-  font-size: 10px;
+  font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--panel-2);
@@ -567,7 +573,7 @@ body {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--fg-3);
   flex: none;
 }
@@ -627,7 +633,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--fg-3);
   padding-top: 8px;
   border-top: 1px solid var(--line);
@@ -652,10 +658,10 @@ table {
 }
 thead th {
   text-align: left;
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--fg-3);
   padding: 10px 14px;
   background: var(--panel-2);
@@ -889,8 +895,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     position: relative;
     flex-direction: column;
     gap: 2px;
-    font-size: 9.5px;
-    padding: 6px 8px;
+    /* 底部 8 个中文标签在 375px 下要放得下，字号不能再小于 10px。 */
+    font-size: 10px;
+    padding: 6px 4px;
     flex: 1;
   }
   .nav-item span { display: block; }
@@ -911,7 +918,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .topbar-inner > div:first-child { min-width: 0; flex: 1; }
   .page-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search { display: none; }
-  .live { padding: 4px 8px; font-size: 10.5px; }
+  .live { padding: 4px 8px; font-size: 11px; }
   .live-time { display: none; }
   .user-name, .user-caret { display: none; }
   .user-btn { padding: 2px; }
@@ -1004,7 +1011,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   font-size: 11px;
   font-weight: 550;
   color: var(--fg-2);
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
 }
 /* 表单控件统一规格：字段、工具条、筛选条与通道添加器共用一套外观 */
 .field input,
@@ -1054,7 +1061,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .field select[multiple] option { padding: 3px 7px; border-radius: 4px; }
 .field input[type="file"] { padding: 6px 9px; font-size: 12px; }
-.field-hint { font-size: 10.5px; color: var(--fg-3); }
+.field-hint { font-size: 11px; color: var(--fg-3); }
 
 /* 行内工具条：导出、令牌等“控件 + 按钮”混排场景 */
 .toolbar {
@@ -1184,10 +1191,10 @@ details.panel[open] > summary.sum { border-bottom: 1px solid var(--line); }
 details.panel > form { padding: 16px; }
 
 .subhead {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--fg-3);
   margin: 20px 0 10px;
   padding-bottom: 6px;
@@ -1238,7 +1245,7 @@ details.panel > form { padding: 16px; }
   overflow: auto;
   box-shadow: 0 20px 48px rgba(16, 24, 40, 0.24);
 }
-.modal-title { font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; }
+.modal-title { font-size: 14.5px; font-weight: 600; letter-spacing: 0; }
 .modal-sub { font-size: 12px; color: var(--fg-2); margin: 6px 0 8px; }
 pre.code {
   background: var(--panel-2);
@@ -1388,7 +1395,7 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
   padding-bottom: 6px;
   border-bottom: 1px solid var(--line);
 }
-.prov-title { font-size: 12px; font-weight: 650; letter-spacing: -0.005em; }
+.prov-title { font-size: 12.5px; font-weight: 600; letter-spacing: 0; }
 .prov-meta { font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 
 /* ---------- 一键接入向导 ---------- */
@@ -1457,8 +1464,8 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
   white-space: nowrap;
 }
 .node-table thead th {
-  font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em;
-  color: var(--fg-3); text-transform: uppercase;
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0;
+  color: var(--fg-3); text-transform: none;
   padding: 7px 10px; border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
@@ -1673,10 +1680,10 @@ body.auth-checking .app { visibility: hidden; }
 
 /* ---------- 通用小节标题 ---------- */
 .sub-title {
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--fg-2);
-  letter-spacing: .04em;
+  letter-spacing: 0;
   margin-bottom: 8px;
 }
 
@@ -1761,7 +1768,7 @@ body.auth-checking .app { visibility: hidden; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.renew-note { font-size: 10px; color: var(--fg-3); font-weight: 400; }
+.renew-note { font-size: 11px; color: var(--fg-3); font-weight: 400; }
 .renew-del {
   flex: none;
   width: 18px;
