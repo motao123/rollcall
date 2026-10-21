@@ -543,15 +543,22 @@ func TestRouteAuthMatrix(t *testing.T) {
 	// ★ 长连接端点必须单独处理：httptest.NewRecorder 上跑 SSE handler
 	// 会进入读循环直到客户端断开，而 Recorder 永远不会断开 ——
 	// 结果是整个测试超时（不是断言失败，更难定位）。
-	// 这里只验证"无凭据必须 401"，带凭据的成功路径由
-	// TestStreamSendsHelloAndChange 用真实 server + 读首帧覆盖。
-	streaming := map[string]bool{"/api/stream": true}
+	// 这里只验证鉴权边界；成功路径由 TestStreamSendsHelloAndChange 与
+	// TestStatusStreamIsPublic 用真实 server + 读首帧覆盖。
+	streaming := map[string]bool{
+		"/api/stream":        true, // 需管理会话或令牌
+		"/api/status/stream": true, // 公开状态页
+	}
 
 	for _, rt := range srv.routes(http.NotFoundHandler()) {
 		path := rt.pattern
 		if streaming[rt.pattern] {
-			if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
-				t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
+			// 公开流不进 Recorder（会等到超时），匿名可订阅由
+			// TestStatusStreamIsPublic 用真实 server 覆盖；受保护流仍需断言 401。
+			if rt.level != authPublic {
+				if code := do(http.MethodGet, path, false, false, nil); code != http.StatusUnauthorized {
+					t.Errorf("%s 无凭据应 401，实际 %d", rt.pattern, code)
+				}
 			}
 			continue
 		}

@@ -55,16 +55,25 @@ func (h *eventHub) Revision() uint64 {
 	return h.rev
 }
 
-func (h *eventHub) subscribe() (chan struct{}, func()) {
-	ch := make(chan struct{}, 1)
+// maxStreamSubscribers 限制事件流订阅者总数。公开端点意味着任何匿名请求
+// 都能占住一条长连接；不设上限时，少量只建连不读取的客户端就能耗光 goroutine。
+const maxStreamSubscribers = 256
+
+// subscribe 在订阅者已满时返回 ok=false，由调用方回 503。
+func (h *eventHub) subscribe() (chan struct{}, func(), bool) {
 	h.mu.Lock()
+	if len(h.subs) >= maxStreamSubscribers {
+		h.mu.Unlock()
+		return nil, nil, false
+	}
+	ch := make(chan struct{}, 1)
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch, func() {
 		h.mu.Lock()
 		delete(h.subs, ch)
 		h.mu.Unlock()
-	}
+	}, true
 }
 
 // subscriberCount 供 /api/admin/health 观察长连接数量。
@@ -94,6 +103,9 @@ func (s *Server) publishChange() {
 //	event: hello  data: {"rev":N}     —— 首帧，客户端据此对齐版本
 //	event: change data: {"rev":N}     —— 数据变化
 //	event: ping   data: {"rev":N}     —— 25 秒心跳（保活，兼作兜底版本对齐）
+//
+// 同一个 handler 同时服务需鉴权的 /api/stream 与公开的 /api/status/stream；
+// 两者都只推版本号，不推数据，差别只在路由表里的鉴权级别。
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if s.events == nil {
 		// 理论上 New() 一定初始化；直接构造 Server 的测试不该 500，给个明确错误。
@@ -105,14 +117,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "当前连接不支持流式响应")
 		return
 	}
+	// 先占订阅名额再写响应头：满了还能干净地回 503，而不是先发 hello 再断流。
+	ch, cancel, ok := s.events.subscribe()
+	if !ok {
+		fail(w, http.StatusServiceUnavailable, "实时连接数已满，请稍后重试")
+		return
+	}
+	defer cancel()
+
 	// ★ 必须清掉写超时：http.Server 的 WriteTimeout 是 30 秒，
 	// 长连接会在 30 秒后被静默切断，表现为"面板每隔半分钟重连一次"。
 	// ResponseController 只影响这一条连接，不改全局配置。
-	if rc := http.NewResponseController(w); rc != nil {
-		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-			// 少数 ResponseWriter 不支持（例如被中间件包装过），
-			// 此时仍然继续：心跳会让写超时不断被刷新。
-			_ = err
+	// 但完全取消截止时间也不行：匿名客户端只建连不读取时，写会永久阻塞，
+	// 所以每次写之前再刷新一个较短的截止时间（见 send）。
+	rc := http.NewResponseController(w)
+	canDeadline := rc != nil && rc.SetWriteDeadline(time.Time{}) == nil
+	refreshDeadline := func() {
+		if canDeadline {
+			_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		}
 	}
 
@@ -124,6 +146,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Accel-Buffering", "no")
 
 	send := func(event string, rev uint64) bool {
+		refreshDeadline()
 		if _, err := fmt.Fprintf(w, "event: %s\ndata: {\"rev\":%d}\n\n", event, rev); err != nil {
 			return false
 		}
@@ -132,15 +155,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// retry 让浏览器在断线后 3 秒重连（默认可能更久）。
+	refreshDeadline()
 	if _, err := fmt.Fprint(w, "retry: 3000\n\n"); err != nil {
 		return
 	}
 	if !send("hello", s.events.Revision()) {
 		return
 	}
-
-	ch, cancel := s.events.subscribe()
-	defer cancel()
 
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()

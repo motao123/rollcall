@@ -255,6 +255,9 @@ func (s *Server) routes(static http.Handler) []route {
 		// 因此可以直接标记为公开，不必再套一层鉴权。
 		{"/api/status/node/", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatusNode))},
 		{"/api/status/incidents", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatusIncidents))},
+		// 公开页的实时推送：事件只带版本号，不含任何节点数据，
+		// 因此可以匿名订阅；真正的数据仍由 /api/status 按可见性裁剪。
+		{"/api/status/stream", authPublic, http.HandlerFunc(s.handleStream)},
 		// 一条命令接入：脚本与二进制都公开（脚本不含密钥，token 由调用方传参）
 		{"/agent/install.sh", authPublic, http.HandlerFunc(s.handleAgentInstall)},
 		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},

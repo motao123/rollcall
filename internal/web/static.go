@@ -77,7 +77,7 @@ func etagMatches(header, etag string) bool {
 func gzipPath(p string) bool {
 	// 事件流必须排除：gzip 会攒够一块才输出，实时推送会被缓冲成"批量下发"；
 	// 而且压缩包装会遮住 http.Flusher，SSE 直接不可用。
-	if p == "/api/stream" {
+	if p == "/api/stream" || p == "/api/status/stream" {
 		return false
 	}
 	if strings.HasPrefix(p, "/api/") {

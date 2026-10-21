@@ -411,6 +411,8 @@
   var listLoading = false;
   var detailSeq = 0;
   var pollTimer = null;
+  var stream = null;
+  var streamTimer = null;
   var lastGroupsKey = '';
   var lastKpiSig = '';
   var searchTimer = null;
@@ -663,6 +665,33 @@
   function kpiSignature(d) {
     var s = d.summary || {};
     return [vis('metrics'), vis('traffic'), s.svcTotal ? 1 : 0, s.activeAlert ? 1 : 0].join('|');
+  }
+
+  // KPI 卡片数量会随告警/服务出现而变化。auto-fit 在“卡片数比列数多 1”时
+  // 会把最后一张单独甩到下一行（7+1），这里按实际宽度算出最多能放几列，
+  // 放不下就按等分的行数重排：8 张在窄屏排 4+4，宽屏才排成一行。
+  var KPI_MIN_W = 116; // 必须与 statuspage.go 中 .kpis 的 minmax 下限一致
+
+  function balanceKpis() {
+    var box = document.getElementById('heroKpis');
+    if (!box) return;
+    if (window.innerWidth <= 720) {
+      // 窄屏交给 CSS 的 2 列规则；内联样式会盖住媒体查询，必须清掉。
+      if (box.style.gridTemplateColumns) box.style.gridTemplateColumns = '';
+      return;
+    }
+    var n = box.children.length;
+    var w = box.clientWidth;
+    if (!n || !w) return;
+    var gap = 9;
+    var maxCols = Math.max(1, Math.floor((w + gap) / (KPI_MIN_W + gap)));
+    var next = '';
+    if (n > maxCols) {
+      var rows = Math.ceil(n / maxCols);
+      var cols = Math.ceil(n / rows);
+      next = 'repeat(' + cols + ', minmax(0, 1fr))';
+    }
+    if (box.style.gridTemplateColumns !== next) box.style.gridTemplateColumns = next;
   }
 
   function bannerHTML(d) {
@@ -1268,6 +1297,7 @@
     lastGroupsKey = groupsOf((DATA && DATA.nodes) || []).join('|');
     lastKpiSig = kpiSignature(DATA);
     bindToolbar();
+    balanceKpis();
   }
 
   function render() {
@@ -1297,7 +1327,8 @@
 
   function gridSignature(nodes) {
     var v = DATA && DATA.visibility ? DATA.visibility : {};
-    return nodes.map(function (n) { return n.hid || ''; }).join(',') + '|' +
+    // 名称也进签名：patchCard 不重写 .nc-name，改名后只有整格重绘才会显示新名字。
+    return nodes.map(function (n) { return (n.hid || '') + ':' + (n.name || ''); }).join(',') + '|' +
       groupsOf(nodes).join(',') + '|' + [v.metrics, v.load, v.uptime, v.traffic, v.os, v.arch,
       v.cores, v.region, v.provider, block('nodeDetail')].join(',');
   }
@@ -1376,7 +1407,7 @@
     var sig = kpiSignature(DATA);
     if (sig !== lastKpiSig) {
       var box = document.getElementById('heroKpis');
-      if (box) box.innerHTML = kpiValues(DATA);
+      if (box) { box.innerHTML = kpiValues(DATA); balanceKpis(); }
       lastKpiSig = sig;
       return;
     }
@@ -2045,7 +2076,28 @@
     window.scrollTo(0, 0);
   });
 
-  /* ---------------- 轮询 ---------------- */
+  /* ---------------- 实时推送与轮询 ---------------- */
+
+  // 公开状态页同样接入 SSE：事件只带版本号，收到后合并 300ms 内的多次变更
+  // 再拉一次快照。10 秒轮询保留，作为代理不支持流式响应时的兜底。
+  function connectStream() {
+    if (!window.EventSource) return;
+    try {
+      stream = new EventSource('/api/status/stream');
+    } catch (e) {
+      return; // 退化为轮询
+    }
+    stream.addEventListener('hello', function () {
+      setConnection('on', '实时连接');
+    });
+    stream.addEventListener('change', function () {
+      if (streamTimer) return;
+      streamTimer = setTimeout(function () {
+        streamTimer = null;
+        tick();
+      }, 300);
+    });
+  }
 
   function tick() {
     if (document.hidden) return;
@@ -2056,6 +2108,7 @@
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) tick();
   });
+  window.addEventListener('resize', balanceKpis);
 
   // 只有已登录管理员才拿到拖拽手柄：公开页匿名可访问，
   // 排序会写进服务端配置并对所有访客生效，不能由访客改动。
@@ -2072,5 +2125,6 @@
 
   loadTheme();
   fetchList();
+  connectStream();
   pollTimer = setInterval(tick, 10000);
 })();

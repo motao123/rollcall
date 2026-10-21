@@ -257,7 +257,9 @@ body.sec-sorting{user-select:none;cursor:grabbing}
 .health-copy{font-size:11.5px;color:var(--fg3);line-height:1.55;max-width:120px}
 .health-copy b{display:block;color:var(--fg2);font-size:12px;font-weight:600;margin-bottom:2px}
 
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:9px;
+/* 下限 116px 与 status.js 的 KPI_MIN_W 必须一致：按它算出单行最多放几张，
+ * 放不下时由脚本改成等分的多行，避免 8 张卡片被排成 7+1 这种孤卡。 */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(116px,1fr));gap:9px;
   margin-top:19px;position:relative;z-index:1}
 .kpi{background:var(--panel-2);border:1px solid var(--line-2);border-radius:11px;
   padding:10px 12px;min-width:0;transition:border-color .2s}

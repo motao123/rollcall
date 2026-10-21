@@ -19,7 +19,10 @@ import (
 // 已有未消费通知时再次 Publish 不能卡住（上报路径不能被慢客户端拖住）。
 func TestEventHubNotifiesSubscribers(t *testing.T) {
 	h := newEventHub()
-	ch, cancel := h.subscribe()
+	ch, cancel, ok := h.subscribe()
+	if !ok {
+		t.Fatal("空广播器不应拒绝订阅")
+	}
 
 	h.Publish()
 	select {
@@ -129,6 +132,68 @@ func TestStreamSendsHelloAndChange(t *testing.T) {
 	}
 }
 
+// TestEventHubSubscriberCap 回归：公开事件流是匿名可订阅的长连接，
+// 必须有上限，否则少量只建连不读取的客户端就能耗光 goroutine 与 fd。
+func TestEventHubSubscriberCap(t *testing.T) {
+	h := newEventHub()
+	for i := 0; i < maxStreamSubscribers; i++ {
+		if _, _, ok := h.subscribe(); !ok {
+			t.Fatalf("第 %d 个订阅者被提前拒绝", i+1)
+		}
+	}
+	if _, _, ok := h.subscribe(); ok {
+		t.Fatal("超过上限后仍接受订阅")
+	}
+}
+
+// TestStatusStreamIsPublic 回归：公开状态页的实时推送必须匿名可订阅，
+// 但仍只下发版本号，不泄露节点数据。
+func TestStatusStreamIsPublic(t *testing.T) {
+	srv := New(store.New(t.TempDir()), nil, nil, Config{AdminToken: "stream-token-123456"})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(ts.URL + "/api/status/stream")
+	if err != nil {
+		t.Fatalf("匿名订阅公开事件流失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("公开事件流应 200，实际 %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type 应为 text/event-stream，实际 %q", ct)
+	}
+
+	br := bufio.NewReader(resp.Body)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("读取首帧失败: %v", err)
+		}
+		if strings.TrimSpace(line) != "event: hello" {
+			continue
+		}
+		data, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("读取首帧数据失败: %v", err)
+		}
+		if !strings.Contains(data, `"rev"`) {
+			t.Fatalf("hello 帧应带版本号，实际 %q", data)
+		}
+		if strings.Contains(data, "node") || strings.Contains(data, "cpu") {
+			t.Fatalf("公开事件流不得携带节点数据: %q", data)
+		}
+		if gzipPath("/api/status/stream") {
+			t.Fatal("事件流不能被 gzip 包装，否则 Flusher 不可用")
+		}
+		return
+	}
+	t.Fatal("未在超时内收到 hello 帧")
+}
+
 // TestLiveReturnsCompactState 回归：
 // /api/live 必须只给渲染需要的数值（不带令牌/价格/sparkline），
 // 并且每个节点都能算出内存/磁盘百分比。
@@ -191,7 +256,10 @@ func TestReportPublishesChange(t *testing.T) {
 	srv := New(st, nil, nil, Config{AdminToken: "report-token-123456"})
 	h := srv.Handler()
 
-	ch, cancel := srv.events.subscribe()
+	ch, cancel, ok := srv.events.subscribe()
+	if !ok {
+		t.Fatal("空广播器不应拒绝订阅")
+	}
 	defer cancel()
 
 	body := `{"nodeId":"n1","host":{"hostname":"n1"},"metrics":{"cpuPct":10,"memUsed":1,"memTotal":2,"diskUsed":1,"diskTotal":2,"uptime":10}}`
