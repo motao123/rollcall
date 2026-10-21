@@ -426,6 +426,8 @@
   // 列表页只保留少量预览，完整内容走独立页面，避免时间线把页面拉得过长。
   var INCIDENT_PREVIEW = 3;
   var ACTIVITY_PREVIEW = 5;
+  // 独立列表页统一每页 10 条，避免把几十条时间线一次铺开。
+  var FEED_PAGE_SIZE = 10;
   // ADMIN 为 true 时才渲染拖拽手柄：公开页是匿名可访问的，
   // 排序属于"对所有访客生效"的配置，不能由任意访客改动。
   var ADMIN = false;
@@ -450,7 +452,10 @@
       try { return { view: 'node', id: decodeURIComponent(m[1]) }; }
       catch (e) { return { view: 'node', id: m[1] }; }
     }
-    if (h === 'events' || h === 'activity') return { view: h, id: null };
+    m = h.match(/^(events|activity)(?:\/(\d+))?$/);
+    if (m) {
+      return { view: m[1], id: null, page: m[2] ? Math.max(1, parseInt(m[2], 10)) : 1 };
+    }
     return { view: 'list', id: null };
   }
 
@@ -921,15 +926,15 @@
       historyBody(days) + '</section>';
   }
 
-  // moreLink 只在预览被截断时出现，条数直接写在链接里，不用点进去才知道有多少。
-  function moreLink(href, total) {
-    return '<a class="more-link" href="' + href + '">查看全部 ' + total + ' 条' +
+  // moreLink 只在预览被截断时出现；具体条数留给列表页显示。
+  function moreLink(href) {
+    return '<a class="more-link" href="' + href + '">查看更多' +
       ' <span aria-hidden="true">→</span></a>';
   }
 
   function incidentsBody(items, preview) {
     var shown = preview ? items.slice(0, INCIDENT_PREVIEW) : items;
-    var more = preview && items.length > shown.length ? moreLink('#/events', items.length) : '';
+    var more = preview && items.length > shown.length ? moreLink('#/events') : '';
     return '<div class="card-h"><h2>事件</h2>' +
       '<span class="hint">告警自动生成 + 人工登记</span>' + more + '</div>' + timelineHTML(shown);
   }
@@ -963,7 +968,7 @@
 
   function activityBody(items, preview) {
     var shown = preview ? items.slice(0, ACTIVITY_PREVIEW) : items;
-    var more = preview && items.length > shown.length ? moreLink('#/activity', items.length) : '';
+    var more = preview && items.length > shown.length ? moreLink('#/activity') : '';
     return '<div class="card-h"><h2>最近活动</h2>' +
       '<span class="hint">节点上下线与告警动态</span>' + more + '</div>' +
       activityHTML(shown);
@@ -975,47 +980,85 @@
       (show ? activityBody(DATA.activity || [], true) : '') + '</section>';
   }
 
-  // 事件与活动的完整列表：列表页只放预览，这里展示服务端下发的全部条目。
-  function feedCardHTML(kind) {
-    var isEvents = kind === 'events';
-    var items = DATA ? (isEvents ? (DATA.incidents || []) : (DATA.activity || [])) : [];
-    return '<div class="card-h"><h2>' + (isEvents ? '事件' : '最近活动') + '</h2>' +
-      '<span class="hint">' + (isEvents ? '告警自动生成 + 人工登记' : '节点上下线与告警动态') + '</span>' +
-      '<span class="hint" style="margin-left:auto">共 ' + items.length + ' 条</span></div>' +
-      (isEvents ? timelineHTML(items) : activityHTML(items));
+  // 事件与活动的完整列表：列表页只放预览，这里按页展示服务端下发的全部条目。
+  function feedItems(kind) {
+    if (!DATA) return [];
+    return kind === 'events' ? (DATA.incidents || []) : (DATA.activity || []);
   }
 
-  function feedPageHTML(kind) {
+  function feedPageCount(total) {
+    return Math.max(1, Math.ceil(total / FEED_PAGE_SIZE));
+  }
+
+  function feedPagerHTML(kind, page, pages) {
+    if (pages <= 1) return '';
+    var prev = page > 1
+      ? '<a class="pager-btn" href="#/' + kind + '/' + (page - 1) + '" rel="prev">← 上一页</a>'
+      : '<span class="pager-btn disabled" aria-disabled="true">← 上一页</span>';
+    var next = page < pages
+      ? '<a class="pager-btn" href="#/' + kind + '/' + (page + 1) + '" rel="next">下一页 →</a>'
+      : '<span class="pager-btn disabled" aria-disabled="true">下一页 →</span>';
+    return '<nav class="pager" aria-label="分页">' + prev +
+      '<span class="pager-info">第 ' + page + ' / ' + pages + ' 页</span>' + next + '</nav>';
+  }
+
+  function feedCardHTML(kind, page) {
+    var isEvents = kind === 'events';
+    var items = feedItems(kind);
+    var pages = feedPageCount(items.length);
+    var cur = Math.min(Math.max(1, page || 1), pages);
+    var body = items.slice((cur - 1) * FEED_PAGE_SIZE, cur * FEED_PAGE_SIZE);
+    return '<div class="card-h"><h2>' + (isEvents ? '事件' : '最近活动') + '</h2>' +
+      '<span class="hint">' + (isEvents ? '告警自动生成 + 人工登记' : '节点上下线与告警动态') + '</span>' +
+      '<span class="hint" style="margin-left:auto">共 ' + items.length + ' 条 · 每页 ' +
+        FEED_PAGE_SIZE + ' 条</span></div>' +
+      (isEvents ? timelineHTML(body) : activityHTML(body)) +
+      feedPagerHTML(kind, cur, pages);
+  }
+
+  function feedPageHTML(kind, page) {
     return '<a class="back" href="#/">← 返回总览</a>' +
-      '<section class="card" id="feedPage">' + feedCardHTML(kind) + '</section>';
+      '<section class="card" id="feedPage">' + feedCardHTML(kind, page) + '</section>';
   }
 
   function feedSignature(kind) {
-    var items = DATA ? (kind === 'events' ? (DATA.incidents || []) : (DATA.activity || [])) : [];
-    return JSON.stringify(items);
+    return JSON.stringify(feedItems(kind));
   }
 
   var lastFeedSig = '';
 
+  // 数据变少时当前页可能越界，把地址栏收敛到最后一页。
+  function clampFeedPage(kind) {
+    var pages = feedPageCount(feedItems(kind).length);
+    var page = Math.min(Math.max(1, route.page || 1), pages);
+    if (page !== route.page) {
+      route.page = page;
+      try { history.replaceState(null, '', '#/' + kind + '/' + page); } catch (e) { /* 忽略 */ }
+    }
+    return page;
+  }
+
   function renderFeedPage(kind) {
-    app.innerHTML = feedPageHTML(kind);
+    var page = clampFeedPage(kind);
+    app.innerHTML = feedPageHTML(kind, page);
     app.setAttribute('data-view', kind);
     app.removeAttribute('data-detail-id');
     app.removeAttribute('aria-busy');
     document.body.classList.remove('sec-admin');
-    lastFeedSig = feedSignature(kind);
+    lastFeedSig = feedSignature(kind) + '|' + page;
     document.title = pageTitle(kind === 'events' ? '事件' : '最近活动');
   }
 
   // 轮询时只替换卡片内容：整页重绘会把滚动位置一起丢掉。
   function patchFeedPage() {
     var kind = route.view;
-    var sig = feedSignature(kind);
+    var page = clampFeedPage(kind);
+    var sig = feedSignature(kind) + '|' + page;
     if (sig === lastFeedSig) return;
     var card = document.getElementById('feedPage');
     if (!card) { renderFeedPage(kind); return; }
     lastFeedSig = sig;
-    card.innerHTML = feedCardHTML(kind);
+    card.innerHTML = feedCardHTML(kind, page);
   }
 
   function timelineHTML(items) {

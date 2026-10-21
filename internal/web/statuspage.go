@@ -193,6 +193,15 @@ body.sec-sorting{user-select:none;cursor:grabbing}
   border-radius:6px;white-space:nowrap;transition:background .15s}
 .card-h .more-link:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .card-h .more-link:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.pager{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:16px;
+  padding-top:14px;border-top:1px solid var(--line-2)}
+.pager-btn{font-size:12px;font-weight:600;color:var(--accent);text-decoration:none;
+  display:inline-flex;align-items:center;padding:5px 10px;border:1px solid var(--line);
+  border-radius:8px;transition:background .15s,border-color .15s;white-space:nowrap}
+.pager-btn:hover{background:color-mix(in srgb,var(--accent) 8%,transparent);border-color:var(--accent)}
+.pager-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pager-btn.disabled{color:var(--fg3);opacity:.45;cursor:default}
+.pager-info{font-size:12px;color:var(--fg3);font-variant-numeric:tabular-nums}
 
 /* ---------- 公告 / 状态横幅 ---------- */
 .banner{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;margin-bottom:12px;
