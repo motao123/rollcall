@@ -664,6 +664,39 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
   需要管理令牌或已登录会话
 - 设置页的「重置」会恢复默认主题；强调色以可读性为准，避免与文字/背景对比不足
 
+### 8.1 公开状态页主题包
+
+主题包是管理员放在数据目录 `themes/` 下的静态资源目录，只影响公开状态页 `/status`。
+
+```bash
+# 以默认数据目录 /opt/rollcall/data 为例
+sudo mkdir -p /opt/rollcall/data/themes/aurora
+sudo tee /opt/rollcall/data/themes/aurora/theme.json >/dev/null <<'EOF'
+{"name":"aurora","title":"极光","version":"1.0","author":"ops","description":"深色玻璃"}
+EOF
+# status.css 与 status.js 至少提供一个，按需添加
+sudo cp status.css status.js /opt/rollcall/data/themes/aurora/
+sudo chown -R root:root /opt/rollcall/data/themes
+```
+
+- 目录名只能是小写字母、数字与连字符（1–32 位）；`name` 若填写必须与目录名一致
+- 清单与资源必须通过校验：未知字段、缺失清单、符号链接、超过 1 MiB 的资源都会被拒绝
+- 设置页「外观主题 → 公开状态页主题包」选择，或直接调用：
+  `PUT /api/admin/theme-packs`，请求体 `{"name":"aurora"}`；`{"name":""}` 恢复内置外观
+- 校验命令：
+
+```bash
+curl -sI http://127.0.0.1:19080/themes/aurora/status.css   # 200 + Cache-Control: no-cache
+curl -s  http://127.0.0.1:19080/status | grep data-theme-pack
+```
+
+- 主题包缺失或校验失败时，公开页会自动回退为内置外观；管理端「外观主题」会显示原因
+- 主题包**不在加密配置备份内**，迁移或重建实例时需要单独同步 `data/themes/`
+
+> **安全边界**：主题的 `status.js` 与站点同源运行（CSP 仍为 `script-src 'self'`），
+> 可以读取公开页能看到的数据并发起同源请求。安装主题等同授予管理员权限，
+> 只使用自己编写或可信来源的主题，不要直接解压来路不明的压缩包。
+
 ---
 
 ## 9. 故障排查
@@ -724,6 +757,8 @@ curl -fsS http://127.0.0.1:19080/metrics \
 - [ ] 如启用自更新：`update.manifestUrl` 为 HTTPS、公钥正确、二进制目录可写且 systemd 已放行
 - [ ] 如启用通知插件：目录与清单非全局可写，逐通道测试通过
 - [ ] 如修改主题：管理页与 `/status` 均按预期显示，重置后恢复默认
+- [ ] 如启用主题包：`/themes/<name>/status.css` 返回 200 且 `Cache-Control: no-cache`，
+      `/status` 带 `data-theme-pack`，删坏主题包后公开页自动回退、管理端有警示
 
 ---
 

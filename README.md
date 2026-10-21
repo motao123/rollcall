@@ -264,6 +264,7 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
 | `GET /api/status/node/<hid>?range=24h\|7d\|30d` | 单节点详情与趋势；只接受不透明句柄 |
 | `GET /api/status/incidents` | 事件时间线 |
 | `GET /api/theme` | 主题配置（模式/强调色/圆角/紧凑密度） |
+| `GET /themes/<name>/status.css\|status.js` | 主题包资源（固定文件名，`Cache-Control: no-cache`） |
 
 **技术选型（公开页 / 探针面板）**：
 
@@ -325,6 +326,23 @@ Agent 上报只认节点令牌。
 - 前端只把这些值映射到白名单 CSS 变量；公开状态页同步应用，且不新增任何数据暴露
 - 主题随设置持久化；`GET /api/theme` 公开下发（仅样式），
   管理端用 `GET/PUT /api/admin/theme` 读写
+
+#### 公开页主题包（目录分发）
+
+- 在 `<数据目录>/themes/<name>/` 放一个 `theme.json`，可选 `status.css` 与 `status.js`（至少一个）：
+  ```json
+  {"name":"aurora","title":"极光","version":"1.0","author":"ops","description":"深色玻璃"}
+  ```
+  目录名只能是小写字母、数字与连字符（1–32 位）；`name` 若填写必须与目录名一致；
+  清单未知字段、符号链接、超过 1 MiB 的资源都会在扫描时被拒绝
+- 设置页「外观主题 → 公开状态页主题包」选择后写入配置；公开页在
+  `<html data-theme-pack="…">` 上标记主题，并在内置样式/脚本之后加载主题资源
+- `GET /themes/<name>/status.css|status.js` 公开下发，`Cache-Control: no-cache`；
+  只允许这两个固定文件名，主题名与文件名都做白名单校验
+- 主题包缺失或校验失败时公开页**静默回退**为内置外观，管理端列表会显示原因与警示
+- **安全边界**：主题脚本与站点同源运行（CSP 仍为 `script-src 'self'`），
+  能读取公开页可见的数据并发起同源请求；安装主题等同授予管理员权限，只使用可信来源。
+  主题资源不在加密备份内，迁移时需单独备份 `themes/` 目录
 
 ### 7. Agent 签名自更新（可选，默认关闭）
 
@@ -798,6 +816,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | GET | `/api/live` | 全部节点的「当前态」轻量视图（CPU/内存/磁盘/速率/状态，不含资产字段与 sparkline） |
 | GET | `/api/stream` | SSE 事件流（需管理会话或令牌）：数据变化时推 `change`，25 秒心跳 |
 | GET/PUT | `/api/admin/theme` | 读取 / 保存外观主题（固定字段，未知字段拒绝） |
+| GET/PUT | `/api/admin/theme-packs` | 扫描 / 选择公开页主题包（`{"name":"aurora"}`，空串恢复内置；无效包当场 400） |
 | POST | `/api/admin/test-notify` | 发送测试通知，可带 `{"channelId":"..."}` 只测单个 |
 | GET/POST | `/api/admin/rules` | 列出 / 创建告警规则 |
 | GET/PUT/DELETE | `/api/admin/rules/{id}` | 查看 / 修改 / 删除单条规则 |
@@ -1132,6 +1151,7 @@ rollcall/
 │   ├── outbox/              持久化通知队列
 │   ├── selfupdate/          Ed25519 清单校验、下载、原子替换与回滚
 │   ├── theme/               受限主题模型与校验
+│   ├── themepack/           公开页主题包发现与清单校验
 │   ├── version/             构建版本号（ldflags 注入）
 │   └── web/
 │       ├── web.go           管理/公开 API + 内嵌静态资源
@@ -1194,7 +1214,8 @@ rollcall/
 4. 无多用户与权限体系（单一管理员账号 + 两种 API 令牌 scope，适合个人/小团队）
 5. Agent 自更新仅支持 Linux，且要求对二进制目录有写权限；控制端升级由运维执行，
    可用 `deploy/rollcall-server-upgrade.sh` 一键完成，但**不支持**远程下发升级
-6. 主题只有固定字段，通知插件是本机受信任扩展而非沙箱；两者都需要管理权限才能配置
+6. 外观主题只有固定字段；公开页主题包（`status.css`/`status.js`）与站点同源，等同管理员权限；
+   通知插件是本机受信任扩展而非沙箱；两者都需要管理权限才能配置
 
 ---
 

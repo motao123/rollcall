@@ -5,6 +5,7 @@ package web
 // 设计约束：
 //
 //   - 内联 CSS + 同源 status.js，不请求任何第三方资源
+//   - 启用的主题包由 handleStatusPage 注入同源的 /themes/<name>/status.css|js
 //   - 只读，不暴露任何管理入口以外的后台链接
 //   - 每 15 秒自动刷新数据，页面隐藏时暂停轮询
 //   - CSP 为 script-src 'self'：所有交互必须用 addEventListener 绑定，

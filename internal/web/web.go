@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,6 +73,10 @@ type Server struct {
 	dataDir      string
 	saveInterval time.Duration
 	ready        readyProbe
+
+	// themeDir 是公开状态页主题包的根目录（dataDir/themes）。
+	// 为空表示未配置数据目录，主题功能整体停用。
+	themeDir string
 
 	testMu   sync.Mutex
 	lastTest time.Time
@@ -136,6 +141,9 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		saveInterval:   cfg.SaveInterval,
 		events:         newEventHub(),
 		startedAt:      time.Now()}
+	if cfg.DataDir != "" {
+		srv.themeDir = filepath.Join(cfg.DataDir, "themes")
+	}
 	srv.loadRevokedSessions()
 	// 载入已保存的通知配置并挂到告警引擎
 	if nc, err := notify.Parse(st.GetSetting("notify")); err != nil {
@@ -239,6 +247,8 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/readyz", authPublic, http.HandlerFunc(s.handleReadyz)},
 		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
 		{"/status.js", authPublic, static},
+		// 公开状态页主题包资源：只提供 status.css / status.js 两个固定文件名。
+		{"/themes/", authPublic, http.HandlerFunc(s.handleStatusThemeAsset)},
 		{"/api/status", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatus))},
 		// 节点详情与事件时间线同样是公开页的一部分：
 		// 字段在 handler 内部按 StatusPage 配置的可见性裁剪，
@@ -293,6 +303,7 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/backup", authAdmin, http.HandlerFunc(s.handleBackup)},
 		{"/api/admin/restore", authAdmin, http.HandlerFunc(s.handleRestore)},
 		{"/api/admin/theme", authAdmin, http.HandlerFunc(s.handleAdminTheme)},
+		{"/api/admin/theme-packs", authAdmin, http.HandlerFunc(s.handleAdminThemePacks)},
 		{"/api/admin/test-notify", authAdmin, http.HandlerFunc(s.handleTestNotify)},
 		{"/api/admin/rules", authAdmin, http.HandlerFunc(s.handleAdminRules)},
 		{"/api/admin/rules/", authAdmin, http.HandlerFunc(s.handleAdminRuleByID)},
@@ -1322,7 +1333,12 @@ func maintenanceBanner(global *model.Maintenance, nodes map[string]*model.Mainte
 func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.WriteString(w, statusPageHTML)
+	page := statusPageHTML
+	// 主题包缺失或损坏时静默回退到内置外观，公开页不能因为管理员装错主题而不可用。
+	if pack, err := s.activeThemePack(); err == nil {
+		page = themePackPage(page, pack)
+	}
+	_, _ = io.WriteString(w, page)
 }
 
 // ---------- 工具 ----------

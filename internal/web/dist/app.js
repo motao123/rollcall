@@ -2458,22 +2458,25 @@ async function viewSettings() {
 
   let nodes = [], services = [], cfg = null, chans = [], defs = [];
   let themeCfg = null;
+  let themePacks = { active: '', dir: '', packs: [] };
   let queue = { stats: {}, jobs: [] };
   let tokens = [];
   let health = null;
   let loadErr = '';
   try {
-    const [n, svc, q, th, tk, hl] = await Promise.all([
+    const [n, svc, q, th, tk, hl, tp] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
       adminApi('/api/admin/notify/jobs'),
       adminApi('/api/admin/theme'),
       adminApi('/api/admin/tokens').catch(() => []),
       adminApi('/api/admin/health').catch(() => null),
+      adminApi('/api/admin/theme-packs').catch(() => null),
     ]);
     health = hl;
     nodes = n; services = svc; queue = q || queue; tokens = Array.isArray(tk) ? tk : [];
     themeCfg = th || {};
+    if (tp) themePacks = tp;
     const st = await adminApi('/api/admin/settings');
     cfg = st.notify || {};
     chans = st.channels || [];
@@ -2524,6 +2527,15 @@ async function viewSettings() {
     <td class="mono" style="font-size:11.5px">${tk.expiresAt ? clock(tk.expiresAt) : '永不过期'}</td>
     <td class="num"><button class="btn tiny danger" data-del-token="${esc(tk.id)}">删除</button></td>
   </tr>`).join('') || `<tr><td colspan="6"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
+  const packList = Array.isArray(themePacks.packs) ? themePacks.packs : [];
+  const packOpts = [{ v: '', t: '内置（默认）' }].concat(
+    packList.filter((p) => !p.error).map((p) => ({
+      v: p.name,
+      t: p.title && p.title !== p.name ? p.title + ' · ' + p.name : p.name,
+    }))
+  );
+  const badPacks = packList.filter((p) => p.error);
+  const themeDirHint = themePacks.dir || '<数据目录>/themes';
 
   $('#view').innerHTML = `
     <section class="section">
@@ -2788,6 +2800,22 @@ async function viewSettings() {
           强调色、圆角与紧凑密度对仪表盘和公开状态页生效；默认模式只是访客的初始值，右上角手动切换过则优先本机选择。
         </p>
       </div>
+      <div class="panel panel-pad" style="margin-top:10px">
+        <form id="themePackForm" class="form-grid">
+          ${selectField('公开状态页主题包', 'statusTheme', themePacks.active || '', packOpts)}
+          <div class="form-actions">
+            <button class="btn" type="button" id="themePackRefresh">重新扫描</button>
+            <button class="btn primary" type="submit">应用主题包</button>
+          </div>
+        </form>
+        <p class="field-hint section-hint">
+          主题包放在 <code>${esc(themeDirHint)}</code>：每个目录一个 <code>theme.json</code>，
+          可含 <code>status.css</code> 与 <code>status.js</code>（至少一个），仅作用于公开状态页。
+          <strong>主题脚本与站点同源运行，安装主题等同授予管理员权限，只使用可信来源。</strong>
+        </p>
+        ${themePacks.warning ? `<p class="field-hint" style="color:var(--warn)">${esc(themePacks.warning)}</p>` : ''}
+        ${badPacks.length ? `<p class="field-hint" style="color:var(--warn)">未通过校验：${badPacks.map((p) => esc(p.name) + '（' + esc(p.error) + '）').join('；')}</p>` : ''}
+      </div>
     </section>
 
     <section class="section">
@@ -2994,6 +3022,18 @@ async function viewSettings() {
       applyThemeVars(document.documentElement.dataset.theme || 'light');
       toast('外观配置已保存');
     } catch (err) { toast('保存失败：' + err.message, 'err'); }
+  };
+
+  const themePackForm = $('#themePackForm');
+  $('#themePackRefresh').onclick = () => viewSettings();
+  themePackForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const name = themePackForm.querySelector('[name=statusTheme]').value;
+    try {
+      await adminApi('/api/admin/theme-packs', { method: 'PUT', body: JSON.stringify({ name }) });
+      toast(name ? '已应用主题包' : '已恢复内置主题');
+      viewSettings();
+    } catch (err) { toast('应用失败：' + err.message, 'err'); }
   };
 
   $$('[data-retry-job]').forEach((b) => {
