@@ -88,6 +88,9 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
   **抖动（jitter）与丢包率（loss）**（基于该服务最近探测样本计算）
 - 24 小时可用率统计 + 最近 2 小时延迟迷你曲线
 - **异常服务自动置顶**，一眼看到哪里坏了
+- **同目标并排对比**：按主机名聚合同一主机的多条探测（如 HTTPS + TCP + DNS），
+  并排显示延迟、丢包/抖动、证书与可用率，便于区分「目标整体异常」与「单条协议/路径失败」。
+  各行的「归属节点」只是展示归组——探测统一由控制服务器发起，不代表该节点的本地网络视角
 - 后台可对单个目标点「检测」立即执行一次探测，直接显示延迟、HTTP 状态码与证书剩余天数
 - 探测由**服务端发起**，不经 Agent —— 单个 Agent 沦陷无法污染其他节点的服务状态
 - **默认拒绝内网目标**（回环/RFC1918/链路本地/metadata/CGNAT）：确有内网监控需求时显式加
@@ -873,6 +876,7 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | GET | `/api/nodes/{id}` | 节点详情 |
 | GET | `/api/nodes/{id}/series?range=1h\|6h\|24h\|7d\|30d\|365d` | 历史时序（长范围自动降采样） |
 | GET | `/api/services` | 服务探测状态 |
+| GET | `/api/services/compare` | 同主机多探测并排数据（含采集视角说明） |
 | GET | `/api/alerts` | 告警历史 |
 | GET | `/api/rules` | 告警规则 |
 | GET | `/api/assets` | 资产台账视图 |

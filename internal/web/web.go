@@ -277,6 +277,7 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/nodes", authReadonly, http.HandlerFunc(s.handleNodes)},
 		{"/api/nodes/", authReadonly, http.HandlerFunc(s.handleNodeDetail)},
 		{"/api/services", authReadonly, http.HandlerFunc(s.handleServices)},
+		{"/api/services/compare", authReadonly, rejectNonGET(s.handleServiceCompare)},
 		{"/api/alerts", authReadonly, http.HandlerFunc(s.handleAlerts)},
 		{"/api/rules", authReadonly, http.HandlerFunc(s.handleRules)},
 		{"/api/assets", authReadonly, http.HandlerFunc(s.handleAssets)},
@@ -978,24 +979,7 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		_, lat, ok, cert, has := s.st.ServiceLastFull(sv.ID)
 		st := s.st.ServiceStats(sv.ID, now-3600)
 		hist := s.st.ServiceSeries(sv.ID)
-		// Uptime 声明为 24h 可用率，而 ServiceSeries 返回整个环形缓冲
-		// （2880 点，按探测间隔不同可能是 8h 或 48h），必须显式截断窗口。
-		cutoff := time.Now().Unix() - 86400
-		up, tot := 0, 0
-		for _, h := range hist {
-			if h[0] < cutoff {
-				continue
-			}
-			tot++
-			if h[2] == 1 {
-				up++
-			}
-		}
-		rate := 0.0
-		if tot > 0 {
-			rate = float64(up) / float64(tot) * 100
-		}
-		it := item{Service: *sv, LatencyMs: lat, Spark: hist, Uptime: rate, CertDays: -1,
+		it := item{Service: *sv, LatencyMs: lat, Spark: hist, Uptime: serviceUptime24h(hist, now), CertDays: -1,
 			LossPct: st.LossPct, JitterMs: st.JitterMs}
 		if has {
 			it.OK = ok

@@ -1011,10 +1011,93 @@ async function viewNodeDetail(id) {
   });
 }
 
+// 同目标并排：把同一主机的多条探测放在一起，便于判断是目标整体异常，
+// 还是某一条协议/路径的探测单独失败。探测统一由控制服务器发起，
+// “归属节点”只是展示归组，不能当成该节点的本地网络视角。
+function serviceCompareSection(data) {
+  if (!data) return '';
+  const groups = data.groups || [];
+  const note = data.note || '所有探测均由控制服务器发起。';
+  let body;
+  if (!groups.length) {
+    const singles = Number(data.singles || 0);
+    const hint = singles > 0
+      ? `当前 ${singles} 个目标只有一条探测。为同一主机配置多条探测（例如 HTTPS + TCP）后，这里会并排展示。`
+      : '为同一主机配置多条探测（例如 HTTPS + TCP）后，这里会并排展示。';
+    body = `<div class="empty" style="padding:28px 20px">${esc(hint)}</div>`;
+  } else {
+    body = `<div class="table-wrap"><table class="services-table svc-compare-table">
+      <thead><tr><th>探测</th><th>归属节点</th><th>类型</th><th>目标</th><th>状态</th>
+        <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24h 可用率</th></tr></thead>
+      <tbody>${groups.map(serviceCompareGroupHTML).join('')}</tbody>
+    </table></div>`;
+  }
+  return `<section class="section">
+    <div class="section-head">
+      <h2 class="section-title">同目标并排</h2>
+      ${sectionActions(`${groups.length} 组 · 同一主机的多条探测`)}
+    </div>
+    <p class="section-note">${esc(note)}</p>
+    ${body}
+  </section>`;
+}
+
+function serviceCompareGroupHTML(g) {
+  const verdicts = {
+    up: ['ok', '全部正常'],
+    partial: ['warn', '部分异常'],
+    down: ['crit', '全部失败'],
+    unknown: ['mute', '暂无数据'],
+    disabled: ['mute', '全部停用'],
+  };
+  const [tone, label] = verdicts[g.verdict] || ['mute', g.verdict];
+  const counts = !g.enabled
+    ? `共 ${g.total} 条探测`
+    : g.probed
+      ? `${g.failing}/${g.probed} 条失败 · 共 ${g.total} 条探测`
+      : `等待首次探测 · 共 ${g.total} 条探测`;
+  const head = `<tr class="svc-group-row"><td colspan="9">
+    <span class="mono strong">${esc(g.host)}</span>
+    <span class="badge ${tone}">${esc(label)}</span>
+    <span class="svc-group-meta">${counts}</span>
+  </td></tr>`;
+  return head + (g.services || []).map((s) => {
+    const enabled = s.enabled !== false;
+    let status;
+    if (!enabled) status = '<span class="badge mute">已停用</span>';
+    else if (!s.has) status = '<span class="badge mute">无数据</span>';
+    else status = `<span class="dot ${s.ok ? 'ok' : 'crit'}"></span>${s.ok ? '正常' : '失败'}`;
+    const cert = s.certDays === 0
+      ? '<span class="badge crit">已过期</span>'
+      : s.certDays > 0
+        ? `<span class="badge ${s.certDays <= 14 ? 'crit' : s.certDays <= 30 ? 'warn' : 'mute'}">${s.certDays} 天</span>`
+        : '—';
+    const loss = Number(s.lossPct || 0);
+    const jitter = Number(s.jitterMs || 0);
+    const up = Number(s.uptime || 0);
+    const node = s.nodeId ? esc(s.nodeName || s.nodeId) : '<span class="text-faint">未关联</span>';
+    const upCell = s.has || up > 0
+      ? `<span class="badge ${up >= 99 ? 'ok' : up >= 95 ? 'warn' : 'crit'}">${up.toFixed(1)}%</span>`
+      : '—';
+    return `<tr>
+      <td class="strong">${esc(s.name)}</td>
+      <td>${node}</td>
+      <td><span class="badge mute">${esc(String(s.type || '').toUpperCase())}</span></td>
+      <td class="mono target-cell" title="${esc(s.target)}">${esc(s.target)}</td>
+      <td>${status}</td>
+      <td class="num mono">${s.has && s.latencyMs ? s.latencyMs + 'ms' : '—'}</td>
+      <td class="num mono cell-compact">${loss > 0 ? `<span class="${loss >= 10 ? 'text-crit' : 'text-warn'}">${loss.toFixed(1)}%</span>` : '0%'} / ${jitter ? jitter.toFixed(0) + 'ms' : '—'}</td>
+      <td class="num">${cert}</td>
+      <td class="num">${upCell}</td>
+    </tr>`;
+  }).join('');
+}
+
 async function viewServices() {
-  const [svcs, nodes] = await Promise.all([
+  const [svcs, nodes, svcCompare] = await Promise.all([
     api('/api/services'),
     api('/api/nodes').catch(() => []),
+    api('/api/services/compare').catch(() => null),
   ]);
   state.data.nodes = nodes;
   const list = svcs.filter((s) => matchesSearch([s.name, s.target, s.type, s.enabled === false ? '已停用' : '']));
@@ -1058,7 +1141,8 @@ async function viewServices() {
           </tr>`;
         }).join('') || `<tr><td colspan="10"><div class="empty">尚未配置服务探测目标</div></td></tr>`}</tbody>
       </table></div>
-    </section>`;
+    </section>
+    ${serviceCompareSection(svcCompare)}`;
 
   $('#svcAdd').onclick = () => openServiceDialog(null, nodes);
   $$('[data-svc-test]').forEach((b) => {

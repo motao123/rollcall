@@ -1163,6 +1163,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .cell-compact { font-size: 11.5px; }
 .text-crit { color: var(--crit); }
 .text-warn { color: var(--warn); }
+.text-faint { color: var(--fg-3); }
 .target-cell { font-size: 11.5px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spark-cell { width: 150px; padding: 6px 14px; }
 .spark-box { height: 22px; }
@@ -1481,6 +1482,16 @@ html[data-density="compact"] .form-grid { gap: 9px 12px; }
 
 /* 其余页面的多列表格同样保底宽度，避免手机上被压成逐字换行。 */
 .services-table { min-width: 900px; }
+.svc-compare-table { min-width: 980px; }
+/* 同目标并排：组头行把不同主机分开，行内密度与主服务表一致。 */
+.svc-group-row td {
+  background: var(--panel-2);
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+}
+.svc-compare-table tbody tr:first-child.svc-group-row td { border-top: none; }
+.svc-group-row .svc-group-meta { margin-left: 8px; font-size: 11.5px; color: var(--fg-3); }
+.section-note { margin: 0 0 10px; font-size: 12px; color: var(--fg-3); }
 .alerts-table { min-width: 880px; }
 .assets-table { min-width: 860px; }
 .settings-nodes-table { min-width: 860px; }
