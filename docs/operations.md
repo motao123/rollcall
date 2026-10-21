@@ -44,7 +44,7 @@ journalctl -u rollcall-agent -n 100 --no-pager
 
 ```bash
 # 构建时注入版本号（默认取 git describe）
-make linux VERSION=v1.10.5
+make linux VERSION=v1.13.1
 (cd dist && sha256sum -c SHA256SUMS)
 # 或直接使用：
 ./rollcall-server -version
@@ -54,7 +54,7 @@ make linux VERSION=v1.10.5
 不想在目标机上装 Go，也可以直接取 CI 随 tag 发布的预编译产物（`v1.10.5` 起）：
 
 ```bash
-VERSION=v1.10.5; ARCH=amd64
+VERSION=v1.13.1; ARCH=amd64
 BASE="https://github.com/motao123/rollcall/releases/download/${VERSION}"
 curl -fsSLO "$BASE/rollcall-server-linux-$ARCH"
 curl -fsSLO "$BASE/rollcall-agent-linux-$ARCH"
@@ -202,9 +202,9 @@ make rollsign
 **2. 构建并签名清单**
 
 ```bash
-make linux VERSION=v1.10.5
-./rollsign sign -key /root/rollcall-update.key -version v1.10.5 \
-  -base-url https://updates.example.com/agent/v1.10.5 \
+make linux VERSION=v1.13.1
+./rollsign sign -key /root/rollcall-update.key -version v1.13.1 \
+  -base-url https://updates.example.com/agent/v1.13.1 \
   -asset linux-amd64=dist/rollcall-agent-linux-amd64 \
   -asset linux-arm64=dist/rollcall-agent-linux-arm64 \
   -out dist/manifest.json

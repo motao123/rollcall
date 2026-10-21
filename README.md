@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.10.5**（`./rollcall-server -version` 可查）。
+当前版本 **v1.13.1**（`./rollcall-server -version` 可查）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -474,7 +474,7 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 **方式 0：不装 Go，直接用发布包**（推荐，`v1.10.5` 起 CI 会随 tag 发布预编译二进制）
 
 ```bash
-VERSION=v1.10.5
+VERSION=v1.13.1
 ARCH=amd64          # amd64 / arm64 / arm / 386
 BASE="https://github.com/motao123/rollcall/releases/download/${VERSION}"
 
@@ -515,7 +515,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 在任意目录（包括 git 工作区与非 git 目录）都能得到字节一致的二进制。
 > 发布时先用 `cd dist && sha256sum -c SHA256SUMS` 自检，再把校验和与版本号一起记录。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.10.5`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.13.1`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -951,15 +951,15 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 方式 A：自己构建（注意产物名带 -linux-<arch> 后缀，dist/rollcall-server 并不存在）
-make linux VERSION=v1.10.5
+make linux VERSION=v1.13.1
 (cd dist && sha256sum -c SHA256SUMS)
 scp dist/rollcall-server-linux-amd64 root@<控制端>:/tmp/rollcall-server.new
 ```
 
 ```bash
 # 方式 B：直接用发布包（v1.10.5 起 CI 随 tag 发布，无需构建机）
-curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.10.5/rollcall-server-linux-amd64"
-curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.10.5/SHA256SUMS"
+curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.13.1/rollcall-server-linux-amd64"
+curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.13.1/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS
 mv rollcall-server-linux-amd64 /tmp/rollcall-server.new
 ```
