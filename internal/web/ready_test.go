@@ -22,7 +22,7 @@ func readyStatus(h http.Handler) (int, map[string]any) {
 
 func newReadyHandler(t *testing.T, dataDir string, saveEvery time.Duration) http.Handler {
 	t.Helper()
-	return New(store.New(t.TempDir()), nil, nil, Config{
+	return New(publicStore(t), nil, nil, Config{
 		DataDir: dataDir, SaveInterval: saveEvery,
 	}).Handler()
 }

@@ -11,14 +11,13 @@ import (
 
 	"github.com/motao123/rollcall/internal/backup"
 	"github.com/motao123/rollcall/internal/model"
-	"github.com/motao123/rollcall/internal/store"
 )
 
 const scanTok = "scanfix-admin-token-123456"
 
 func scanServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AdminToken: scanTok})
+	srv := New(publicStore(t), nil, nil, Config{AdminToken: scanTok})
 	return srv, srv.Handler()
 }
 

@@ -403,6 +403,7 @@ func TestDashboardReadAPIsAcceptPanelBasic(t *testing.T) {
 func TestMetricsAuth(t *testing.T) {
 	const adminTok = "test-admin-token-1234567890"
 	st := store.New(t.TempDir())
+	enablePublicStatus(st)
 
 	t.Run("no-basic-config", func(t *testing.T) {
 		srv := New(st, nil, nil, Config{AdminToken: adminTok})
@@ -622,6 +623,7 @@ func TestNodeStatesAPI(t *testing.T) {
 	const adminTok = "test-admin-token-1234567890"
 	now := time.Now().Unix()
 	st := store.New(t.TempDir())
+	enablePublicStatus(st)
 	for _, n := range []struct{ id, token string }{
 		{"fresh", "tok-fresh"}, {"online", "tok-online"}, {"stale", "tok-stale"}, {"off", "tok-off"},
 	} {
@@ -964,6 +966,7 @@ func TestPublicStatusIsDesensitized(t *testing.T) {
 		Arch: "secret-arch", CPUModel: "secret-cpu",
 	}, model.Metrics{TS: time.Now().Unix(), CPUPct: 10})
 
+	enablePublicStatus(st)
 	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	w := httptest.NewRecorder()

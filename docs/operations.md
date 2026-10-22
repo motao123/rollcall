@@ -791,6 +791,31 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
   需要管理令牌或已登录会话
 - 设置页的「重置」会恢复默认主题；强调色以可读性为准，避免与文字/背景对比不足
 
+### 8.0 公开页的访问门槛（v1.15.2+）
+
+公开页默认关闭。开启与换链：
+
+```bash
+TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
+# 打开 + 设置访问令牌（令牌 16–64 位，字母/数字/-/_）
+curl -sS -X PUT http://127.0.0.1:19080/api/admin/status-page \
+  -H "X-Admin-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"token":"替换成随机串"}'
+# 轮换令牌（旧链接立即失效）
+curl -sS -X POST http://127.0.0.1:19080/api/admin/status-page/token -H "X-Admin-Token: $TOKEN"
+# 关闭
+curl -sS -X PUT http://127.0.0.1:19080/api/admin/status-page \
+  -H "X-Admin-Token: $TOKEN" -H 'Content-Type: application/json' -d '{"enabled":false}'
+```
+
+- 未打开时 `/status`、`/api/status*`、`/status.css|js`、`/vendor/*`、`/themes/*` 全部 **404**
+- 打开且设了令牌：带 `?t=<令牌>` 首次访问后种 HttpOnly Cookie（30 天），
+  页面内的静态资源与 SSE 不再需要查询串；也支持 `X-Status-Token` 与 `Authorization: Bearer`
+- **令牌不是账号体系**：它只证明"知道链接"。真要区分访客，请用反向代理的 Basic Auth
+- 逐台隐藏：`hiddenNodes` 里的节点不进列表，详情页也 404；公开备注写在 `publicNotes`，
+  与台账内部 `Note` 完全分离（内部备注不会出现在公开页，有测试守着）
+- 忘记令牌：面板「公开页 → 访问门槛」能看到当前值；也可用上面的 POST 直接换一个新值
+
 ### 8.1 公开状态页主题包
 
 主题包是管理员放在数据目录 `themes/` 下的静态资源目录，只影响公开状态页 `/status`。

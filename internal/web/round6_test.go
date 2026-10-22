@@ -4,8 +4,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestStatusPageHasCSSOnlyScriptFallback 是回归测试。
@@ -39,7 +37,7 @@ func TestStatusPageHasCSSOnlyScriptFallback(t *testing.T) {
 
 // TestStatusPageServed 确认页面能正常返回并带 CSP。
 func TestStatusPageServed(t *testing.T) {
-	srv := New(store.New(t.TempDir()), nil, nil, Config{})
+	srv := New(publicStore(t), nil, nil, Config{})
 	req := httptest.NewRequest("GET", "/status", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

@@ -256,24 +256,24 @@ func (s *Server) routes(static http.Handler) []route {
 		// 深度健康检查：存储可用且快照在正常落盘才算就绪。
 		// 升级脚本以它决定是否回滚。
 		{"/readyz", authPublic, http.HandlerFunc(s.handleReadyz)},
-		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
+		{"/status", authPublic, s.publicGate(http.HandlerFunc(s.handleStatusPage))},
 		// 公开页的全部静态资源都必须显式登记：启用 -auth 时 "/" 受保护，
 		// 少登记一个就会让页面卡在骨架屏或裸样式。
-		{"/status.js", authPublic, static},
-		{"/status.css", authPublic, static},
-		{"/theme-boot.js", authPublic, static},
-		{"/vendor/", authPublic, static},
+		{"/status.js", authPublic, s.publicGate(static)},
+		{"/status.css", authPublic, s.publicGate(static)},
+		{"/theme-boot.js", authPublic, s.publicGate(static)},
+		{"/vendor/", authPublic, s.publicGate(static)},
 		// 公开状态页主题包资源：只提供 status.css / status.js 两个固定文件名。
-		{"/themes/", authPublic, http.HandlerFunc(s.handleStatusThemeAsset)},
-		{"/api/status", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatus))},
+		{"/themes/", authPublic, s.publicGate(http.HandlerFunc(s.handleStatusThemeAsset))},
+		{"/api/status", authPublic, s.publicGate(http.HandlerFunc(rejectNonGET(s.handleStatus)))},
 		// 节点详情与事件时间线同样是公开页的一部分：
 		// 字段在 handler 内部按 StatusPage 配置的可见性裁剪，
 		// 因此可以直接标记为公开，不必再套一层鉴权。
-		{"/api/status/node/", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatusNode))},
-		{"/api/status/incidents", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatusIncidents))},
+		{"/api/status/node/", authPublic, s.publicGate(http.HandlerFunc(rejectNonGET(s.handleStatusNode)))},
+		{"/api/status/incidents", authPublic, s.publicGate(http.HandlerFunc(rejectNonGET(s.handleStatusIncidents)))},
 		// 公开页的实时推送：事件只带版本号，不含任何节点数据，
 		// 因此可以匿名订阅；真正的数据仍由 /api/status 按可见性裁剪。
-		{"/api/status/stream", authPublic, http.HandlerFunc(s.handleStream)},
+		{"/api/status/stream", authPublic, s.publicGate(http.HandlerFunc(s.handleStream))},
 		// 一条命令接入：脚本与二进制都公开（脚本不含密钥，token 由调用方传参）
 		{"/agent/install.sh", authPublic, http.HandlerFunc(s.handleAgentInstall)},
 		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},
@@ -340,6 +340,7 @@ func (s *Server) routes(static http.Handler) []route {
 		// 公开状态页的展示配置、维护窗口与人工事件：
 		// 这些直接影响匿名访客看到的内容，必须是管理写操作。
 		{"/api/admin/status-page", authAdmin, http.HandlerFunc(s.handleAdminStatusPage)},
+		{"/api/admin/status-page/token", authAdmin, http.HandlerFunc(s.handleAdminStatusToken)},
 		{"/api/admin/maintenance", authAdmin, http.HandlerFunc(s.handleAdminMaintenance)},
 		{"/api/admin/maintenance/", authAdmin, http.HandlerFunc(s.handleAdminMaintenanceByID)},
 		{"/api/admin/incidents", authAdmin, http.HandlerFunc(s.handleAdminIncidents)},
@@ -1115,8 +1116,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	maintGlobal, maintNodes := s.st.MaintenanceAt(now)
 	maintAll := maintGlobal != nil
 
+	// 逐台隐藏：隐藏的节点既不进列表，也不能按句柄单独查看。
+	hidden := cfg.HiddenSet()
 	out := make([]statusNodePub, 0, len(views))
 	for _, v := range views {
+		if hidden[v.ID] {
+			continue
+		}
 		// 24h 可用率与分段色块：按"采样点覆盖的在线时长"计算，
 		// 不能简单用 成功点数/总点数 —— 那样只要节点还在上报就永远 100%。
 		series := s.st.Series(v.ID, now-86400)
@@ -1124,6 +1130,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 		p := statusNodePub{
 			HID: s.st.PublicHandle(v.ID), Name: v.Name, Group: store.VisibleGroup(v.Group),
+			Note:   cfg.PublicNote(v.ID),
 			Online: v.Online, State: v.State,
 			CPU:      round1(v.Latest.CPUPct),
 			Mem:      round1(pctF(v.Latest.MemUsed, v.Latest.MemTotal)),

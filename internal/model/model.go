@@ -435,6 +435,18 @@ type StatusBlocks struct {
 // 序列化时先填 DefaultStatusPage() 再反序列化：JSON 里不存在的键会保留默认值，
 // 这样"新增字段"不会让老配置被静默读成 false。
 type StatusPage struct {
+	// Enabled 决定公开页是否对外提供。nil 与 false 都表示关闭：
+	// 公开页会暴露节点名与在线状态，默认必须是关的（历史配置没有这个键，
+	// 升级后一律视为关闭，需要显式打开）。
+	Enabled *bool `json:"enabled,omitempty"`
+	// Token 非空时，访问公开页与 /api/status* 必须带上它（?t= / Cookie / Bearer）。
+	// 只做"知道链接"这一层门槛，不是账号体系；为空表示不校验。
+	Token string `json:"token,omitempty"`
+	// HiddenNodes 是逐台隐藏的节点 ID：既不进入列表，也不能按句柄单独查看。
+	HiddenNodes []string `json:"hiddenNodes,omitempty"`
+	// PublicNotes 是"节点 ID → 公开备注"，只出现在公开页；
+	// 与内部的 Note 字段完全分离，避免把内部备注（含价格、账号信息）泄漏出去。
+	PublicNotes  map[string]string  `json:"publicNotes,omitempty"`
 	Title        string             `json:"title"`
 	Announcement StatusAnnouncement `json:"announcement"`
 	Visibility   StatusVisibility   `json:"visibility"`
@@ -444,6 +456,31 @@ type StatusPage struct {
 	// 未知键被丢弃、重复键去重、缺失键按默认顺序补在末尾 ——
 	// 这样"新增区块"不会因为老配置里没有该键就从页面上消失。
 	Sections []string `json:"sections"`
+}
+
+// IsEnabled 判断公开页是否开放。缺省（nil）视为关闭。
+func (sp StatusPage) IsEnabled() bool { return sp.Enabled != nil && *sp.Enabled }
+
+// HiddenSet 返回隐藏节点集合，便于 O(1) 判断。
+func (sp StatusPage) HiddenSet() map[string]bool {
+	if len(sp.HiddenNodes) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(sp.HiddenNodes))
+	for _, id := range sp.HiddenNodes {
+		if id = strings.TrimSpace(id); id != "" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// PublicNote 返回某个节点的公开备注（没有则空串）。
+func (sp StatusPage) PublicNote(nodeID string) string {
+	if len(sp.PublicNotes) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(sp.PublicNotes[nodeID])
 }
 
 // StatusSectionKeys 是所有可排序区块的标识，顺序即默认展示顺序。

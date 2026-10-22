@@ -37,6 +37,7 @@ func writeThemePack(t *testing.T, dataDir, name, title, css, js string) {
 func TestThemePackAdminAndStatusPage(t *testing.T) {
 	dataDir := t.TempDir()
 	st := store.New(dataDir)
+	enablePublicStatus(st)
 	srv := New(st, nil, nil, Config{AdminToken: themeTestToken, DataDir: dataDir})
 	writeThemePack(t, dataDir, "aurora", "极光", "html{--accent:#f0f}", "document.documentElement.dataset.pack='aurora'")
 	writeThemePack(t, dataDir, "empty", "空包", "", "")

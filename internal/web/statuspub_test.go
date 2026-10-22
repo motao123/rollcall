@@ -20,6 +20,7 @@ func statusTestEnv(t *testing.T) (*store.Store, http.Handler) {
 	st.UpsertNode(&model.Node{ID: "n1", Name: "节点一", Token: "tok", Group: "prod",
 		Provider: "某服务商", Region: "香港"})
 	st.UpsertNode(&model.Node{ID: "n2", Name: "节点二", Token: "tok2", Group: "prod"})
+	enablePublicStatus(st)
 	srv := New(st, nil, nil, Config{AdminToken: "test-admin-token-1234567890"})
 	return st, srv.Handler()
 }
@@ -54,7 +55,9 @@ func TestStatusDetailHidesDisabledFields(t *testing.T) {
 		  "memUsed":1000,"memTotal":4000,"diskUsed":1000,"diskTotal":4000,
 		  "swapUsed":10,"swapTotal":100,"netRx":1000,"netTx":2000,"procs":42,"tcpConn":7}`)
 
-	cfg := model.DefaultStatusPage()
+	// 从当前配置起改：默认配置里 enabled 是关闭的，
+	// 直接用 model.DefaultStatusPage() 会把公开页一起关掉（v1.15.2 起的安全默认）。
+	cfg := st.StatusPage()
 	cfg.Visibility.Hostname = false
 	cfg.Visibility.OS = false
 	cfg.Visibility.Kernel = false
@@ -112,7 +115,9 @@ func TestStatusDetailShowsEnabledFields(t *testing.T) {
 		`{"hostname":"web-01","os":"Debian 12","kernel":"6.1.0","arch":"x86_64","cpuModel":"X","cores":4,"virt":"KVM"}`,
 		`{"cpuPct":10,"procs":7,"uptime":60}`)
 
-	cfg := model.DefaultStatusPage()
+	// 从当前配置起改：默认配置里 enabled 是关闭的，
+	// 直接用 model.DefaultStatusPage() 会把公开页一起关掉（v1.15.2 起的安全默认）。
+	cfg := st.StatusPage()
 	cfg.Visibility.Hostname = true
 	cfg.Visibility.OS = true
 	cfg.Visibility.Procs = true
@@ -266,7 +271,9 @@ func TestServiceLatencyOnlyCountsSuccess(t *testing.T) {
 // TestStatusDetailRespectsBlockSwitches 区块关闭后详情接口不再下发对应数据。
 func TestStatusDetailRespectsBlockSwitches(t *testing.T) {
 	st, h := statusTestEnv(t)
-	cfg := model.DefaultStatusPage()
+	// 从当前配置起改：默认配置里 enabled 是关闭的，
+	// 直接用 model.DefaultStatusPage() 会把公开页一起关掉（v1.15.2 起的安全默认）。
+	cfg := st.StatusPage()
 	cfg.Blocks.Services = false
 	cfg.Blocks.History = false
 	st.SetStatusPage(cfg)
@@ -336,7 +343,9 @@ func TestStatusListVisibilityGatesMetadata(t *testing.T) {
 		t.Errorf("负载为 0 时应下发 load1=0，实际 %v（存在=%v）", v, ok)
 	}
 
-	cfg := model.DefaultStatusPage()
+	// 从当前配置起改：默认配置里 enabled 是关闭的，
+	// 直接用 model.DefaultStatusPage() 会把公开页一起关掉（v1.15.2 起的安全默认）。
+	cfg := st.StatusPage()
 	cfg.Visibility.OS = true
 	cfg.Visibility.Arch = true
 	cfg.Visibility.Cores = true
@@ -362,7 +371,9 @@ func TestStatusListVisibilityGatesMetadata(t *testing.T) {
 // 详情接口必须 404 而不是返回裁剪后的数据 —— 区块开关是入口开关。
 func TestStatusNodeDetailDisabled404(t *testing.T) {
 	st, h := statusTestEnv(t)
-	cfg := model.DefaultStatusPage()
+	// 从当前配置起改：默认配置里 enabled 是关闭的，
+	// 直接用 model.DefaultStatusPage() 会把公开页一起关掉（v1.15.2 起的安全默认）。
+	cfg := st.StatusPage()
 	cfg.Blocks.NodeDetail = false
 	st.SetStatusPage(cfg)
 	req := httptest.NewRequest(http.MethodGet, detailURL(st, "n1"), nil)
@@ -517,6 +528,7 @@ func TestPublicNodeHandleIsOpaque(t *testing.T) {
 // 保存顺序 → 公开页 payload 按该顺序下发 → 非法键被丢弃、缺失键补齐。
 func TestStatusPageSectionOrderRoundTrip(t *testing.T) {
 	st := store.New(t.TempDir())
+	enablePublicStatus(st)
 	srv := New(st, nil, nil, Config{AdminToken: "sections-test-token-123456"})
 	h := srv.Handler()
 

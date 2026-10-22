@@ -17,7 +17,7 @@ import (
 // 调用方以为拿到了写权限，直到某天才收到莫名的 401。
 func TestCreateAPITokenRejectsUnknownScope(t *testing.T) {
 	const tok = "scope-test-admin-token-123456"
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AdminToken: tok})
+	srv := New(publicStore(t), nil, nil, Config{AdminToken: tok})
 	h := srv.Handler()
 
 	post := func(body string) *httptest.ResponseRecorder {

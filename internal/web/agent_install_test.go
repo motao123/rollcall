@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestAgentInstallScriptIsSafeAndPublic 是「一条命令接入」的回归测试。
@@ -18,7 +16,7 @@ import (
 // HTTP 非回环时要求显式 --allow-insecure 才继续（下载的二进制会以 root 执行）、
 // 下载前在临时路径验证可执行。任何人可拉取（脚本本身无秘密）。
 func TestAgentInstallScriptIsSafeAndPublic(t *testing.T) {
-	srv := New(store.New(t.TempDir()), nil, nil, Config{})
+	srv := New(publicStore(t), nil, nil, Config{})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/install.sh", nil))
@@ -164,7 +162,7 @@ func hardeningDirectives(text string) map[string]bool {
 // 逐项一致。少一条沙箱指令不会让安装失败，只会让节点悄悄跑在更宽的权限下，
 // 而运维看的是仓库里那份文件。
 func TestAgentUnitHardeningMatchesDeployFile(t *testing.T) {
-	srv := New(store.New(t.TempDir()), nil, nil, Config{})
+	srv := New(publicStore(t), nil, nil, Config{})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/install.sh", nil))
 	if rec.Code != 200 {
@@ -203,7 +201,7 @@ func TestAgentChecksumEndpoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "rollcall-agent-linux-amd64"), content, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AgentDir: dir})
+	srv := New(publicStore(t), nil, nil, Config{AgentDir: dir})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/download.sha256?arch=amd64", nil))
@@ -236,7 +234,7 @@ func TestAgentDownloadServesConfiguredArchs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AgentDir: dir})
+	srv := New(publicStore(t), nil, nil, Config{AgentDir: dir})
 
 	// 未配置架构（arm64 缺失）→ 404
 	rec := httptest.NewRecorder()
@@ -266,7 +264,7 @@ func TestAgentDownloadServesConfiguredArchs(t *testing.T) {
 	}
 
 	// 未配置 AgentDir 的实例 → 404 且说明原因
-	srv2 := New(store.New(t.TempDir()), nil, nil, Config{})
+	srv2 := New(publicStore(t), nil, nil, Config{})
 	rec = httptest.NewRecorder()
 	srv2.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/download?arch=amd64", nil))
 	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "agent-dir") {

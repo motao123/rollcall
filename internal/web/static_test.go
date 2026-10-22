@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/motao123/rollcall/internal/store"
 )
 
 func staticReq(h http.Handler, path, accept, inm string) *httptest.ResponseRecorder {
@@ -28,7 +26,7 @@ func staticReq(h http.Handler, path, accept, inm string) *httptest.ResponseRecor
 // TestStaticAssetsGzipAndETag 静态 JS/CSS 必须支持 gzip 与 304 重校验，
 // 否则每次打开面板都要重新传约 300KB 资源。
 func TestStaticAssetsGzipAndETag(t *testing.T) {
-	h := New(store.New(t.TempDir()), nil, nil, Config{}).Handler()
+	h := New(publicStore(t), nil, nil, Config{}).Handler()
 	raw, err := assets.ReadFile("dist/app.js")
 	if err != nil {
 		t.Fatal(err)

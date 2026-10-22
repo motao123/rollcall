@@ -56,7 +56,7 @@ func TestEventHubNotifiesSubscribers(t *testing.T) {
 // TestStreamRequiresAuth 回归：事件流能给客户端"什么时候有数据"的信号，
 // 未鉴权时必须拒绝，否则等于把机群活跃度暴露给任何人。
 func TestStreamRequiresAuth(t *testing.T) {
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AdminToken: "stream-token-123456"})
+	srv := New(publicStore(t), nil, nil, Config{AdminToken: "stream-token-123456"})
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil)
@@ -149,7 +149,7 @@ func TestEventHubSubscriberCap(t *testing.T) {
 // TestStatusStreamIsPublic 回归：公开状态页的实时推送必须匿名可订阅，
 // 但仍只下发版本号，不泄露节点数据。
 func TestStatusStreamIsPublic(t *testing.T) {
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AdminToken: "stream-token-123456"})
+	srv := New(publicStore(t), nil, nil, Config{AdminToken: "stream-token-123456"})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

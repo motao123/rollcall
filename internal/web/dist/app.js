@@ -4393,6 +4393,18 @@ async function viewStatusPage() {
   const ann = cfg.announcement || {};
   state.data.nodes = nodes;
 
+  // 逐台可见性：勾选=公开。令牌/隐藏节点都在同一个表单里保存。
+  const hiddenSet = {};
+  (cfg.hiddenNodes || []).forEach((id) => { hiddenSet[id] = true; });
+  const noteMap = cfg.publicNotes || {};
+  const spNodeRows = nodes.length
+    ? nodes.map((n) => `<tr>
+        <td class="strong">${esc(n.name)}</td>
+        <td><input type="checkbox" data-hide-node="${esc(n.id)}" ${hiddenSet[n.id] ? '' : 'checked'}></td>
+        <td><input type="text" maxlength="120" placeholder="可选，公开可见" data-note-node="${esc(n.id)}" value="${esc(noteMap[n.id] || '')}"></td>
+      </tr>`).join('')
+    : '<tr><td colspan="3"><div class="empty">还没有节点</div></td></tr>';
+
   const visBoxes = STATUS_VIS_ITEMS.map(([k, label]) =>
     checkbox(label, 'vis_' + k, !!vis[k])).join('');
   const blockBoxes = STATUS_BLOCK_ITEMS.map(([k, label]) =>
@@ -4453,6 +4465,29 @@ async function viewStatusPage() {
         ${sectionActions('公开页 /status', '<a class="btn sm" href="/status" target="_blank" rel="noopener">打开公开页 ↗</a>')}
       </div>
       <form id="spForm" class="panel panel-pad form-stack">
+        <div class="field">
+          <span class="field-label">访问门槛</span>
+          <div class="grid-2">
+            ${checkbox('启用公开页（关闭后 /status 与 /api/status* 一律 404）', 'spEnabled', !!cfg.enabled)}
+            <div>
+              <span class="field-label">访问令牌（可选；留空表示知道地址即可访问）</span>
+              <div class="row-actions" style="gap:8px">
+                <input id="spToken" name="spToken" type="text" maxlength="64" value="${esc(cfg.token || '')}"
+                  placeholder="16–64 位字母 / 数字 / - / _">
+                <button type="button" class="btn sm" id="spTokenGen">生成</button>
+              </div>
+              <p class="field-hint">令牌会出现在链接里（?t=…）；怀疑外泄点「生成」即立刻换链，旧链接立即失效。</p>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <span class="field-label">逐台可见性</span>
+          <p class="field-hint">取消「对外公开」即从公开页隐藏（连详情页一起 404）；备注只在公开页显示，与台账里的内部备注互不影响。</p>
+          <div class="table-wrap"><table class="maint-table">
+            <thead><tr><th>节点</th><th style="width:96px">对外公开</th><th>公开备注</th></tr></thead>
+            <tbody>${spNodeRows}</tbody>
+          </table></div>
+        </div>
         <div class="grid-2">
           ${field('站点标题', 'title', cfg.title || '', { required: true, hint: '浏览器标签页与页面主标题' })}
           ${selectField('可用率日柱天数', 'historyDays', String(cfg.historyDays || 90),
@@ -4504,6 +4539,20 @@ async function viewStatusPage() {
       </table></div>
     </section>`;
 
+  // ---- 生成访问令牌（立即保存并生效）----
+  const genBtn = $('#spTokenGen');
+  if (genBtn) {
+    genBtn.onclick = async () => {
+      try {
+        const r = await adminApi('/api/admin/status-page/token', { method: 'POST' });
+        $('#spToken').value = r.token || '';
+        toast('已生成新令牌，旧链接立即失效');
+      } catch (err) {
+        toast('生成失败：' + err.message, 'err');
+      }
+    };
+  }
+
   // ---- 保存展示配置 ----
   $('#spForm').onsubmit = async (ev) => {
     ev.preventDefault();
@@ -4512,7 +4561,20 @@ async function viewStatusPage() {
     STATUS_VIS_ITEMS.forEach(([k]) => { vis[k] = f.querySelector(`[name="vis_${k}"]`).checked; });
     const blocks = {};
     STATUS_BLOCK_ITEMS.forEach(([k]) => { blocks[k] = f.querySelector(`[name="blk_${k}"]`).checked; });
+    const hiddenNodes = [];
+    f.querySelectorAll('[data-hide-node]').forEach((el) => {
+      if (!el.checked) hiddenNodes.push(el.dataset.hideNode);
+    });
+    const publicNotes = {};
+    f.querySelectorAll('[data-note-node]').forEach((el) => {
+      const v = el.value.trim();
+      if (v) publicNotes[el.dataset.noteNode] = v;
+    });
     const body = {
+      enabled: f.querySelector('[name="spEnabled"]').checked,
+      token: f.spToken.value.trim(),
+      hiddenNodes,
+      publicNotes,
       title: f.title.value.trim(),
       historyDays: parseInt(f.historyDays.value, 10) || 90,
       announcement: {

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/motao123/rollcall/internal/auth"
-	"github.com/motao123/rollcall/internal/store"
 )
 
 // TestAccountSaveFailureDoesNotLeakPath 回归：
@@ -36,7 +35,7 @@ func TestAccountSaveFailureDoesNotLeakPath(t *testing.T) {
 	}
 	badPath := filepath.Join(blocker, "admin-user.json")
 
-	srv := New(store.New(t.TempDir()), nil, nil, Config{
+	srv := New(publicStore(t), nil, nil, Config{
 		AdminToken: "hardening-admin-token-123456",
 		User:       u,
 		UserPath:   badPath,

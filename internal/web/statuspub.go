@@ -80,6 +80,8 @@ type statusNodePub struct {
 	// MaintenanceTitle 非空表示该节点正在计划维护中。
 	// 前端据此把状态点换成"维护中"并抑制"离线"措辞。
 	MaintenanceTitle string `json:"maintenanceTitle,omitempty"`
+	// Note 是公开备注（逐台配置），与内部 Note 完全分离。
+	Note string `json:"note,omitempty"`
 	// 资产类字段默认不公开，由 Visibility 控制。
 	Price     float64  `json:"price,omitempty"`
 	Currency  string   `json:"currency,omitempty"`
@@ -491,6 +493,12 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := n.ID
+	// 逐台隐藏同样作用于详情：否则"隐藏"只是列表里看不见，
+	// 知道句柄的人仍能拿到完整曲线。
+	if cfg.HiddenSet()[id] {
+		fail(w, 404, "node not found")
+		return
+	}
 
 	now := time.Now().Unix()
 	rangeKey, rangeResolution, rangeSince, rangeBucket := parseStatusRange(r.URL.Query().Get("range"), now)

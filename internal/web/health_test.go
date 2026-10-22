@@ -15,7 +15,11 @@ import (
 func newHealthServer(t *testing.T) http.Handler {
 	t.Helper()
 	const tok = "health-test-admin-token-123456"
-	return New(store.New(t.TempDir()), nil, nil, Config{AdminToken: tok}).Handler()
+	st := store.New(t.TempDir())
+	// 公开页自 v1.15.2 起默认关闭；这些用例只关心健康与上报，
+	// 先把公开页打开，避免被门槛挡在 404。
+	enablePublicStatus(st)
+	return New(st, nil, nil, Config{AdminToken: tok}).Handler()
 }
 
 // TestAdminHealthRequiresAuth 确认实例状态不对外泄漏。

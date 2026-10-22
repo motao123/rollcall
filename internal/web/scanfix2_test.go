@@ -70,6 +70,7 @@ func TestLimiterSweepKeepsInflight(t *testing.T) {
 // 下发出去，访客读到的是"机器空闲"，而真实情况是"没有数据"。
 func TestStatusLatestOmitsMetricsForUnreportedNode(t *testing.T) {
 	st := store.New(t.TempDir())
+	enablePublicStatus(st)
 	st.UpsertNode(&model.Node{ID: "n1", Name: "未上报"})
 	srv := New(st, nil, nil, Config{})
 	h := srv.Handler()
@@ -112,7 +113,7 @@ func TestStatusLatestOmitsMetricsForUnreportedNode(t *testing.T) {
 // 条件请求曾不限方法，POST/PUT 命中静态路径且 If-None-Match 匹配时返回 304，
 // 调用方会把"没执行"当成"成功"。
 func TestStaticConditionalOnlyForGET(t *testing.T) {
-	srv := New(store.New(t.TempDir()), nil, nil, Config{})
+	srv := New(publicStore(t), nil, nil, Config{})
 	h := srv.Handler()
 
 	// 先取一次拿 ETag
@@ -147,7 +148,7 @@ func TestStaticConditionalOnlyForGET(t *testing.T) {
 // 路径剩余部分直接当 ID 用，长度与字符集都不限，会把任意载荷带进日志与响应。
 func TestNodeByIDRejectsOversizedID(t *testing.T) {
 	const tok = "id-guard-token-123456"
-	srv := New(store.New(t.TempDir()), nil, nil, Config{AdminToken: tok})
+	srv := New(publicStore(t), nil, nil, Config{AdminToken: tok})
 	h := srv.Handler()
 
 	long := strings.Repeat("a", 300)
