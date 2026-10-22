@@ -1246,6 +1246,38 @@ function batchDialog(ids, title, bodyHTML, after, buildBody) {
   };
 }
 
+// openTrafficAdjustDialog 人工校正本周期已用流量。
+// 场景：月中才配好重置日、或机器从别处迁移过来，服务端没见过本周期已跑掉的量，
+// 不补录就永远和服务商面板对不上。填一次即可，之后的增量会继续累加。
+function openTrafficAdjustDialog(nodeId, currentUsed, after) {
+  const gb = (currentUsed / (1024 ** 3)).toFixed(2);
+  const d = openDialog('校正本周期已用流量', `
+    <p class="modal-text">按服务商面板上的数字填一次即可；写入后 Agent 的增量会继续在它之上累加。</p>
+    <div class="field">
+      <span class="field-label">本期已用（GB）</span>
+      <input id="adjGb" type="number" step="0.01" min="0" value="${gb}">
+      <p class="field-hint">当前记录 ${bytes(currentUsed)} · 填 0 表示本周期归零重算</p>
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn primary" type="button" id="adjOk">写入</button>
+    </div>`);
+  d.querySelector('#adjOk').onclick = async () => {
+    const val = Number(d.querySelector('#adjGb').value);
+    if (!Number.isFinite(val) || val < 0) { toast('请填写非负数字', 'err'); return; }
+    try {
+      const r = await adminApi(`/api/admin/nodes/${encodeURIComponent(nodeId)}/traffic-adjust`, {
+        method: 'POST', body: JSON.stringify({ usedGb: val }),
+      });
+      d.close();
+      toast(`已校正为 ${bytes(r.after)}`);
+      if (after) after();
+    } catch (err) {
+      toast('校正失败：' + err.message, 'err');
+    }
+  };
+}
+
 function openBatchTrafficDialog(ids, after) {
   batchDialog(ids, '批量设置流量配额', `
     <div class="grid-2">
@@ -1446,7 +1478,10 @@ async function viewNodeDetail(id) {
         <div class="panel panel-pad">
           <div class="panel-head">
             <span class="panel-title">流量配额</span>
-            <button class="btn tiny" id="quotaEditBtn" type="button">设置</button>
+            <div class="row-actions">
+              <button class="btn tiny" id="quotaAdjustBtn" type="button" title="把本周期已用量直接改成服务商面板上的数字">校正本期</button>
+              <button class="btn tiny" id="quotaEditBtn" type="button">设置</button>
+            </div>
           </div>
           ${quotaBytes > 0 ? `
             <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
@@ -1488,6 +1523,10 @@ async function viewNodeDetail(id) {
   };
   const nodeEditBtn = $('#nodeEditBtn');
   const assetEditBtn = $('#assetEditBtn');
+  const quotaAdjustBtn = $('#quotaAdjustBtn');
+  if (quotaAdjustBtn) {
+    quotaAdjustBtn.onclick = () => openTrafficAdjustDialog(n.id, trafficUsed, () => viewNodeDetail(id));
+  }
   const quotaEditBtn = $('#quotaEditBtn');
   if (nodeEditBtn) nodeEditBtn.onclick = openDetailEdit;
   if (assetEditBtn) assetEditBtn.onclick = openDetailEdit;

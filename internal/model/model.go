@@ -223,6 +223,9 @@ type Alert struct {
 	Value       float64 `json:"value"`
 	StartedAt   int64   `json:"startedAt"`
 	ResolvedAt  int64   `json:"resolvedAt"` // 0 表示仍在持续
+	// Metric 是触发该告警的规则指标，仅用于引擎内部判断（如离线告警合并），
+	// 不进 JSON：它属于规则而不是告警实例，下发出去只会让前端多一个不可信的字段。
+	Metric string `json:"-"`
 }
 
 // Renewal 是一条人工登记的续费记录，用于续费日历与成本回溯。

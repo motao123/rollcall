@@ -145,6 +145,9 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	s.clearInitialPassword()
 	s.auditAuth(r, "auth.login", u.Username, "session", http.StatusOK, "")
 	log.Printf("面板登录成功 user=%s ip=%s", u.Username, ip)
+	// 登录通知：只报账号/来源/第二因素，不报密码与令牌。
+	// 管理员一天登录几次，不做节流——异常登录正是最该立刻被看见的一条。
+	s.notifyLogin(u.Username, ip, loginMethod(u))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"user":          u.PublicInfo(),

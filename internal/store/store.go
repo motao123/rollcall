@@ -1266,19 +1266,59 @@ func (s *Store) SetAgentVersion(nodeID, ver string) {
 // SetNodeIP 记录最近一次通过鉴权上报的来源 IP。
 // 与 SetAgentVersion 同样只在变化时落盘：13 台节点 30 秒一报，
 // 每次保存都唤醒快照队列毫无意义，而 IP 变动本身极少。
-func (s *Store) SetNodeIP(nodeID, ip string) {
+func (s *Store) SetNodeIP(nodeID, ip string) (prev string, changed bool) {
 	if ip == "" {
-		return
+		return "", false
 	}
 	s.mu.Lock()
 	n, ok := s.nodes[nodeID]
-	if !ok || n.LastIP == ip {
+	if !ok {
 		s.mu.Unlock()
-		return
+		return "", false
 	}
+	if n.LastIP == ip {
+		s.mu.Unlock()
+		return ip, false
+	}
+	prev = n.LastIP
 	n.LastIP = ip
 	s.mu.Unlock()
 	s.RequestSave()
+	return prev, true
+}
+
+// AdjustTrafficUsed 把节点当前周期的用量直接改成 want（按当前计费口径）。
+//
+// 用途是"和服务商面板对账"：月中才配好重置日时，本周期已经跑掉的量拿不到，
+// 只能人工补录一次。实现上把 want 折算进 UsedRx/UsedTx，随后 Agent 的增量
+// 继续在它之上累加 —— 因此必须保留 LastRx/LastTx 作为增量基线，不能一起清掉。
+func (s *Store) AdjustTrafficUsed(nodeID string, want uint64) (model.TrafficUsage, bool) {
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		s.mu.Unlock()
+		return model.TrafficUsage{}, false
+	}
+	tc := s.traffic[nodeID]
+	if tc == nil {
+		// 还没有本周期记录：先建一个空周期，基线留 0，下一次上报会补上。
+		tc = &model.TrafficCycle{Start: trafficCycleStart(time.Now(), n.TrafficResetDay)}
+		s.traffic[nodeID] = tc
+	}
+	// 按口径把 want 落到收发两个计数器上，保证 TrafficUsage.Used 恰好等于 want。
+	switch model.NormalizeTrafficMode(n.TrafficMode) {
+	case model.TrafficModeRx:
+		tc.UsedRx, tc.UsedTx = want, 0
+	case model.TrafficModeTx:
+		tc.UsedRx, tc.UsedTx = 0, want
+	case model.TrafficModeMax:
+		tc.UsedRx, tc.UsedTx = want, want
+	default: // sum
+		tc.UsedRx, tc.UsedTx = want, 0
+	}
+	s.mu.Unlock()
+	s.RequestSave()
+	return s.TrafficUsage(nodeID), true
 }
 
 func (s *Store) Host(nodeID string) model.HostInfo {

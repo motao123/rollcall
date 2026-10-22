@@ -38,9 +38,21 @@ type Engine struct {
 	recAt  map[string]int64        // ruleID|nodeID -> 最近一次恢复时间，用于抖动抑制
 	states map[string]string       // nodeID -> 上一轮状态，用于活动流上下线事件
 	notify func(notify.Message)    // 投递回调（nil 表示不通知）
-	repeat int                     // 重复通知间隔（秒），0=不重复
-	link   string                  // 面板地址，拼进通知
-	clk    func() int64            // 取当前 Unix 秒，测试可替换
+	// batching/batch 用于把同一轮评估里的离线/恢复合并成一条消息。
+	// 机房整体掉线时原来是"每台一条、每 30 秒最多 8 条"，能连刷好几分钟。
+	batching bool
+	batch    []batchItem
+	repeat   int          // 重复通知间隔（秒），0=不重复
+	link     string       // 面板地址，拼进通知
+	clk      func() int64 // 取当前 Unix 秒，测试可替换
+}
+
+// batchItem 是一条待合并的离线/恢复通知。
+type batchItem struct {
+	alert    *model.Alert
+	resolved bool
+	ts       int64
+	link     string
 }
 
 // SetClock 替换时间源。
@@ -167,6 +179,16 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 	e.mu.Unlock()
 	if fn == nil {
 		return
+	}
+	// 离线/恢复在评估过程中先攒起来，等这一轮结束再决定是单条还是合并。
+	if a.Metric == "offline" {
+		e.mu.Lock()
+		if e.batching {
+			e.batch = append(e.batch, batchItem{alert: a, resolved: resolved, ts: ts, link: link})
+			e.mu.Unlock()
+			return
+		}
+		e.mu.Unlock()
 	}
 
 	fn(notify.Message{
@@ -352,10 +374,130 @@ func (e *Engine) trackNodeStates(nodes []*model.Node, now int64) {
 	}
 }
 
+// flushOfflineBatch 把本轮攒下的离线/恢复通知投递出去。
+//
+// 单台保持原来的逐条消息（标题=规则名、正文=该节点描述），
+// 两台以上合成一条：标题给出数量，正文按"名称、名称、名称（共 N 台）"列出。
+// 合并只发生在同一轮评估内——跨轮次的离线仍然各自成条，
+// 否则一台缓慢掉线会把另一台几分钟前的告警也吞进同一条消息里。
+func (e *Engine) flushOfflineBatch() {
+	e.mu.Lock()
+	items := e.batch
+	e.batch = nil
+	e.mu.Unlock()
+	if len(items) == 0 {
+		return
+	}
+	if len(items) == 1 {
+		it := items[0]
+		e.emit(it.alert, it.resolved, it.ts, it.link)
+		return
+	}
+
+	var down, up []batchItem
+	for _, it := range items {
+		if it.resolved {
+			up = append(up, it)
+		} else {
+			down = append(down, it)
+		}
+	}
+	e.emitMerged(down, false)
+	e.emitMerged(up, true)
+}
+
+// emitMerged 投递一组（>=2 台）合并通知。
+func (e *Engine) emitMerged(items []batchItem, resolved bool) {
+	if len(items) == 0 {
+		return
+	}
+	if len(items) == 1 {
+		it := items[0]
+		e.emit(it.alert, it.resolved, it.ts, it.link)
+		return
+	}
+	names := make([]string, 0, len(items))
+	sev := "info"
+	ruleID, ruleName := items[0].alert.RuleID, items[0].alert.RuleName
+	sameRule := true
+	for _, it := range items {
+		names = append(names, it.alert.NodeName)
+		if notify.SeverityRank(it.alert.Severity) > notify.SeverityRank(sev) {
+			sev = it.alert.Severity
+		}
+		if it.alert.RuleID != ruleID {
+			sameRule = false
+		}
+	}
+	if !sameRule {
+		// 不同规则不共用 RuleID：否则静默只按其中一条规则生效，
+		// 用户会以为"整类离线都被静默了"。
+		ruleID, ruleName = "", ""
+	}
+	title := fmt.Sprintf("%d 台节点失联", len(items))
+	verb := "失联"
+	if resolved {
+		title = fmt.Sprintf("%d 台节点恢复", len(items))
+		verb = "恢复"
+	}
+	body := fmt.Sprintf("%s %s（同一轮检测）", strings.Join(names, "、"), verb)
+	e.emitMessage(notify.Message{
+		Title:    title,
+		Body:     body,
+		Severity: sev,
+		RuleID:   ruleID,
+		RuleName: ruleName,
+		Resolved: resolved,
+		TS:       items[0].ts,
+		Link:     items[0].link,
+	})
+}
+
+// emit 按单条告警的原始形态投递（与合并前的行为一致）。
+func (e *Engine) emit(a *model.Alert, resolved bool, ts int64, link string) {
+	e.emitMessage(notify.Message{
+		Title:    a.RuleName,
+		Severity: a.Severity,
+		NodeName: a.NodeName,
+		NodeID:   a.NodeID,
+		RuleID:   a.RuleID,
+		RuleName: a.RuleName,
+		AlertID:  a.ID,
+		Value:    a.Value,
+		Resolved: resolved,
+		TS:       ts,
+		Link:     link,
+		Body:     a.Message,
+	})
+}
+
+func (e *Engine) emitMessage(m notify.Message) {
+	e.mu.Lock()
+	fn := e.notify
+	e.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(m)
+}
+
 // Evaluate 执行一轮评估。
 func (e *Engine) Evaluate() {
 	e.evalMu.Lock()
 	defer e.evalMu.Unlock()
+
+	// 本轮内的离线/恢复先攒着，结束时统一投递：
+	// 单台照旧一条，多台合成一条（机房掉线不再刷屏）。
+	e.mu.Lock()
+	e.batching = true
+	e.batch = nil
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.batching = false
+		e.mu.Unlock()
+		e.flushOfflineBatch()
+	}()
 
 	nodes := e.st.Nodes()
 	rules := e.st.Rules()
@@ -461,6 +603,7 @@ func (e *Engine) Evaluate() {
 						NodeID: n.ID, NodeName: n.Name,
 						Severity: rule.Severity, Value: val,
 						Message: fmt.Sprintf("%s 的「%s」已恢复", n.Name, rule.Name),
+						Metric:  rule.Metric,
 					}
 					if prev != nil {
 						a.ID = prev.ID
@@ -502,6 +645,8 @@ func (e *Engine) Evaluate() {
 				Value:     val,
 				Message:   describe(rule, n.Name, val),
 				StartedAt: first,
+				// 仅供引擎内部判断（离线合并），不出现在 API 里。
+				Metric: rule.Metric,
 			}
 			isNew, exists := e.st.OpenAlert(a)
 			if !exists {

@@ -55,6 +55,10 @@ type Server struct {
 	outbox     *outbox.Manager
 	notifyErr  error
 
+	// opNotifyMu/opNotifyAt 是运营类通知的去重窗口（IP 变更等）。
+	opNotifyMu sync.Mutex
+	opNotifyAt map[string]int64
+
 	// userMu 保护 user 指针：账号修改时整体替换副本，读方拿到指针后
 	// 可安全使用（User 一经发布不再原地修改）。
 	userMu sync.RWMutex
@@ -700,7 +704,11 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 	// 来源 IP 只记通过鉴权的那一次：面板据此排查「这台机器从哪个地址连过来」。
 	// trustedProxies 生效时取 X-Forwarded-For 的第一跳，否则用直连地址。
-	s.st.SetNodeIP(node.ID, clientIP(r, s.trustedProxies))
+	ip := clientIP(r, s.trustedProxies)
+	if prev, changed := s.st.SetNodeIP(node.ID, ip); changed {
+		// 旧值为空表示首次接入，notifyIPChange 内部会忽略，不刷噪音。
+		s.notifyIPChange(node, prev, ip)
+	}
 
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
@@ -1737,6 +1745,10 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 	if rotate {
 		id = strings.TrimSuffix(id, "/rotate-token")
 	}
+	adjust := strings.HasSuffix(id, "/traffic-adjust")
+	if adjust {
+		id = strings.TrimSuffix(id, "/traffic-adjust")
+	}
 	// ID 直接来自 URL 剩余部分：长度与字符集不设限时，超长 ID 会进入
 	// 日志、错误响应与走查逻辑（且每次都要复制一遍整段路径）。
 	if id == "" {
@@ -1754,6 +1766,14 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleRotateNodeToken(w, id)
+		return
+	}
+	if adjust {
+		if r.Method != http.MethodPost {
+			fail(w, 405, "method not allowed")
+			return
+		}
+		s.handleNodeTrafficAdjust(w, r, id)
 		return
 	}
 	switch r.Method {
