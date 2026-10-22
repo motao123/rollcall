@@ -156,6 +156,18 @@ func (m *Manager) loop() {
 		t := time.NewTimer(wait)
 		select {
 		case <-t.C:
+			// ★ 定时器一旦排定就固定了 deadline，而 RunNow（手动触发或
+			// 上一次定时执行）会把 m.next 往后推。到点后必须重新确认：
+			// 若 next 已被推后，说明这次运行已经有人做过了 —— 直接再跑
+			// 会立刻多出一份重复备份，在 keep=14 时挤掉一份历史。
+			// 实测路径：启动时首次运行排在 30 秒后，期间手动点「立即备份」
+			// 仍会在 30 秒到点补跑一次。
+			m.mu.Lock()
+			due := m.next
+			m.mu.Unlock()
+			if time.Now().Before(due) {
+				continue
+			}
 			if _, err := m.RunNow(); err != nil {
 				log.Printf("自动备份失败: %v", err)
 			}
