@@ -103,9 +103,12 @@ func TestAPITokenPathScopeAndShortExpiry(t *testing.T) {
 			t.Errorf("%s 应拒绝，实际 %d", path, w.Code)
 		}
 	}
-	// 含 .. 的路径先被 ServeMux 重定向；跟随到清理后的 n10 仍必须被拒绝。
-	if w := bearerReq(h, http.MethodGet, "/api/nodes/n1/../n10", rawNode, ""); w.Code != http.StatusTemporaryRedirect {
-		t.Errorf("越界路径应被重定向，实际 %d", w.Code)
+	// 含 .. 的路径先被 ServeMux 清理并重定向。
+	// ★ 重定向码随 Go 版本变化（1.24 及更早用 301，1.25+ 改成 308 以保留请求方法），
+	// 断言具体数字会让 CI（钉 1.24）与本地（更新版本）结论相反。
+	// 真正要守的性质是：跟随后到达的清理路径（n10）仍被拒绝 —— 见下一段断言。
+	if w := bearerReq(h, http.MethodGet, "/api/nodes/n1/../n10", rawNode, ""); w.Code < 300 || w.Code >= 400 {
+		t.Errorf("越界路径应先被重定向，实际 %d", w.Code)
 	}
 	if w := bearerReq(h, http.MethodGet, "/api/nodes/n10", rawNode, ""); w.Code != http.StatusUnauthorized {
 		t.Errorf("重定向后的越界路径应拒绝，实际 %d", w.Code)

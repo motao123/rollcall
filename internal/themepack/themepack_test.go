@@ -119,8 +119,15 @@ func TestLoadRejectsSymlink(t *testing.T) {
 	writeFile(t, filepath.Join(dir, ManifestName), `{}`)
 	outside := filepath.Join(t.TempDir(), "secret.css")
 	writeFile(t, outside, "body{}")
-	if err := os.Symlink(outside, filepath.Join(dir, CSSName)); err != nil {
+	link := filepath.Join(dir, CSSName)
+	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("当前系统不支持符号链接: %v", err)
+	}
+	// ★ 必须回读确认链接真的建出来了：某些受限环境（Windows 无特权、
+	// 沙箱拦截）里 os.Symlink 会**返回 nil 却没有创建任何东西**，
+	// 于是 Load 报的是"至少需要 status.css"，测试会误判成产品缺陷。
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Skip("当前环境未真正创建符号链接，跳过")
 	}
 	if _, err := Load(root, "linked"); err == nil || !strings.Contains(err.Error(), "符号链接不接受") {
 		t.Fatalf("符号链接必须拒绝，实际 %v", err)
