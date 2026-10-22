@@ -1223,6 +1223,7 @@ rollcall/
 │           └── status.js    公开页渲染：路由、增量刷新、手绘 SVG 图表
 ├── deploy/                  systemd 单元与配置样例
 ├── docs/operations.md       备份、升级、插件、自更新与故障排查
+├── docs/comparison-kpanel-2026-10-22.md  对照 KPanel 竞品页的 44 项差距与改进清单
 ├── .github/workflows/ci.yml gofmt / vet / test / -race / 交叉编译
 └── LICENSE                  MIT
 ```
