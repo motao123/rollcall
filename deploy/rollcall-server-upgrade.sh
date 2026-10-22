@@ -42,7 +42,7 @@ SIGNATURE=
 ROLLSIGN=
 ALLOW_UNSIGNED=0
 LOCK=/run/rollcall-upgrade.lock
-TMP=
+STAGE=
 PREV=
 # 非空时要求 /readyz 报告的版本与目标二进制一致，
 # 防止 systemd 仍拉起旧文件/旧路径时误判升级成功。
@@ -58,7 +58,7 @@ usage() {
 }
 
 cleanup() {
-  [ -n "$TMP" ] && rm -rf "$TMP"
+  [ -n "$STAGE" ] && rm -f "$STAGE"
   [ -n "$PREV" ] && rm -f "$PREV"
   # 锁目录里现在有 pid 文件，rmdir 会失败（目录非空），必须整目录删。
   # $LOCK 是本脚本创建的固定路径，不会误删别的东西。
@@ -292,13 +292,20 @@ cmd_upgrade() {
   [ -f "$BIN" ] || die "未找到当前版本: $BIN（首次安装请使用部署文档中的安装步骤）"
   take_lock
 
-  TMP=$(mktemp -d "${TMPDIR:-/tmp}/rollcall-upgrade.XXXXXX") || die "创建临时目录失败"
-  new=$TMP/rollcall-server
+  # ★ 暂存文件必须落在 $BIN 所在目录：`mv` 只有同文件系统内才是原子的。
+  # 放 /tmp 时若 /tmp 是 tmpfs（生产机就是），mv 退化为「拷贝 + 删除」，
+  # 中途断电/崩溃会在服务路径上留下截断的二进制，服务直接起不来。
+  # 目录不可写时（只读挂载、权限不足）在这里就失败，不会等到替换阶段。
+  stage_dir=$(dirname "$BIN")
+  STAGE=$(mktemp "$stage_dir/.rollcall-upgrade.XXXXXX") ||
+    die "在 $stage_dir 创建暂存文件失败（目录是否可写？）"
+  new=$STAGE
   if [ -n "$url" ]; then
     log "下载 $url"
     download "$url" "$new"
   else
     [ -f "$file" ] || die "文件不存在: $file"
+    # 同文件系统内 cp 也更快，且不会因为源在 /tmp 而把暂存文件放错位置。
     cp "$file" "$new" || die "复制新二进制失败"
   fi
 

@@ -392,6 +392,58 @@ rm -f /tmp/restore.json backup.json
 备份密码至少 8 位且不会被保存；忘记密码只能重新导出。管理令牌、账号哈希与
 `session.key` 不在配置备份中，仍应随整目录备份一起保护。
 
+### 自动加密备份调度（v1.14+）
+
+面板内导出需要人点一次；无人值守的定期备份用启动参数开启，与手动导出共用同一套加密与恢复接口：
+
+```bash
+# 1) 备份密码（服务用户可读即可；不要放进 Environment=，那样会出现在 systemctl show）
+sudo sh -c 'base64 /dev/urandom | head -c 32 > /opt/rollcall/backup.pass'
+sudo chown rollcall:rollcall /opt/rollcall/backup.pass
+sudo chmod 0400 /opt/rollcall/backup.pass
+
+# 2) 找到承载 ExecStart 的 drop-in（不同部署可以是 private-targets.conf 或 10-*.conf）
+systemctl cat rollcall-server | grep -n '^ExecStart=/'
+
+# 3) 在该行行尾追加备份参数：先备份文件，再就地追加
+#    ★ 必须先判重：sed 每执行一次都会再追加一遍，参数会重复却不会报错
+DROPIN=/etc/systemd/system/rollcall-server.service.d/private-targets.conf
+sudo cp -p "$DROPIN" "$DROPIN.bak"
+if ! grep -q -- '-backup-password-file' "$DROPIN"; then
+  sudo sed -i 's|^\(ExecStart=/opt/rollcall/rollcall-server.*\)$|\1 -backup-password-file /opt/rollcall/backup.pass -backup-interval 24h -backup-keep 14|' "$DROPIN"
+fi
+grep -c -- '-backup-password-file' "$DROPIN"   # 必须是 1
+
+sudo systemctl daemon-reload && sudo systemctl restart rollcall-server
+curl -s -H "X-Admin-Token: $(sudo cat /opt/rollcall/data/admin.token)" \
+  http://127.0.0.1:19080/api/admin/backup/auto | grep -o '"enabled":[a-z]*'
+```
+
+> 备份参数必须和其余参数写在**同一条** `ExecStart` 上：systemd 只允许一条
+> `ExecStart`（多条需要 `ExecStart=` 先清空再重写，写错会起不来）；
+> `-backup-dir` 默认 `<data>/backups`，已在 `ReadWritePaths` 内，无需额外授权。
+
+- 参数：`-backup-interval`（1m–30d，默认 24h）、`-backup-keep`（1–365，默认 14）、
+  `-backup-dir`（默认 `<data>/backups`）；密码也可用 `ROLLCALL_BACKUP_PASSWORD` 传入，
+  但环境变量会出现在 `systemctl show` 与 `/proc/<pid>/environ`，不推荐
+- **写后即解密校验**：落盘后立刻用同一密码解密比对，"文件生成了"不等于"将来能恢复"；
+  校验失败会记 `lastError` 并保留上一份可用备份
+- 启动时首次运行排在 30 秒后；**手动触发会推迟这次排期**，不会产生重复备份（v1.14.1 起）
+- 查看状态与立即执行：
+
+```bash
+TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
+curl -s -H "X-Admin-Token: $TOKEN" http://127.0.0.1:19080/api/admin/backup/auto | jq .
+curl -s -X POST -H "X-Admin-Token: $TOKEN" http://127.0.0.1:19080/api/admin/backup/auto/run | jq .
+```
+
+状态含 `lastAt / lastFile / lastSize / lastChecksum / nextAt / runs / failures / files[]`，
+`backup-status.json` 与备份同目录（0600）。恢复仍走 `/api/admin/restore`，步骤见上一节。
+
+> **密码丢了备份就解不开。** 密码文件与备份放在同一台机器只能防"备份文件单独泄露"，
+> 建议复制到密码管理器后删除本机副本，并把 `.rcbk` 同步到异地（`rsync`/对象存储）。
+> 主题包（`data/themes/`）与指标历史**不在**配置备份内，需单独同步。
+
 ### 历史数据分层
 
 | 分辨率 | 默认保留期 | 用途 |
@@ -522,7 +574,7 @@ sudo systemctl start rollcall-server
 
 - `read`：只读接口；`admin`：全部接口（含写操作）
 - 明文只在创建响应中出现一次，服务端仅保存 SHA-256 摘要；列表只显示前缀
-- `expiresMinutes` 支持最短 30 分钟的短期令牌（上限 10 年）；`expiresDays` 仍兼容，
+- `expiresMinutes` 最短 1 分钟（界面预置 30 分钟起）、上限 10 年；`expiresDays` 仍兼容，
   两者只能二选一（0 表示不过期）；到期后请求返回 401
 - `paths` 可把令牌收窄到 `/api` 下的路径前缀（如 `/api/overview`、`/api/nodes/<id>`）；
   按路径段边界匹配，`/api/nodes/n1` 不会放行 `/api/nodes/n10`；留空表示全部
@@ -549,6 +601,29 @@ sudo systemctl restart rollcall-agent
 sudo runuser -u rollcall-agent -- \
   /usr/local/bin/rollcall-agent -config /etc/rollcall/agent.json -once
 ```
+
+### 管理操作审计（v1.14+）
+
+所有 `/api/admin/*` 与 `/api/export/*` 的**写操作**都会记一条审计（GET 不记）：
+动作名（如 `nodes.update`、`tokens.create`、`backup.restore`）、操作者、身份类型
+（`session` / `admin-token` / `api-token`）、来源 IP、方法、路径、响应状态码。
+
+- **只记元数据，绝不读取请求体** —— 请求体里可能有密码、令牌与私钥
+- 落盘 `<data>/audit.jsonl`（0600，逐行 JSON，追加写），内存里保留最近若干条供快速查询；
+  保留 90 天，超期由后台自动裁剪
+- 查询：`GET /api/admin/audit?limit=50&offset=0&actor=&action=&q=&range=7d|30d|90d`，
+  返回 `entries` / `total` / `stats`（`count`、`earliest`、`latest`、`retentionDays`）
+- 容量与保留策略可看 `GET /api/admin/storage`
+- 审计文件**不在**加密配置备份内（它是日志而非配置）；需要长期留存时随整目录备份一起归档
+
+```bash
+TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
+curl -s -H "X-Admin-Token: $TOKEN" \
+  'http://127.0.0.1:19080/api/admin/audit?range=7d&action=tokens.delete' | jq '.total, .entries[0]'
+```
+
+> 审计记录的是"谁在什么时候改了什么"，不含旧值与新值。需要追配置差异时，
+> 用 `backup` 导出的加密备份做前后对比。
 
 ---
 
