@@ -113,6 +113,21 @@ sudo install -m 0644 rollcall-release.pub /etc/rollcall/release.pub
 sudo install -m 0755 rollsign-linux-amd64 /opt/rollcall/rollsign
 ```
 
+装好公钥后**升级流程会变**，先确认这两点再动手：
+
+- 每次升级必须带 `--signature`（签名文件随发布页提供，或自己用 `make sign-release` 生成）；
+  忘带会直接失败，`--allow-unsigned` 也会因为"与公钥冲突"被拒绝 —— 这是设计如此
+- 每次发版都要同步维护签名：CI 只产二进制与 `SHA256SUMS`，`.sig` 只能在签名机上生成，
+  **私钥丢了就只能换一把新的公钥**（旧签名全部失效，需重新分发 `release.pub`）
+
+```bash
+# 从发布页取二进制与签名，两者一起校验
+curl -fsSLO .../v1.14.1/rollcall-server-linux-amd64
+curl -fsSLO .../v1.14.1/rollcall-server-linux-amd64.sig
+sudo sh deploy/rollcall-server-upgrade.sh upgrade \
+  --file rollcall-server-linux-amd64 --signature rollcall-server-linux-amd64.sig
+```
+
 升级与回滚：
 
 ```bash
