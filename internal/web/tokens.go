@@ -193,22 +193,31 @@ func newAPIToken() (string, error) {
 	return APITokenPrefix + hex.EncodeToString(raw), nil
 }
 
-// apiTokenOK 校验 Authorization: Bearer rct_... 令牌。
-func (s *Server) apiTokenOK(r *http.Request, needAdmin bool) bool {
+// matchAPIToken 解析并校验 Authorization: Bearer rct_... 令牌。
+func (s *Server) matchAPIToken(r *http.Request) (*model.APIToken, bool) {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
 	if len(h) < 8 || !strings.EqualFold(h[:7], "Bearer ") {
-		return false
+		return nil, false
 	}
 	raw := strings.TrimSpace(h[7:])
 	if !strings.HasPrefix(raw, APITokenPrefix) {
-		return false
+		return nil, false
 	}
 	t, ok := s.st.MatchAPIToken(hashAPIToken(raw), time.Now().Unix())
 	if !ok {
-		return false
+		return nil, false
 	}
 	// 先清理路径再比对：/api/nodes/n1/../n10 不能因为前缀命中而越界到 n10。
 	if !t.AllowsPath(path.Clean(r.URL.Path)) {
+		return nil, false
+	}
+	return t, true
+}
+
+// apiTokenOK 校验 Authorization: Bearer rct_... 令牌。
+func (s *Server) apiTokenOK(r *http.Request, needAdmin bool) bool {
+	t, ok := s.matchAPIToken(r)
+	if !ok {
 		return false
 	}
 	if needAdmin && !t.HasScope("admin") {

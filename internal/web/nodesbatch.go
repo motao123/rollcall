@@ -26,9 +26,18 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()
 	var req struct {
-		IDs    []string `json:"ids"`
-		Action string   `json:"action"` // group | provider | region | expire | currency | delete
-		Value  string   `json:"value"`
+		IDs      []string `json:"ids"`
+		Action   string   `json:"action"` // group | provider | region | expire | currency | weight | favorite | traffic | tags | delete
+		Value    string   `json:"value"`
+		Weight   *int     `json:"weight,omitempty"`
+		Favorite *bool    `json:"favorite,omitempty"`
+		// tags 相关：TagMode 决定追加、移除还是整体替换。
+		Tags    []string `json:"tags,omitempty"`
+		TagMode string   `json:"tagMode,omitempty"`
+		// traffic 相关：三个字段一起写入，未给出的按清除处理。
+		TrafficQuotaGB  *float64 `json:"trafficQuotaGb,omitempty"`
+		TrafficResetDay *int     `json:"trafficResetDay,omitempty"`
+		TrafficMode     string   `json:"trafficMode,omitempty"`
 	}
 	if err := dec.Decode(&req); err != nil {
 		fail(w, 400, "bad json: "+err.Error())
@@ -89,6 +98,46 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "币种只支持 USD / CNY")
 			return
 		}
+	case "weight":
+		if req.Weight == nil || *req.Weight < -1000 || *req.Weight > 1000 {
+			fail(w, 400, "weight 必须在 -1000–1000 之间")
+			return
+		}
+	case "favorite":
+		if req.Favorite == nil {
+			fail(w, 400, "favorite 参数缺失")
+			return
+		}
+	case "traffic":
+		if req.TrafficQuotaGB == nil || *req.TrafficQuotaGB < 0 || *req.TrafficQuotaGB > 1000000 {
+			fail(w, 400, "trafficQuotaGb 必须在 0–1000000 之间")
+			return
+		}
+		if req.TrafficResetDay == nil || *req.TrafficResetDay < 0 || *req.TrafficResetDay > 28 {
+			fail(w, 400, "trafficResetDay 必须在 0–28 之间")
+			return
+		}
+		req.TrafficMode = strings.ToLower(strings.TrimSpace(req.TrafficMode))
+		if !model.ValidTrafficMode(req.TrafficMode) {
+			fail(w, 400, "trafficMode 只能是 sum / rx / tx / max")
+			return
+		}
+	case "tags":
+		switch req.TagMode {
+		case "add", "remove", "replace":
+		default:
+			fail(w, 400, "tagMode 只能是 add / remove / replace")
+			return
+		}
+		req.Tags = normalizeTags(req.Tags)
+		if len(req.Tags) == 0 {
+			fail(w, 400, "tags 不能为空")
+			return
+		}
+		if req.TagMode == "replace" && len(req.Tags) > 8 {
+			fail(w, 400, "单节点最多 8 个标签")
+			return
+		}
 	case "delete":
 	default:
 		fail(w, 400, "未知操作: "+req.Action)
@@ -115,12 +164,64 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 				n.ExpireAt = req.Value
 			case "currency":
 				n.Currency = req.Value
+			case "weight":
+				n.Weight = *req.Weight
+			case "favorite":
+				n.Favorite = *req.Favorite
+			case "traffic":
+				n.TrafficQuotaGB = *req.TrafficQuotaGB
+				n.TrafficResetDay = *req.TrafficResetDay
+				n.TrafficMode = req.TrafficMode
+			case "tags":
+				switch req.TagMode {
+				case "replace":
+					n.Tags = append([]string(nil), req.Tags...)
+				case "add":
+					n.Tags = mergeNodeTags(n.Tags, req.Tags)
+				case "remove":
+					n.Tags = removeNodeTags(n.Tags, req.Tags)
+				}
 			}
 		}) {
 			changed++
 		}
 	}
 	writeJSON(w, 200, map[string]any{"changed": changed, "action": req.Action})
+}
+
+// mergeNodeTags 把 add 合并进原标签，保留原顺序，最多 8 个。
+func mergeNodeTags(old, add []string) []string {
+	out := append([]string(nil), old...)
+	seen := make(map[string]bool, len(out))
+	for _, t := range out {
+		seen[t] = true
+	}
+	for _, t := range add {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
+// removeNodeTags 从原标签中移除指定项。
+func removeNodeTags(old, drop []string) []string {
+	del := make(map[string]bool, len(drop))
+	for _, t := range drop {
+		del[t] = true
+	}
+	out := make([]string, 0, len(old))
+	for _, t := range old {
+		if !del[t] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // validDate 校验 YYYY-MM-DD。台账里的到期日一直是这个格式，

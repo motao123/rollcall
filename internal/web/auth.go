@@ -77,10 +77,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Identifier = strings.TrimSpace(in.Identifier)
 	if in.Identifier == "" || len(in.Identifier) > 254 || in.Password == "" || len(in.Password) > 1024 {
+		s.auditAuth(r, "auth.login_failed", auditName(in.Identifier), "login", http.StatusUnauthorized, "invalid credentials")
 		fail(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 	if !u.Authenticate(in.Identifier, in.Password) {
+		s.auditAuth(r, "auth.login_failed", auditName(in.Identifier), "login", http.StatusUnauthorized, "invalid credentials")
 		fail(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
@@ -88,6 +90,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// 由前端切换到验证码输入步骤；不存在的账号不会走到这里。
 	if u.TOTPEnabled {
 		if strings.TrimSpace(in.TOTP) == "" {
+			s.auditAuth(r, "auth.login_failed", u.Username, "login", http.StatusUnauthorized, "totp required")
 			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error": "请输入动态验证码", "totpRequired": true,
@@ -107,6 +110,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		updated, err := s.consumeTOTPLocked(cur, in.TOTP)
 		s.accountMu.Unlock()
 		if err != nil {
+			s.auditAuth(r, "auth.login_failed", u.Username, "login", http.StatusUnauthorized, "invalid totp")
 			switch {
 			case errors.Is(err, errTOTPRequired):
 				w.Header().Set("Cache-Control", "no-store")
@@ -139,6 +143,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// 无法解除那些封禁，用户登录成功却满屏 429（10 分钟内不可自愈）。
 	s.limiter.resetIP(ip)
 	s.clearInitialPassword()
+	s.auditAuth(r, "auth.login", u.Username, "session", http.StatusOK, "")
 	log.Printf("面板登录成功 user=%s ip=%s", u.Username, ip)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
@@ -167,11 +172,19 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	// 先取出用户名再吊销：吊销后同一请求的会话校验会立即失效。
+	actor := ""
+	if _, u, ok := s.sessionUserWithUser(r); ok {
+		actor = u.Username
+	}
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" && s.sessions != nil {
 		// 只有验签通过的令牌才值得写入吊销表，避免未认证请求把表撑大。
 		if sess, ok := s.sessions.Verify(c.Value); ok {
 			s.revokeSession(c.Value, sess.Expires)
 		}
+	}
+	if actor != "" {
+		s.auditAuth(r, "auth.logout", actor, "session", http.StatusOK, "")
 	}
 	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

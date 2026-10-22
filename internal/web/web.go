@@ -22,6 +22,7 @@ import (
 
 	"github.com/motao123/rollcall/internal/alert"
 	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/backupjob"
 	"github.com/motao123/rollcall/internal/model"
 	"github.com/motao123/rollcall/internal/notify"
 	"github.com/motao123/rollcall/internal/outbox"
@@ -99,6 +100,12 @@ type Server struct {
 	// 两者是分开的两步：两个并发保存可能交错成「持久化的是 A、内存生效的是 B」，
 	// 重启后行为突然改变。
 	notifySaveMu sync.Mutex
+
+	// autoBackup 为 nil 表示自动备份未配置（缺少密码/目录）。
+	autoBackup *backupjob.Manager
+
+	// http 汇总请求量、状态码与延迟分布，供 /metrics 输出。
+	http *httpMetrics
 }
 
 // Config 是服务端的运行参数。
@@ -119,6 +126,8 @@ type Config struct {
 	// TrustedProxies 是可信反向代理网段；nil 时仅信任回环。
 	// 跨机代理必须显式配置，否则无法识别真实客户端 IP。
 	TrustedProxies []*net.IPNet
+	// AutoBackup 为自动备份调度器；nil 表示未启用。
+	AutoBackup *backupjob.Manager
 }
 
 func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server {
@@ -139,7 +148,9 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		trustedProxies: trusted,
 		dataDir:        cfg.DataDir,
 		saveInterval:   cfg.SaveInterval,
+		autoBackup:     cfg.AutoBackup,
 		events:         newEventHub(),
+		http:           newHTTPMetrics(),
 		startedAt:      time.Now()}
 	if cfg.DataDir != "" {
 		srv.themeDir = filepath.Join(cfg.DataDir, "themes")
@@ -280,6 +291,7 @@ func (s *Server) routes(static http.Handler) []route {
 		// 仪表盘只读数据包含主机名、内核、服务商、价格等资产信息，
 		// 不能像公开状态页那样匿名下发。
 		{"/api/overview", authReadonly, http.HandlerFunc(s.handleOverview)},
+		{"/api/overview/trend", authReadonly, http.HandlerFunc(s.handleOverviewTrend)},
 		{"/api/live", authReadonly, http.HandlerFunc(s.handleLive)},
 		{"/api/stream", authAdmin, http.HandlerFunc(s.handleStream)},
 		{"/api/nodes", authReadonly, http.HandlerFunc(s.handleNodes)},
@@ -296,6 +308,8 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/nodes", authAdmin, http.HandlerFunc(s.handleAdminNodes)},
 		{"/api/admin/nodes/batch", authAdmin, http.HandlerFunc(s.handleAdminNodesBatch)},
 		{"/api/admin/nodes/", authAdmin, http.HandlerFunc(s.handleAdminNodeByID)},
+		{"/api/admin/agent-upgrades", authAdmin, http.HandlerFunc(s.handleAdminAgentUpgrades)},
+		{"/api/admin/agent-upgrades/", authAdmin, http.HandlerFunc(s.handleAdminAgentUpgradeByID)},
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
 		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
@@ -310,7 +324,11 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/tokens", authAdmin, http.HandlerFunc(s.handleAdminTokens)},
 		{"/api/admin/tokens/", authAdmin, http.HandlerFunc(s.handleAdminTokenByID)},
 		{"/api/admin/backup", authAdmin, http.HandlerFunc(s.handleBackup)},
+		{"/api/admin/backup/auto", authAdmin, http.HandlerFunc(s.handleAutoBackup)},
+		{"/api/admin/backup/auto/run", authAdmin, http.HandlerFunc(s.handleAutoBackupRun)},
 		{"/api/admin/restore", authAdmin, http.HandlerFunc(s.handleRestore)},
+		{"/api/admin/audit", authAdmin, http.HandlerFunc(s.handleAdminAudit)},
+		{"/api/admin/storage", authAdmin, http.HandlerFunc(s.handleAdminStorage)},
 		{"/api/admin/theme", authAdmin, http.HandlerFunc(s.handleAdminTheme)},
 		{"/api/admin/theme-packs", authAdmin, http.HandlerFunc(s.handleAdminThemePacks)},
 		{"/api/admin/test-notify", authAdmin, http.HandlerFunc(s.handleTestNotify)},
@@ -392,17 +410,18 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	// 用 ServeMux 自己的匹配结果反查鉴权级别，避免再维护一份路径白名单。
-	levelOf := func(r *http.Request) authLevel {
+	// 同一个 pattern 也作为 HTTP 指标的 route 标签。
+	routeOf := func(r *http.Request) (authLevel, string) {
 		_, pattern := mux.Handler(r)
 		if l, ok := levels[pattern]; ok {
-			return l
+			return l, pattern
 		}
 		// 仅路径清理重定向等无 pattern 的情况会到这里；
 		// 按非受保护处理，避免 3xx 错误地清零爆破计数。
-		return authPublic
+		return authPublic, pattern
 	}
 
-	return withCommon(withGzip(s.withAuthGuard(mux, levelOf)))
+	return withCommon(withGzip(s.withAuthGuard(mux, routeOf)))
 }
 
 // guard 按路由表声明的级别包装 handler。
@@ -1161,6 +1180,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if vis.Country {
 			p.Country = v.Country
 		}
+		if vis.Tags {
+			p.Tags = v.Tags
+		}
+		if vis.Billing {
+			p.Price, p.Currency = v.Price, v.Currency
+		}
+		if vis.Expire {
+			p.ExpireAt = v.ExpireAt
+		}
+		if vis.Quota {
+			p.QuotaGB = v.Traffic.QuotaGB
+			p.QuotaUsed = v.Traffic.Used
+			p.ResetDay = v.Traffic.ResetDay
+		}
 		// 迷你曲线：24h 序列降采样到 ~48 点，够画一条趋势线又不拖慢首屏
 		if vis.Metrics && len(series) > 1 {
 			step := len(series) / 48
@@ -1255,6 +1288,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg.Blocks.Incidents {
 		resp["incidents"] = s.buildTimeline(now-int64(cfg.HistoryDays)*86400, 60,
 			func(id string) string { return names[id] })
+		// 尚未开始的维护窗口单独列出，让访客提前知道计划内中断。
+		upcoming := make([]map[string]any, 0, 5)
+		for _, m := range s.st.Maintenances() {
+			if m == nil || m.StartAt <= now || m.EndAt <= now {
+				continue
+			}
+			nodeNames := make([]string, 0, len(m.NodeIDs))
+			for _, id := range m.NodeIDs {
+				if nm := names[id]; nm != "" {
+					nodeNames = append(nodeNames, nm)
+				}
+			}
+			upcoming = append(upcoming, map[string]any{
+				"title":     m.Title,
+				"reason":    m.Reason,
+				"startAt":   m.StartAt,
+				"endAt":     m.EndAt,
+				"nodeNames": nodeNames,
+			})
+			if len(upcoming) >= 5 {
+				break
+			}
+		}
+		resp["maintenanceUpcoming"] = upcoming
 	}
 	if cfg.Announcement.Enabled {
 		resp["announcement"] = cfg.Announcement
@@ -1537,6 +1594,34 @@ func adminNode(n *model.Node) adminNodeView {
 	}
 }
 
+// normalizeTags 清理节点标签：去空白、去重、限制单个长度与总数。
+// 标签会出现在后台筛选器与公开页，无限长度会让这两处排版被一条标签撑破。
+func normalizeTags(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if r := []rune(t); len(r) > 24 {
+			t = string(r[:24])
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
 // validateNodeMeta 清理并校验节点台账字段，返回空字符串表示通过。
 func validateNodeMeta(n *model.Node) string {
 	n.Name = strings.TrimSpace(n.Name)
@@ -1547,6 +1632,7 @@ func validateNodeMeta(n *model.Node) string {
 	n.ExpireAt = strings.TrimSpace(n.ExpireAt)
 	n.Currency = strings.ToUpper(strings.TrimSpace(n.Currency))
 	n.Country = strings.ToUpper(strings.TrimSpace(n.Country))
+	n.Tags = normalizeTags(n.Tags)
 	if n.Name == "" {
 		return "name is required"
 	}
@@ -1698,6 +1784,7 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		updated.Weight = in.Weight
 		updated.Country = in.Country
 		updated.Favorite = in.Favorite
+		updated.Tags = in.Tags
 		updated.TrafficQuotaGB = in.TrafficQuotaGB
 		updated.TrafficResetDay = in.TrafficResetDay
 		updated.TrafficMode = in.TrafficMode

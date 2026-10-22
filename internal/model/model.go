@@ -21,6 +21,8 @@ type Node struct {
 	// 留空表示不在地图上展示。
 	Country  string `json:"country,omitempty"`
 	Favorite bool   `json:"favorite,omitempty"`
+	// Tags 是自由标签，用于筛选与公开状态页分组展示。
+	Tags []string `json:"tags,omitempty"`
 	// TrafficQuotaGB 是每个流量周期的配额（GB，0 表示不限制）。
 	// TrafficResetDay 是周期起始日（1–28，0 按 1 处理）。
 	TrafficQuotaGB  float64 `json:"trafficQuotaGb,omitempty"`
@@ -271,6 +273,21 @@ func (t *APIToken) AllowsPath(path string) bool {
 	return false
 }
 
+// AuditEntry 是一条管理操作审计记录。
+// 只记录操作元数据，不记录请求体，避免密码、令牌等敏感内容落盘。
+type AuditEntry struct {
+	ID     string `json:"id"`
+	TS     int64  `json:"ts"`
+	Action string `json:"action"`
+	Actor  string `json:"actor"`
+	Role   string `json:"role"` // session | api-token | admin-token | basic
+	IP     string `json:"ip"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Status int    `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // Event 是公开活动流中的一条事件（不含敏感字段）。
 type Event struct {
 	ID       string `json:"id"`
@@ -391,6 +408,11 @@ type StatusVisibility struct {
 	Region   bool `json:"region"`   // 地区
 	Provider bool `json:"provider"` // 服务商
 	Country  bool `json:"country"`  // 国家（用于公开页分布图）
+	// 资产类字段默认关闭：价格与到期日属于内部经营信息。
+	Billing bool `json:"billing"` // 续费价格与周期
+	Expire  bool `json:"expire"`  // 到期日
+	Quota   bool `json:"quota"`   // 流量配额与周期用量
+	Tags    bool `json:"tags"`    // 节点标签
 }
 
 // StatusBlocks 控制公开页显示哪些区块。
@@ -541,18 +563,70 @@ func (m *Maintenance) Covers(nodeID string) bool {
 	return false
 }
 
+// IncidentUpdate 是事件进展时间线上的一条公开更新。
+// Status 用固定枚举，前端据此着色并推导"已恢复"。
+type IncidentUpdate struct {
+	TS     int64  `json:"ts"`
+	Status string `json:"status"` // investigating | identified | monitoring | resolved
+	Text   string `json:"text"`
+}
+
+// 事件进展状态取值。
+const (
+	IncidentInvestigating = "investigating"
+	IncidentIdentified    = "identified"
+	IncidentMonitoring    = "monitoring"
+	IncidentResolved      = "resolved"
+)
+
+// NormalizeIncidentStatus 把未知状态归到 investigating。
+func NormalizeIncidentStatus(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case IncidentIdentified:
+		return IncidentIdentified
+	case IncidentMonitoring:
+		return IncidentMonitoring
+	case IncidentResolved:
+		return IncidentResolved
+	default:
+		return IncidentInvestigating
+	}
+}
+
 // Incident 是一条人工登记的事件（事故/变更/公告）。
 // 与告警的区别：告警由规则自动生成，事件由管理员手工撰写，
 // 用于状态页的"事件时间线"里说明那些没有触发告警但用户应该知道的事。
 type Incident struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body,omitempty"`
-	Level     string   `json:"level"`             // info | warn | critical
-	NodeIDs   []string `json:"nodeIds,omitempty"` // 受影响的节点，空表示全局
-	StartAt   int64    `json:"startAt"`
-	EndAt     int64    `json:"endAt"` // 0 表示仍在进行
-	CreatedAt int64    `json:"createdAt"`
+	ID        string           `json:"id"`
+	Title     string           `json:"title"`
+	Body      string           `json:"body,omitempty"`
+	Level     string           `json:"level"`             // info | warn | critical
+	NodeIDs   []string         `json:"nodeIds,omitempty"` // 受影响的节点，空表示全局
+	StartAt   int64            `json:"startAt"`
+	EndAt     int64            `json:"endAt"` // 0 表示仍在进行
+	CreatedAt int64            `json:"createdAt"`
+	Updates   []IncidentUpdate `json:"updates,omitempty"`
+}
+
+// AgentUpgradeBatch 是一次 Agent 升级的清单与基线。
+// 服务端不远程执行升级，只记录批次创建时各节点的版本，
+// 由后续上报的 AgentVersion 推导每台机器是否已完成升级。
+type AgentUpgradeBatch struct {
+	ID            string            `json:"id"`
+	TargetVersion string            `json:"targetVersion"`
+	Note          string            `json:"note,omitempty"`
+	CreatedAt     int64             `json:"createdAt"`
+	NodeIDs       []string          `json:"nodeIds"`
+	Before        map[string]string `json:"before"` // nodeID -> 创建时版本
+}
+
+// AgentUpgradeTarget 是批次详情里的一台节点。
+type AgentUpgradeTarget struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Before  string `json:"before"`
+	Current string `json:"current"`
+	State   string `json:"state"` // done | pending | missing
 }
 
 // ---------- 以下是直接下发给前端的视图模型 ----------
@@ -586,6 +660,7 @@ type NodeView struct {
 	Country  string       `json:"country,omitempty"`
 	Favorite bool         `json:"favorite,omitempty"`
 	Traffic  TrafficUsage `json:"traffic"`
+	Tags     []string     `json:"tags,omitempty"`
 
 	Host     HostInfo `json:"host"`
 	Latest   Metrics  `json:"latest"`
@@ -608,7 +683,7 @@ func NodeMeta(n *Node) NodeView {
 		ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
 		Group: n.Group, Note: n.Note, ExpireAt: n.ExpireAt,
 		Price: n.Price, Currency: n.Currency, Weight: n.Weight,
-		Country: n.Country, Favorite: n.Favorite,
+		Country: n.Country, Favorite: n.Favorite, Tags: append([]string(nil), n.Tags...),
 	}
 }
 

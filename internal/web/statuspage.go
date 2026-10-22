@@ -27,6 +27,7 @@ const statusPageHTML = `<!DOCTYPE html>
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f2f4f8">
 <title>服务状态</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f5d8a'/><path d='M8 20l5-7 4 5 3-4 4 6' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <script src="/theme-boot.js"></script>
 <style>
 /* 资源加载失败时的兜底：骨架屏与「脚本未能加载」提示。

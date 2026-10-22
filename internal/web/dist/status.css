@@ -564,3 +564,27 @@ html[data-density="compact"] .page { padding-top: 16px; padding-bottom: 40px; }
 html[data-density="compact"] .hero-inner { padding: 17px 18px 14px; }
 html[data-density="compact"] .node-card .el-card__body { padding: 12px 14px !important; }
 html[data-density="compact"] .panel .el-card__body { padding: 13px 16px !important; }
+
+/* 事件进展与计划维护 */
+.incident-updates {
+  margin-top: 8px; padding-left: 10px;
+  border-left: 2px solid var(--app-line);
+  display: flex; flex-direction: column; gap: 5px;
+}
+.inc-upd { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--app-fg-2); }
+.inc-upd-time { flex: none; font-size: 11px; color: var(--app-fg-3); }
+.inc-upd-tag { flex: none; }
+.inc-upd-text { line-height: 1.55; }
+.upcoming-mt {
+  margin-bottom: 14px; padding: 10px 12px;
+  border: 1px solid var(--app-line);
+  border-left: 3px solid var(--el-color-warning);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--el-color-warning) 7%, transparent);
+}
+.upcoming-mt-title { margin-bottom: 5px; font-size: 12px; font-weight: 600; color: var(--app-fg-2); }
+.upcoming-item { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 3px 0; font-size: 12px; }
+.upcoming-when { font-size: 11px; color: var(--app-fg-3); }
+.upcoming-name { font-weight: 600; }
+.upcoming-scope { color: var(--app-fg-3); }
+.upcoming-reason { flex-basis: 100%; font-size: 11.5px; color: var(--app-fg-3); }

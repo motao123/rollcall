@@ -277,6 +277,27 @@ func (s *Store) UpsertIncident(it *model.Incident) error {
 	if it.CreatedAt <= 0 {
 		it.CreatedAt = time.Now().Unix()
 	}
+	// 进展更新按时间排序、限制条数；状态未知时归到 investigating，
+	// 避免公开页出现无法着色的状态值。
+	for i := range it.Updates {
+		u := &it.Updates[i]
+		u.Status = model.NormalizeIncidentStatus(u.Status)
+		u.Text = sanitize.Text(u.Text, 500)
+		if u.TS <= 0 {
+			u.TS = it.CreatedAt
+		}
+	}
+	updates := it.Updates[:0]
+	for _, u := range it.Updates {
+		if u.Text != "" {
+			updates = append(updates, u)
+		}
+	}
+	it.Updates = updates
+	sort.SliceStable(it.Updates, func(i, j int) bool { return it.Updates[i].TS < it.Updates[j].TS })
+	if len(it.Updates) > 50 {
+		it.Updates = it.Updates[len(it.Updates)-50:]
+	}
 	s.spMu.Lock()
 	defer s.spMu.Unlock()
 	list, err := s.incidentsLocked()

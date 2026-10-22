@@ -811,6 +811,10 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 | `-insecure-probe-tls` | false | 探测 HTTPS 时跳过证书校验（自签名目标） |
 | `-probe-interval` | `10s` | 探测调度粒度；每个服务按自身 `interval` 执行 |
 | `-save-interval` | `60s` | 自动保存快照间隔（10s–1h）；退出时还会强制保存一次 |
+| `-backup-dir` | `<data>/backups` | 自动备份目录；仅在配置备份密码后启用 |
+| `-backup-interval` | `24h` | 自动备份间隔（1m–30d） |
+| `-backup-keep` | `14` | 自动备份保留份数（1–365） |
+| `-backup-password-file` | 空 / `ROLLCALL_BACKUP_PASSWORD` | 自动备份加密密码（文件需 0600，内容至少 8 字符）；留空则关闭自动备份 |
 | `-history-1m-retention` | `168h` | 1 分钟聚合保留期（≥1m、为 60s 整数倍） |
 | `-history-5m-retention` | `720h` | 5 分钟聚合保留期（≥5m、为 300s 整数倍） |
 | `-history-1h-retention` | `8760h` | 1 小时聚合保留期（≥1h、为 3600s 整数倍） |

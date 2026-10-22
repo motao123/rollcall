@@ -1247,6 +1247,9 @@ details.panel > form { padding: 16px; }
 }
 .modal-title { font-size: 14.5px; font-weight: 600; letter-spacing: 0; }
 .modal-sub { font-size: 12px; color: var(--fg-2); margin: 6px 0 8px; }
+.modal-text { font-size: 12.5px; color: var(--fg-2); line-height: 1.75; margin: 10px 0 14px; white-space: pre-line; }
+.modal-form { display: flex; flex-direction: column; gap: 7px; margin: 12px 0 4px; }
+.modal-form .input { width: 100%; }
 pre.code {
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -1824,3 +1827,135 @@ body.auth-checking .app { visibility: hidden; }
   flex-wrap: wrap;
 }
 .compare-filter .field { min-width: 180px; }
+
+/* ---------- 图表悬停读数 ---------- */
+.chart-wrap { position: relative; }
+.chart-tip {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
+}
+.chart-tip[hidden] { display: none; }
+.chart-tip .tip-time { color: var(--fg-3); }
+.chart-tip .tip-val { color: var(--fg); font-weight: 600; }
+.chart-x {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 2px 4px 34px;
+  font-size: 10px;
+  color: var(--fg-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---------- 表格排序 / 列显隐 / 分页 ---------- */
+thead th.sortable { cursor: pointer; user-select: none; }
+thead th.sortable:hover { color: var(--fg); }
+thead th[data-sort="asc"]::after { content: " ↑"; color: var(--accent); }
+thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
+
+.col-picker { display: flex; justify-content: flex-end; margin-bottom: 6px; position: relative; }
+.col-picker > summary { list-style: none; }
+.col-picker > summary::-webkit-details-marker { display: none; }
+.col-menu {
+  position: absolute;
+  right: 0;
+  top: 28px;
+  z-index: 30;
+  min-width: 160px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.col-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--fg-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.col-item:hover { background: var(--panel-2); color: var(--fg); }
+.col-item input { margin: 0; }
+
+.table-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+.pager-info { font-size: 11.5px; color: var(--fg-3); }
+
+@media (max-width: 640px) {
+  .chart-x { padding-left: 30px; }
+  .table-pager { justify-content: space-between; }
+}
+
+/* ---------- 键值行（自动备份状态等） ---------- */
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.kv-row:last-child { border-bottom: none; }
+.kv-key { flex: 0 0 84px; color: var(--fg-3); }
+.kv-val { color: var(--fg-2); word-break: break-all; }
+
+/* 节点详情：上一台 / 下一台与区间状态 */
+.detail-nav { display: flex; align-items: center; gap: 6px; }
+.detail-nav .btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* 概览：机群趋势与资源 Top */
+.seg { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.seg .btn { margin: 0; }
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.chart-panel { padding: 12px 14px; }
+.top-panel { padding: 12px 14px; }
+.top-panel .panel-head { margin-bottom: 4px; }
+.top-row {
+  display: grid;
+  grid-template-columns: 22px minmax(80px, 150px) 1fr 78px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.top-row:last-child { border-bottom: 0; }
+.top-row:hover { background: var(--panel-2); }
+.top-rank { font-size: 11px; color: var(--fg-3); text-align: center; }
+.top-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-bar { height: 6px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.top-bar i { display: block; height: 100%; border-radius: inherit; background: var(--accent); opacity: .7; }
+.top-val { font-size: 11.5px; text-align: right; color: var(--fg-2); }
+@media (max-width: 760px) {
+  .fleet-grid { grid-template-columns: 1fr; }
+  .top-row { grid-template-columns: 20px minmax(70px, 110px) 1fr 66px; }
+}

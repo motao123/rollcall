@@ -18,8 +18,8 @@ import (
 // 攻击者只要能让受保护路由返回重定向（例如登录跳转），
 // 每试 9 次就能重置一次失败计数，限速形同虚设。
 func TestAuthGuardDoesNotClearOnRedirect(t *testing.T) {
-	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin"}
-	levelOf := func(*http.Request) authLevel { return authAdmin }
+	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin", http: newHTTPMetrics()}
+	routeOf := func(*http.Request) (authLevel, string) { return authAdmin, "/api/admin/nodes" }
 
 	step := 0
 	h := s.withAuthGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +30,7 @@ func TestAuthGuardDoesNotClearOnRedirect(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
-	}), levelOf)
+	}), routeOf)
 
 	req := func() int {
 		r := httptest.NewRequest("GET", "/api/admin/nodes", nil)

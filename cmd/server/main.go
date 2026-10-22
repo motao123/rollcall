@@ -23,6 +23,7 @@ import (
 
 	"github.com/motao123/rollcall/internal/alert"
 	"github.com/motao123/rollcall/internal/auth"
+	"github.com/motao123/rollcall/internal/backupjob"
 	"github.com/motao123/rollcall/internal/model"
 	"github.com/motao123/rollcall/internal/notify"
 	"github.com/motao123/rollcall/internal/outbox"
@@ -53,6 +54,10 @@ func main() {
 	insecureProbeTLS := flag.Bool("insecure-probe-tls", false, "探测 HTTPS 时跳过证书校验（仅用于自签名目标）")
 	allowPrivateNotify := flag.Bool("allow-private-notify", false, "允许通知通道访问回环/私网目标（自建 Gotify/Bark/Webhook 时使用）")
 	agentDir := flag.String("agent-dir", "", "Agent 二进制分发目录（放置 rollcall-agent-linux-<arch>，启用「一条命令接入」）")
+	backupDir := flag.String("backup-dir", "", "自动备份目录（默认 <data>/backups；需同时配置备份密码才启用）")
+	backupEvery := flag.Duration("backup-interval", 24*time.Hour, "自动备份间隔（1m–30d）")
+	backupKeep := flag.Int("backup-keep", 14, "自动备份保留份数（1–365）")
+	backupPasswordFile := flag.String("backup-password-file", "", "自动备份密码文件（0600；也可用 ROLLCALL_BACKUP_PASSWORD）")
 	notifyPlugins := flag.String("notify-plugins", "", "通知插件目录（显式启用本地插件，目录内 *.json 清单）")
 	trustedProxies := flag.String("trusted-proxies", "",
 		"可信反向代理网段（逗号分隔 CIDR，如 127.0.0.1/32,10.0.0.0/8）；留空仅信任回环")
@@ -79,6 +84,12 @@ func main() {
 	}
 	if *cnyRate <= 0 || *cnyRate > 1000 {
 		log.Fatal("-cny-rate 必须在 0–1000 之间")
+	}
+	if *backupEvery < time.Minute || *backupEvery > 30*24*time.Hour {
+		log.Fatal("-backup-interval 必须在 1m–30d 之间")
+	}
+	if *backupKeep < 1 || *backupKeep > 365 {
+		log.Fatal("-backup-keep 必须在 1–365 之间")
 	}
 	retention := store.HistoryRetention{Tier1m: *history1m, Tier5m: *history5m, Tier1h: *history1h}
 	if err := store.ConfigureHistory(retention); err != nil {
@@ -334,17 +345,52 @@ func main() {
 	if err != nil {
 		log.Fatalf("-trusted-proxies 无效: %v", err)
 	}
+	backupPwd, err := loadBackupPassword(*backupPasswordFile)
+	if err != nil {
+		log.Fatalf("自动备份密码不可用: %v", err)
+	}
+	var autoBackup *backupjob.Manager
+	if backupPwd != "" {
+		dir := *backupDir
+		if dir == "" {
+			dir = filepath.Join(*dataDir, "backups")
+		}
+		autoBackup, err = backupjob.New(backupjob.Config{
+			Dir: dir, Interval: *backupEvery, Keep: *backupKeep,
+			Password: backupPwd, Store: st,
+			Notify: func(berr error) {
+				ob.Enqueue(notify.Message{
+					Title:    "自动备份失败",
+					Body:     "Rollcall 自动配置备份未完成：" + berr.Error() + "\n备份目录：" + dir,
+					Severity: "critical",
+					TS:       time.Now().Unix(),
+					Link:     *panelLink,
+				})
+			},
+		})
+		if err != nil {
+			log.Fatalf("自动备份初始化失败: %v", err)
+		}
+		log.Printf("自动备份已启用：每 %s，保留 %d 份 → %s", *backupEvery, *backupKeep, dir)
+	} else if *backupDir != "" {
+		log.Printf("⚠ 已配置 -backup-dir 但缺少备份密码，自动备份未启用")
+	}
+
 	ws := web.New(st, runner, engine, web.Config{
 		AdminToken: adm, AuthUser: authUser, AuthPass: authPass,
 		User: panelUser, UserPath: userPath, Sessions: sessions, PanelLink: *panelLink,
 		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets, AgentDir: *agentDir,
-		DataDir: *dataDir, SaveInterval: *saveInterval,
+		DataDir: *dataDir, SaveInterval: *saveInterval, AutoBackup: autoBackup,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)
 	}
 	ob.Start()
 	defer ob.Stop()
+	if autoBackup != nil {
+		autoBackup.Start()
+		defer autoBackup.Stop()
+	}
 	sched := schedule.New(st, ob, schedule.Config{PanelLink: *panelLink, CNYRate: *cnyRate})
 	sched.Start()
 	defer sched.Stop()
@@ -538,6 +584,27 @@ func loadOrCreateAdminToken(dir string) (string, error) {
 	}
 	log.Printf("已生成管理令牌 → %s", p)
 	return tok, nil
+}
+
+// loadBackupPassword 从文件或环境变量读取自动备份密码。
+// 密码只保存在进程内存中，不写日志、不落配置。
+func loadBackupPassword(path string) (string, error) {
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("读取密码文件 %s: %w", path, err)
+		}
+		pwd := strings.TrimSpace(string(b))
+		if len(pwd) < 8 {
+			return "", fmt.Errorf("密码文件 %s 内容不足 8 个字符", path)
+		}
+		return pwd, nil
+	}
+	pwd := strings.TrimSpace(os.Getenv("ROLLCALL_BACKUP_PASSWORD"))
+	if pwd != "" && len(pwd) < 8 {
+		return "", errors.New("ROLLCALL_BACKUP_PASSWORD 不足 8 个字符")
+	}
+	return pwd, nil
 }
 
 // displayAddr 把 ":19080" / "127.0.0.1:19080" 归一化为可点击的地址。

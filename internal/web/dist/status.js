@@ -340,7 +340,7 @@
       if (S.state === 'attention' && n.state === 'online') return false;
       if (S.group && (n.group || '未分组') !== S.group) return false;
       if (!q) return true;
-      var hay = [n.name, n.group, n.region, n.provider, n.os, n.arch, n.country].join(' ').toLowerCase();
+      var hay = [n.name, n.group, n.region, n.provider, n.os, n.arch, n.country, (n.tags || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
     });
   });
@@ -1202,6 +1202,16 @@
       facts.push(h('span', null, ['最后上报 ', h('b', null, timeAgo(n.lastSeen))]));
     }
     if (n.state === 'no_data') facts.push(h('span', null, '等待 Agent 首次上报'));
+    if (vis('quota') && n.quotaGb > 0) {
+      var used = n.quotaUsed || 0;
+      var quotaBytes = n.quotaGb * 1024 * 1024 * 1024;
+      var pctUsed = quotaBytes > 0 ? (used / quotaBytes) * 100 : 0;
+      facts.push(h('span', { title: '本周期已用 ' + bytes(used) + ' / ' + n.quotaGb + ' GB' }, [
+        '流量 ', h('b', {
+          style: pctUsed >= 90 ? 'color:var(--el-color-danger)' : pctUsed >= 80 ? 'color:var(--el-color-warning)' : undefined
+        }, fixed(pctUsed, 1) + '%')
+      ]));
+    }
     if (!facts.length) return null;
     return h('div', { class: 'nc-facts' }, facts);
   }
@@ -1211,6 +1221,15 @@
     if (n.group) tags.push(tag(n.group, 'info', { effect: 'plain' }));
     if (vis('region') && n.region) tags.push(tag(n.region, 'primary', { effect: 'plain' }));
     if (vis('provider') && n.provider) tags.push(tag(n.provider, 'info', { effect: 'plain' }));
+    if (vis('tags')) {
+      (n.tags || []).forEach(function (t) { tags.push(tag(t, 'success', { effect: 'plain' })); });
+    }
+    if (vis('billing') && n.price) {
+      tags.push(tag((n.currency === 'CNY' ? '¥' : '$') + n.price + ' / 年', 'info', { effect: 'plain' }));
+    }
+    if (vis('expire') && n.expireAt) {
+      tags.push(tag('到期 ' + n.expireAt, 'warning', { effect: 'plain' }));
+    }
     if (n.maintenanceTitle) tags.push(tag('维护中', 'warning', { effect: 'plain' }));
     if (!tags.length) return null;
     return h('div', { class: 'nc-tags' }, tags);
@@ -1483,6 +1502,26 @@
     return ' · ' + it.nodeNames.join('、');
   }
 
+  var INC_UPDATE_META = {
+    investigating: ['调查中', 'warning'],
+    identified: ['已定位', 'primary'],
+    monitoring: ['观察中', 'primary'],
+    resolved: ['已恢复', 'success']
+  };
+
+  function incidentUpdates(it) {
+    var ups = it.updates || [];
+    if (!ups.length) return null;
+    return h('div', { class: 'incident-updates' }, ups.map(function (u, i) {
+      var meta = INC_UPDATE_META[u.status] || ['更新', 'info'];
+      return h('div', { class: 'inc-upd', key: i }, [
+        h('span', { class: 'inc-upd-time mono' }, clockHM(u.ts)),
+        h('span', { class: 'inc-upd-tag tl-tag ' + meta[1] }, meta[0]),
+        h('span', { class: 'inc-upd-text' }, u.text)
+      ]);
+    }));
+  }
+
   function incidentItem(it) {
     var lv = levelInfo(it.level);
     var time = clockHM(it.startAt);
@@ -1504,7 +1543,8 @@
             it.auto ? null : h('span', { class: 'tl-tag' }, '人工')
           ]),
           h('div', { class: 'incident-meta' }, time),
-          it.body ? h('div', { class: 'incident-body' }, it.body) : null
+          it.body ? h('div', { class: 'incident-body' }, it.body) : null,
+          incidentUpdates(it)
         ];
       }
     });
@@ -1528,17 +1568,38 @@
     }));
   }
 
+  function upcomingMaintenance() {
+    var list = (S.data && S.data.maintenanceUpcoming) || [];
+    if (!list.length) return null;
+    return h('div', { class: 'upcoming-mt' }, [
+      h('div', { class: 'upcoming-mt-title' }, '计划维护'),
+      h('div', { class: 'upcoming-list' }, list.map(function (m, i) {
+        var scope = m.nodeNames && m.nodeNames.length ? m.nodeNames.join('、') : '全部节点';
+        return h('div', { class: 'upcoming-item', key: i }, [
+          h('span', { class: 'upcoming-when mono' }, fullTime(m.startAt) + ' 起'),
+          h('span', { class: 'upcoming-name' }, m.title),
+          h('span', { class: 'upcoming-scope' }, scope),
+          m.reason ? h('span', { class: 'upcoming-reason' }, m.reason) : null
+        ]);
+      }))
+    ]);
+  }
+
   function incidentsSection() {
     if (!block('incidents')) return null;
     var items = (S.data && S.data.incidents) || [];
     var shown = items.slice(0, INCIDENT_PREVIEW);
+    var body = [
+      upcomingMaintenance(),
+      shown.length
+        ? incidentTimeline(shown)
+        : h(EP.ElEmpty, { description: '过去一段时间没有记录到事件', imageSize: 70 })
+    ];
     return panelCard({
       title: '事件',
       sub: '告警自动生成 + 人工登记',
       extra: items.length > shown.length ? moreLink('#/events') : null,
-      body: shown.length
-        ? incidentTimeline(shown)
-        : h(EP.ElEmpty, { description: '过去一段时间没有记录到事件', imageSize: 70 })
+      body: body
     });
   }
 
@@ -1694,8 +1755,17 @@
     var upClass = up != null ? upCls(up) : 'none';
     var tags = [];
     if (n.group) tags.push(tag(n.group, 'info', { effect: 'plain' }));
-    if (n.region) tags.push(tag(n.region, 'primary', { effect: 'plain' }));
-    if (n.provider) tags.push(tag(n.provider, 'info', { effect: 'plain' }));
+    if (vis('region') && n.region) tags.push(tag(n.region, 'primary', { effect: 'plain' }));
+    if (vis('provider') && n.provider) tags.push(tag(n.provider, 'info', { effect: 'plain' }));
+    if (vis('tags')) {
+      (n.tags || []).forEach(function (t) { tags.push(tag(t, 'success', { effect: 'plain' })); });
+    }
+    if (vis('billing') && n.price) {
+      tags.push(tag((n.currency === 'CNY' ? '¥' : '$') + n.price + ' / 年', 'info', { effect: 'plain' }));
+    }
+    if (vis('expire') && n.expireAt) {
+      tags.push(tag('到期 ' + n.expireAt, 'warning', { effect: 'plain' }));
+    }
     tags.push(tag(dt.maintenance ? '维护中' : info.label, dt.maintenance ? 'warning' : info.tag));
     return h(EP.ElCard, { class: 'detail-head panel', shadow: 'never' }, {
       default: function () {

@@ -33,6 +33,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		s.exportAlerts(w)
 	case "metrics.csv":
 		s.exportMetrics(w, r)
+	case "history.csv":
+		s.exportHistory(w, r)
 	default:
 		fail(w, 404, "unknown export: "+kind)
 	}
@@ -252,6 +254,55 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 	flushCSV(w, "rollcall-metrics-"+safeFileName(node.Name), buf, cw)
 }
 
+// exportHistory 导出全机群的历史归档（CSV）。
+//
+//	GET /api/export/history.csv?range=24h|7d|30d|365d
+//
+// 与单节点 metrics.csv 不同，这里固定使用聚合层并覆盖全部节点，
+// 适合离线分析/长期归档：24h 用 5m 桶，更长区间用 1h 桶，
+// 避免一次导出几十万行把浏览器和服务端一起拖慢。
+func (s *Server) exportHistory(w http.ResponseWriter, r *http.Request) {
+	rng := r.URL.Query().Get("range")
+	res := store.HistoryResolution5m
+	window := int64(24 * 3600)
+	switch rng {
+	case "", "24h":
+		rng = "24h"
+	case "7d":
+		res = store.HistoryResolution1h
+		window = 7 * 24 * 3600
+	case "30d":
+		res = store.HistoryResolution1h
+		window = 30 * 24 * 3600
+	case "365d":
+		res = store.HistoryResolution1h
+		window = 365 * 24 * 3600
+	default:
+		fail(w, 400, "未知的时间范围")
+		return
+	}
+	since := time.Now().Unix() - window
+	buf, cw := csvBuffer()
+	_ = cw.Write([]string{
+		"节点ID", "节点名", "时间", "unix", "分辨率", "CPU%", "CPU峰值",
+		"内存%", "磁盘%", "负载1", "接收增量字节", "发送增量字节", "样本数",
+	})
+	for _, n := range s.st.Nodes() {
+		for _, p := range s.st.HistorySeries(n.ID, res, since) {
+			if p.Count == 0 {
+				continue
+			}
+			_ = cw.Write([]string{
+				csvSafe(n.ID), csvSafe(n.Name), tsFmt(p.TS), strconv.FormatInt(p.TS, 10), res,
+				f2(p.CPUPct), f2(p.CPUMax), f2(p.MemPct), f2(p.DiskPct), f2(p.Load1),
+				strconv.FormatUint(p.NetRxDelta, 10), strconv.FormatUint(p.NetTxDelta, 10),
+				strconv.FormatUint(uint64(p.Count), 10),
+			})
+		}
+	}
+	flushCSV(w, "rollcall-history-"+rng, buf, cw)
+}
+
 // ---------- Prometheus ----------
 
 // handleMetrics 以 Prometheus exposition 格式暴露指标。
@@ -284,6 +335,36 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Prometheus 文本解析器不接受，整个 /metrics 会抓取失败。
 	fmt.Fprintf(&b, "rollcall_build_info{version=%s,go=%s} 1\n", q(version.Version), q(runtime.Version()))
 
+	// HTTP 请求量、状态码与延迟分布。
+	// route 标签使用 ServeMux pattern，不展开节点 ID 等路径参数。
+	hs := s.http.snapshot()
+	help("rollcall_http_requests_total", "HTTP requests by route pattern, method and status code.", "counter")
+	for _, row := range hs.requests {
+		gauge("rollcall_http_requests_total", []string{
+			"route=" + q(row.key.route), "method=" + q(row.key.method),
+			"status=" + strconv.Itoa(row.key.status),
+		}, float64(row.val))
+	}
+	help("rollcall_http_request_duration_seconds", "HTTP request latency in seconds by route pattern (SSE streams excluded).", "histogram")
+	for _, row := range hs.durs {
+		var cum uint64
+		for i, le := range httpLatencyBuckets {
+			cum += row.val.buckets[i]
+			fmt.Fprintf(&b, "rollcall_http_request_duration_seconds_bucket{route=%s,method=%s,le=%s} %d\n",
+				q(row.key.route), q(row.key.method), q(f(le)), cum)
+		}
+		cum += row.val.inf
+		fmt.Fprintf(&b, "rollcall_http_request_duration_seconds_bucket{route=%s,method=%s,le=\"+Inf\"} %d\n",
+			q(row.key.route), q(row.key.method), cum)
+		fmt.Fprintf(&b, "rollcall_http_request_duration_seconds_sum{route=%s,method=%s} %s\n",
+			q(row.key.route), q(row.key.method), f(row.val.sum))
+		fmt.Fprintf(&b, "rollcall_http_request_duration_seconds_count{route=%s,method=%s} %d\n",
+			q(row.key.route), q(row.key.method), row.val.count)
+	}
+	help("rollcall_http_inflight_requests", "HTTP requests currently being served.", "gauge")
+	gauge("rollcall_http_inflight_requests", nil, float64(hs.inflight))
+	help("rollcall_sse_subscribers", "Active SSE stream subscribers (limit 256).", "gauge")
+	gauge("rollcall_sse_subscribers", nil, float64(s.events.subscriberCount()))
 	// 汇总
 	// 只统计状态，不构造完整视图：/metrics 每次抓取都会跑，
 	// buildNodeViews 会为每个节点复制最近 20 分钟的原始序列并建告警映射，
@@ -343,6 +424,36 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("rollcall_save_series_bytes", nil, float64(ss.LastSeriesBytes))
 	help("rollcall_save_series_files", "Number of history shard files written in the last successful save (incremental: only dirty nodes).", "gauge")
 	gauge("rollcall_save_series_files", nil, float64(ss.LastSeriesFiles))
+
+	// 自动备份：未启用时也输出 0，便于用 absent() 之外的规则统一判断。
+	enabled := 0.0
+	var autoLast, autoNext int64
+	var autoRuns, autoFailures, autoSize, autoFiles, autoBytes int64
+	if s.autoBackup != nil {
+		enabled = 1
+		bs := s.autoBackup.Status()
+		autoLast, autoNext = bs.LastAt, bs.NextAt
+		autoRuns, autoFailures = bs.Runs, bs.Failures
+		autoSize = bs.LastSize
+		autoFiles = int64(len(bs.Files))
+		autoBytes = bs.TotalBytes
+	}
+	help("rollcall_backup_auto_enabled", "Automatic encrypted backup enabled (1/0).", "gauge")
+	gauge("rollcall_backup_auto_enabled", nil, enabled)
+	help("rollcall_backup_auto_runs_total", "Automatic backup attempts.", "counter")
+	gauge("rollcall_backup_auto_runs_total", nil, float64(autoRuns))
+	help("rollcall_backup_auto_failures_total", "Automatic backup attempts that failed.", "counter")
+	gauge("rollcall_backup_auto_failures_total", nil, float64(autoFailures))
+	help("rollcall_backup_auto_last_run_timestamp_seconds", "Unix timestamp of the last automatic backup attempt (0 = never).", "gauge")
+	gauge("rollcall_backup_auto_last_run_timestamp_seconds", nil, float64(autoLast))
+	help("rollcall_backup_auto_next_run_timestamp_seconds", "Unix timestamp of the next scheduled automatic backup (0 = disabled).", "gauge")
+	gauge("rollcall_backup_auto_next_run_timestamp_seconds", nil, float64(autoNext))
+	help("rollcall_backup_auto_last_size_bytes", "Size of the last automatic backup file.", "gauge")
+	gauge("rollcall_backup_auto_last_size_bytes", nil, float64(autoSize))
+	help("rollcall_backup_auto_files", "Automatic backup files currently retained.", "gauge")
+	gauge("rollcall_backup_auto_files", nil, float64(autoFiles))
+	help("rollcall_backup_auto_bytes", "Total bytes of retained automatic backup files.", "gauge")
+	gauge("rollcall_backup_auto_total_bytes", nil, float64(autoBytes))
 
 	// 通知队列
 	ns := s.st.NotifyStats()

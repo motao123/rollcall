@@ -375,12 +375,13 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-// withAuthGuard 在路由外层执行失败限速与审计日志。
-// levelOf 由路由表反查，只有受保护级别的 2xx 才会清零失败计数。
-func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authLevel) http.Handler {
+// withAuthGuard 在路由外层执行失败限速、审计日志与 HTTP 指标采集。
+// routeOf 由路由表反查鉴权级别与 ServeMux pattern；只有受保护级别的 2xx
+// 才会清零失败计数。
+func (s *Server) withAuthGuard(h http.Handler, routeOf func(*http.Request) (authLevel, string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r, s.trustedProxies)
-		level := levelOf(r)
+		level, route := routeOf(r)
 		// 按「来源 IP + 路由鉴权级别」分桶：否则只读面板或 /metrics 的
 		// 正常轮询成功后，会把同一 IP 上针对 admin token 的失败计数一并
 		// 清零，攻击者每轮试 9 次再等一次正常请求即可无限重试。
@@ -390,12 +391,15 @@ func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authL
 			fail(w, http.StatusTooManyRequests, "鉴权失败次数过多，请稍后再试")
 			return
 		}
+		start := time.Now()
+		s.http.begin()
 		rec := &statusRecorder{ResponseWriter: w}
 		defer func() {
 			// handler panic 时也要归还名额，否则每次崩溃都会永久
 			// 消耗一个在途名额，十次之后整个来源被误封。
 			if p := recover(); p != nil {
 				s.limiter.release(scope)
+				s.recordHTTP(route, r.Method, http.StatusInternalServerError, start)
 				panic(p)
 			}
 		}()
@@ -405,6 +409,8 @@ func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authL
 		if rec.status == 0 {
 			rec.status = http.StatusOK
 		}
+		s.recordHTTP(route, r.Method, rec.status, start)
+		s.auditAdminMutation(r, rec.status)
 		switch {
 		case rec.status == http.StatusUnauthorized:
 			s.limiter.fail(scope)
@@ -418,4 +424,14 @@ func (s *Server) withAuthGuard(h http.Handler, levelOf func(*http.Request) authL
 			s.limiter.release(scope)
 		}
 	})
+}
+
+// recordHTTP 记录一次请求。SSE 长连接只计数、不记延迟，
+// 否则连接存活时间会把延迟 p99 拉到几分钟。
+func (s *Server) recordHTTP(route, method string, status int, start time.Time) {
+	if isStreamRoute(route) {
+		s.http.end(route, method, status, 0)
+		return
+	}
+	s.http.end(route, method, status, time.Since(start))
 }

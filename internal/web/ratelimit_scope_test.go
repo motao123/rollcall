@@ -11,13 +11,13 @@ import (
 // 同一出口 IP 下，/metrics 或只读面板的正常轮询若清空全部失败计数，
 // 攻击者每轮试 9 次 admin token、再等一次正常轮询即可无限重试。
 func TestAuthGuardScopesFailuresByRouteLevel(t *testing.T) {
-	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin"}
+	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin", http: newHTTPMetrics()}
 
-	levelOf := func(r *http.Request) authLevel {
+	routeOf := func(r *http.Request) (authLevel, string) {
 		if r.URL.Path == "/metrics" {
-			return authMetrics
+			return authMetrics, "/metrics"
 		}
-		return authAdmin
+		return authAdmin, "/api/admin/nodes"
 	}
 	h := s.withAuthGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/metrics" {
@@ -25,7 +25,7 @@ func TestAuthGuardScopesFailuresByRouteLevel(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
-	}), levelOf)
+	}), routeOf)
 
 	req := func(path string) int {
 		r := httptest.NewRequest("GET", path, nil)
@@ -54,11 +54,11 @@ func TestAuthGuardScopesFailuresByRouteLevel(t *testing.T) {
 // 公开路由的 2xx 既不清零失败计数，也必须归还在途名额，
 // 否则第 21 次公开请求就会被 429。
 func TestAuthGuardReleasePublicTraffic(t *testing.T) {
-	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin"}
-	levelOf := func(*http.Request) authLevel { return authPublic }
+	s := &Server{limiter: newAuthFailureLimiter(), authUser: "admin", http: newHTTPMetrics()}
+	routeOf := func(*http.Request) (authLevel, string) { return authPublic, "/api/public/status" }
 	h := s.withAuthGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), levelOf)
+	}), routeOf)
 
 	for i := 0; i < 100; i++ {
 		r := httptest.NewRequest("GET", "/api/public/status", nil)

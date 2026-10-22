@@ -286,19 +286,72 @@ func validRecordID(id string) bool {
 }
 
 func (s *Server) handleAdminIncidentByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/admin/incidents/")
+	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/incidents/")
+	id, isUpdate := strings.CutSuffix(rest, "/updates")
 	if id == "" || strings.Contains(id, "/") {
 		fail(w, 400, "invalid incident id")
 		return
 	}
-	if r.Method != http.MethodDelete {
+
+	switch r.Method {
+	case http.MethodDelete:
+		deleted, err := s.st.DeleteIncident(id)
+		if err != nil {
+			fail(w, 500, "删除事件失败: "+err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"deleted": deleted, "id": id})
+		return
+	case http.MethodPost:
+		if !isUpdate {
+			fail(w, 404, "unknown incident action")
+			return
+		}
+	default:
 		fail(w, 405, "method not allowed")
 		return
 	}
-	deleted, err := s.st.DeleteIncident(id)
-	if err != nil {
-		fail(w, 500, "删除事件失败: "+err.Error())
+
+	body := http.MaxBytesReader(w, r.Body, 16<<10)
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	var req struct {
+		Status string `json:"status"`
+		Text   string `json:"text"`
+	}
+	if err := dec.Decode(&req); err != nil {
+		fail(w, 400, "bad json: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": deleted, "id": id})
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		fail(w, 400, "请求体只能包含一个 JSON 对象")
+		return
+	}
+	req.Text = sanitize.Text(req.Text, 500)
+	if req.Text == "" {
+		fail(w, 400, "更新内容不能为空")
+		return
+	}
+	var cur *model.Incident
+	for _, it := range s.st.Incidents() {
+		if it.ID == id {
+			cur = it
+			break
+		}
+	}
+	if cur == nil {
+		fail(w, 404, "事件不存在")
+		return
+	}
+	now := time.Now().Unix()
+	status := model.NormalizeIncidentStatus(req.Status)
+	cur.Updates = append(cur.Updates, model.IncidentUpdate{TS: now, Status: status, Text: req.Text})
+	if status == model.IncidentResolved && cur.EndAt == 0 {
+		cur.EndAt = now
+	}
+	if err := s.st.UpsertIncident(cur); err != nil {
+		fail(w, 500, "保存事件更新失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"item": cur})
 }

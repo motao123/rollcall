@@ -61,6 +61,16 @@ func DefaultHistoryRetention() HistoryRetention {
 	}
 }
 
+// CurrentHistoryRetention 返回当前进程实际应用的聚合保留期，
+// 供管理端展示「保留策略」与估算容量。
+func CurrentHistoryRetention() HistoryRetention {
+	return HistoryRetention{
+		Tier1m: time.Duration(tier1m.keep) * time.Duration(tier1m.interval) * time.Second,
+		Tier5m: time.Duration(tier5m.keep) * time.Duration(tier5m.interval) * time.Second,
+		Tier1h: time.Duration(tier1h.keep) * time.Duration(tier1h.interval) * time.Second,
+	}
+}
+
 // ConfigureHistory 校验并应用聚合保留期。
 func ConfigureHistory(r HistoryRetention) error {
 	build := func(name string, interval int64, d time.Duration) (historyTier, error) {

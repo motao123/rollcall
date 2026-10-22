@@ -80,6 +80,14 @@ type statusNodePub struct {
 	// MaintenanceTitle 非空表示该节点正在计划维护中。
 	// 前端据此把状态点换成"维护中"并抑制"离线"措辞。
 	MaintenanceTitle string `json:"maintenanceTitle,omitempty"`
+	// 资产类字段默认不公开，由 Visibility 控制。
+	Price     float64  `json:"price,omitempty"`
+	Currency  string   `json:"currency,omitempty"`
+	ExpireAt  string   `json:"expireAt,omitempty"`
+	QuotaGB   float64  `json:"quotaGb,omitempty"`
+	QuotaUsed uint64   `json:"quotaUsed,omitempty"`
+	ResetDay  int      `json:"trafficResetDay,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
 }
 
 // dailyUptime 是一天的可用率。
@@ -95,15 +103,16 @@ type dailyUptime struct {
 // 自动事件由告警历史生成，人工事件由管理员在后台登记。
 type statusIncident struct {
 	// ID 只在服务端内部用于去重，绝不下发：公开页不暴露任何内部标识。
-	ID        string   `json:"-"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body,omitempty"`
-	Level     string   `json:"level"`
-	NodeNames []string `json:"nodeNames,omitempty"`
-	StartAt   int64    `json:"startAt"`
-	EndAt     int64    `json:"endAt"` // 0 = 进行中
-	Duration  int64    `json:"duration"`
-	Auto      bool     `json:"auto"` // true=告警自动生成，false=人工登记
+	ID        string                 `json:"-"`
+	Title     string                 `json:"title"`
+	Body      string                 `json:"body,omitempty"`
+	Level     string                 `json:"level"`
+	NodeNames []string               `json:"nodeNames,omitempty"`
+	StartAt   int64                  `json:"startAt"`
+	EndAt     int64                  `json:"endAt"` // 0 = 进行中
+	Duration  int64                  `json:"duration"`
+	Auto      bool                   `json:"auto"` // true=告警自动生成，false=人工登记
+	Updates   []model.IncidentUpdate `json:"updates,omitempty"`
 }
 
 // ---------- 汇总 ----------
@@ -348,6 +357,7 @@ func (s *Server) buildTimeline(since int64, limit int, nameOf func(string) strin
 			EndAt:     it.EndAt,
 			Duration:  endOr(it.EndAt, now) - it.StartAt,
 			Auto:      false,
+			Updates:   it.Updates,
 		})
 	}
 
@@ -672,6 +682,22 @@ func (s *Server) handleStatusNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if vis.Provider && n.Provider != "" {
 		node["provider"] = n.Provider
+	}
+	if vis.Tags && len(n.Tags) > 0 {
+		node["tags"] = n.Tags
+	}
+	if vis.Billing {
+		node["price"] = n.Price
+		node["currency"] = n.Currency
+	}
+	if vis.Expire && n.ExpireAt != "" {
+		node["expireAt"] = n.ExpireAt
+	}
+	if vis.Quota {
+		tu := s.st.TrafficUsage(n.ID)
+		node["quotaGb"] = tu.QuotaGB
+		node["quotaUsed"] = tu.Used
+		node["trafficResetDay"] = tu.ResetDay
 	}
 
 	uptime24, bars := uptime24(raw24, now, state == model.NodeStateOnline)

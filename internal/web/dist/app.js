@@ -12,7 +12,12 @@ const state = {
   route: 'overview',
   param: null,
   range: '1h',
+  ovRange: '24h',
+  ovTopMetric: 'cpu',
   search: '',
+  alertPage: 1,
+  auditPage: 1,
+  auditFilters: { range: '7d', action: '', q: '' },
   nodeFilter: { provider: '', group: '', state: '' },
   data: {},
   panelLink: '',
@@ -28,10 +33,31 @@ const state = {
   timers: [],
 };
 
+const VALID_RANGES = ['1h', '6h', '24h', '7d', '30d', '365d'];
+
 /* ---------------- 工具 ---------------- */
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* 回退到 execCommand */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
 
 function pct(used, total) {
   if (!total) return 0;
@@ -45,6 +71,10 @@ function bytes(n) {
   let i = -1;
   do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
   return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + ' ' + u[i];
+}
+
+function fixed(v, n = 0) {
+  return (Number(v) || 0).toFixed(n);
 }
 
 /** 坐标轴用的紧凑速率格式：293K / 1.2M / 45B */
@@ -236,7 +266,81 @@ function sparkline(values, color, h = 34) {
   </svg>`;
 }
 
-/** 大图：带网格、坐标、面积填充 */
+/* ---------------- 图表交互 ----------------
+   曲线是 innerHTML 渲染出来的，事件不能内联（CSP 禁止）。
+   图表数据存入 registry，由绑定在 #view 上的委托监听统一处理悬停。 */
+const chartRegistry = new Map();
+let chartSeq = 0;
+let activeChart = null;
+
+function chartAxisTime(ts, spanSec) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  if (spanSec > 180 * 86400) return `${d.getFullYear()}-${p(d.getMonth() + 1)}`;
+  if (spanSec > 2 * 86400) return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function chartTipTime(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function hideChartTips() {
+  $$('.chart-tip').forEach((t) => { t.hidden = true; });
+  if (activeChart) {
+    activeChart.querySelector('.chart-cross')?.setAttribute('opacity', '0');
+    activeChart = null;
+  }
+}
+
+function bindChartHover() {
+  const view = $('#view');
+  if (!view || view.dataset.chartBound) return;
+  view.dataset.chartBound = '1';
+  view.addEventListener('pointermove', (e) => {
+    const wrap = e.target.closest ? e.target.closest('.chart-wrap') : null;
+    if (!wrap) { hideChartTips(); return; }
+    const c = chartRegistry.get(wrap.dataset.chartId);
+    if (!c || !c.pts.length) return;
+    const box = wrap.getBoundingClientRect();
+    const svg = wrap.querySelector('svg');
+    if (!svg) return;
+    // viewBox 的绘图区换算到屏幕坐标后再取最近点，
+    // 避免 preserveAspectRatio=none 时直接用 offsetX 造成偏移。
+    const left = box.left + box.width * (c.padL / c.w);
+    const right = box.left + box.width * ((c.padL + c.iw) / c.w);
+    const x = Math.max(left, Math.min(right, e.clientX));
+    const ratio = (x - left) / Math.max(1, right - left);
+    const idx = Math.round(ratio * (c.pts.length - 1));
+    const pt = c.pts[idx];
+    if (activeChart && activeChart !== wrap) {
+      activeChart.querySelector('.chart-cross')?.setAttribute('opacity', '0');
+    }
+    activeChart = wrap;
+    const cross = wrap.querySelector('.chart-cross');
+    if (cross) {
+      cross.setAttribute('opacity', '1');
+      cross.querySelector('line').setAttribute('x1', pt.x);
+      cross.querySelector('line').setAttribute('x2', pt.x);
+      cross.querySelector('circle').setAttribute('cx', pt.x);
+      cross.querySelector('circle').setAttribute('cy', pt.y);
+    }
+    const tip = wrap.querySelector('.chart-tip');
+    if (tip) {
+      const time = c.times ? chartTipTime(c.times[idx]) : '';
+      const value = c.fmt(pt.v);
+      tip.innerHTML = `${time ? `<span class="tip-time">${esc(time)}</span>` : ''}<span class="tip-val mono">${esc(c.label ? c.label + ' ' : '')}${esc(value)}</span>`;
+      tip.hidden = false;
+      const px = Math.max(70, Math.min(box.width - 70, e.clientX - box.left));
+      tip.style.left = px + 'px';
+    }
+  });
+  view.addEventListener('pointerleave', hideChartTips);
+}
+
+/** 大图：带网格、坐标、面积填充；可传入 times/label 启用横轴与悬停读数 */
 function areaChart(values, color, opts = {}) {
   const w = 640, h = opts.height || 132, padL = 34, padR = 6, padT = 8, padB = 18;
   if (!values || values.length < 2) {
@@ -266,15 +370,209 @@ function areaChart(values, color, opts = {}) {
              <text x="${padL - 6}" y="${(gy + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="var(--fg-3)" font-family="ui-monospace,monospace">${fmt(gv)}</text>`;
   }
 
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:${h}px;display:block">
-    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="${color}" stop-opacity="0.20"/>
-      <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
-    </linearGradient></defs>
-    ${grid}
-    <path d="${area}" fill="url(#${id})"/>
-    <path d="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
-  </svg>`;
+  const times = Array.isArray(opts.times) && opts.times.length === values.length ? opts.times : null;
+  let xAxis = '';
+  if (times) {
+    const spanSec = times[times.length - 1] - times[0];
+    const picks = [...new Set([0, Math.floor((values.length - 1) / 3), Math.floor(2 * (values.length - 1) / 3), values.length - 1])];
+    xAxis = `<div class="chart-x">${picks.map((i) => `<span>${esc(chartAxisTime(times[i], spanSec))}</span>`).join('')}</div>`;
+  }
+  const cid = 'c' + (++chartSeq);
+  chartRegistry.set(cid, {
+    padL, iw, w, label: opts.label || '', fmt, times,
+    pts: values.map((v, i) => ({ x: +(padL + i * step).toFixed(1), y: +y(v).toFixed(1), v })),
+  });
+
+  return `<div class="chart-wrap" data-chart-id="${cid}">
+    <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:${h}px;display:block">
+      <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.20"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient></defs>
+      ${grid}
+      <path d="${area}" fill="url(#${id})"/>
+      <path d="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+      <g class="chart-cross" opacity="0" pointer-events="none">
+        <line x1="0" y1="${padT}" x2="0" y2="${padT + ih}" stroke="var(--fg-3)" stroke-width="1" stroke-dasharray="3 3"/>
+        <circle cx="0" cy="0" r="3" fill="${color}" stroke="var(--panel)" stroke-width="1.5"/>
+      </g>
+    </svg>
+    <div class="chart-tip" hidden></div>
+    ${xAxis}
+  </div>`;
+}
+
+/* ---------------- 表格增强：排序 / 列显隐 / 分页 ----------------
+   后台表格数量多，逐个页面改标记成本高且容易漏。
+   这里对 #view 内所有表格统一增强：表头可排序，右侧「列」菜单控制显隐，
+   带 data-page-size 的长表自动分页。排序偏好存内存，列显隐存 localStorage。 */
+const tablePrefs = {};
+
+function tableKey(table, idx) {
+  return `${state.route}:${state.param || ''}:${idx}`;
+}
+
+function sortCellValue(td) {
+  if (!td) return { s: '' };
+  const dv = td.dataset.v;
+  if (dv !== undefined && dv !== '') {
+    const n = Number(dv);
+    if (Number.isFinite(n)) return { n };
+  }
+  const text = (td.innerText || '').replace(/\s+/g, ' ').trim();
+  const m = text.match(/^-?[\d,]+(?:\.\d+)?/);
+  if (m) {
+    const n = Number(m[0].replace(/,/g, ''));
+    if (Number.isFinite(n)) return { n, s: text };
+  }
+  return { s: text };
+}
+
+function applyTableSort(table, idx, dir, resetPage = true) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  const all = Array.from(tbody.rows);
+  const rows = all.filter((tr) => !tr.querySelector('.empty'));
+  const emptyRows = all.filter((tr) => tr.querySelector('.empty'));
+  const decorated = rows.map((tr, i) => ({ tr, v: sortCellValue(tr.children[idx]), i }));
+  decorated.sort((a, b) => {
+    const an = a.v.n, bn = b.v.n;
+    if (an != null && bn != null && an !== bn) return dir === 'asc' ? an - bn : bn - an;
+    if (an != null && bn == null) return -1;
+    if (an == null && bn != null) return 1;
+    const c = a.v.s.localeCompare(b.v.s, 'zh-CN', { numeric: true });
+    return dir === 'asc' ? c : -c;
+  });
+  decorated.forEach((d) => tbody.appendChild(d.tr));
+  emptyRows.forEach((tr) => tbody.appendChild(tr));
+  const ths = $$('thead th', table);
+  ths.forEach((th) => { delete th.dataset.sort; });
+  if (ths[idx]) ths[idx].dataset.sort = dir;
+  table.dataset.sortIdx = String(idx);
+  table.dataset.sortDir = dir;
+  const key = table.dataset.tkey;
+  if (key) {
+    tablePrefs[key] = tablePrefs[key] || {};
+    tablePrefs[key].sortIdx = idx;
+    tablePrefs[key].dir = dir;
+  }
+  if (resetPage) table.dataset.page = '1';
+  applyTablePagination(table);
+}
+
+function toggleTableSort(table, idx) {
+  const same = table.dataset.sortIdx === String(idx);
+  const dir = same && table.dataset.sortDir === 'asc' ? 'desc' : 'asc';
+  applyTableSort(table, idx, dir, true);
+}
+
+function setColumnHidden(table, idx, hidden) {
+  $$('tr', table).forEach((tr) => {
+    const cell = tr.children[idx];
+    if (cell) cell.style.display = hidden ? 'none' : '';
+  });
+}
+
+function bindColumnPicker(table, ths, eligible, hidden) {
+  const wrap = table.closest('.table-wrap');
+  if (!wrap || eligible.length < 2) return;
+  const details = document.createElement('details');
+  details.className = 'col-picker';
+  const items = eligible.map(([i, label]) => `<label class="col-item">
+      <input type="checkbox" data-col="${i}" ${hidden.includes(label) ? '' : 'checked'}>
+      <span>${esc(label)}</span>
+    </label>`).join('');
+  details.innerHTML = `<summary class="btn tiny">列</summary><div class="col-menu">${items}</div>`;
+  wrap.parentNode.insertBefore(details, wrap);
+  details.addEventListener('change', (e) => {
+    const box = e.target.closest('input[data-col]');
+    if (!box) return;
+    const i = Number(box.dataset.col);
+    setColumnHidden(table, i, !box.checked);
+    const key = table.dataset.tkey;
+    const pref = tablePrefs[key] || (tablePrefs[key] = {});
+    const label = (ths[i].innerText || '').trim();
+    pref.hidden = (pref.hidden || []).filter((x) => x !== label);
+    if (!box.checked) pref.hidden.push(label);
+    try { localStorage.setItem('rollcall.cols.' + key, JSON.stringify(pref.hidden)); } catch (_) { /* 隐私模式忽略 */ }
+  });
+}
+
+function applyTablePagination(table) {
+  const size = Number(table.dataset.pageSize) || 0;
+  const wrap = table.closest('.table-wrap');
+  if (!size || !wrap) return;
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  const rows = Array.from(tbody.rows).filter((tr) => !tr.querySelector('.empty'));
+  const pages = Math.ceil(rows.length / size);
+  if (pages <= 1) {
+    rows.forEach((tr) => { tr.style.display = ''; });
+    if (table.__pager) { table.__pager.remove(); table.__pager = null; }
+    return;
+  }
+  let page = Number(table.dataset.page) || 1;
+  page = Math.max(1, Math.min(pages, page));
+  table.dataset.page = String(page);
+  rows.forEach((tr, i) => {
+    tr.style.display = i >= (page - 1) * size && i < page * size ? '' : 'none';
+  });
+  let pager = table.__pager;
+  if (!pager || !pager.isConnected) {
+    pager = document.createElement('div');
+    pager.className = 'table-pager';
+    wrap.after(pager);
+    table.__pager = pager;
+    pager.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-page]');
+      if (!btn) return;
+      const cur = Number(table.dataset.page) || 1;
+      table.dataset.page = String(cur + Number(btn.dataset.page));
+      applyTablePagination(table);
+    });
+  }
+  const sig = `${page}/${pages}/${rows.length}`;
+  if (pager.dataset.sig === sig) return;
+  pager.dataset.sig = sig;
+  pager.innerHTML = `<button class="btn tiny" data-page="-1" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+    <span class="pager-info">第 <b class="mono">${page}</b> / ${pages} 页 · 共 ${rows.length} 条</span>
+    <button class="btn tiny" data-page="1" ${page >= pages ? 'disabled' : ''}>下一页</button>`;
+}
+
+function enhanceTables() {
+  const tables = $$('#view .table-wrap table');
+  tables.forEach((table, idx) => {
+    if (table.dataset.enhanced === '1') { applyTablePagination(table); return; }
+    table.dataset.enhanced = '1';
+    const key = tableKey(table, idx);
+    table.dataset.tkey = key;
+    const pref = tablePrefs[key] || (tablePrefs[key] = {});
+    const ths = $$('thead th', table);
+    const eligible = [];
+    ths.forEach((th, i) => {
+      const label = (th.innerText || '').trim();
+      if (!label || label === '操作' || label === 'Actions' || th.querySelector('input')) return;
+      eligible.push([i, label]);
+      th.classList.add('sortable');
+      th.title = '点击排序';
+      th.addEventListener('click', () => toggleTableSort(table, i));
+    });
+    // 列显隐按表头文本持久化：列顺序调整后依然能命中。
+    let hidden = pref.hidden || [];
+    try {
+      const saved = localStorage.getItem('rollcall.cols.' + key);
+      if (saved) hidden = JSON.parse(saved) || [];
+    } catch (_) { /* 忽略损坏的本地配置 */ }
+    pref.hidden = hidden;
+    eligible.forEach(([i, label]) => {
+      if (hidden.includes(label)) setColumnHidden(table, i, true);
+    });
+    bindColumnPicker(table, ths, eligible, hidden);
+    if (pref.sortIdx != null && ths[pref.sortIdx]) {
+      applyTableSort(table, pref.sortIdx, pref.dir || 'asc', false);
+    }
+    applyTablePagination(table);
+  });
 }
 
 /* ---------------- 组件 ---------------- */
@@ -583,9 +881,81 @@ function patchLive(ov, nodes) {
   return true;
 }
 
+const TOP_METRICS = [
+  ['cpu', 'CPU', (v) => fixed(v, 1) + '%'],
+  ['mem', '内存', (v) => fixed(v, 1) + '%'],
+  ['disk', '磁盘', (v) => fixed(v, 1) + '%'],
+  ['net', '网速', (v) => bytes(v) + '/s'],
+];
+
+function topListHTML(trend, metric) {
+  const list = (trend && trend.top && trend.top[metric]) || [];
+  if (!list.length) return '<div class="empty">暂无数据</div>';
+  const fmt = (TOP_METRICS.find((m) => m[0] === metric) || TOP_METRICS[0])[2];
+  const max = Math.max(...list.map((x) => x.value), 1);
+  return list.map((n, i) => `
+    <div class="top-row row-click" data-node="${esc(n.id)}">
+      <span class="top-rank">${i + 1}</span>
+      <span class="top-name" title="${esc(n.name)}">${esc(n.name)}</span>
+      <span class="top-bar"><i style="width:${Math.max(2, (n.value / max) * 100).toFixed(1)}%"></i></span>
+      <span class="top-val mono">${esc(fmt(n.value))}</span>
+    </div>`).join('');
+}
+
+// fleetTrendHTML 计算机群级趋势与资源 Top。
+// 数据来自 /api/overview/trend：服务端已按 5m/1h 桶聚合，
+// 前端只负责画图与切换 Top 指标，不再自己合并各节点序列。
+function fleetTrendHTML(trend) {
+  if (!trend || !Array.isArray(trend.points) || trend.points.length < 2) return '';
+  const times = trend.points.map((p) => p.t);
+  const cpu = trend.points.map((p) => p.cpu);
+  const mem = trend.points.map((p) => p.mem);
+  const last = trend.points[trend.points.length - 1];
+  const ranges = [['24h', '24 小时'], ['7d', '7 天']];
+  const metric = state.ovTopMetric || 'cpu';
+  return `
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">机群趋势</h2>
+        <div class="seg" role="group" aria-label="趋势时间范围">
+          ${ranges.map(([k, t]) => `<button class="btn sm ${state.ovRange === k ? 'primary' : ''}" data-ov-range="${k}">${t}</button>`).join('')}
+        </div>
+      </div>
+      <div class="fleet-grid">
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <span>平均 CPU</span>
+            <span class="mono">${fixed(last.cpu, 1)}%</span>
+          </div>
+          ${areaChart(cpu, 'var(--accent)', { times, label: 'CPU', height: 120, fmt: (v) => fixed(v, 1) + '%' })}
+        </div>
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <span>平均内存</span>
+            <span class="mono">${fixed(last.mem, 1)}%</span>
+          </div>
+          ${areaChart(mem, 'var(--ok)', { times, label: '内存', height: 120, fmt: (v) => fixed(v, 1) + '%' })}
+        </div>
+      </div>
+      <div class="panel top-panel">
+        <div class="panel-head">
+          <span>资源占用 Top 8</span>
+          <div class="seg" role="group" aria-label="Top 指标">
+            ${TOP_METRICS.map(([k, t]) => `<button class="btn sm ${metric === k ? 'primary' : ''}" data-ov-top="${k}">${t}</button>`).join('')}
+          </div>
+        </div>
+        <div id="topList">${topListHTML(trend, metric)}</div>
+      </div>
+    </section>`;
+}
+
 async function viewOverview() {
-  const [ov, nodes] = await Promise.all([api('/api/overview'), api('/api/nodes')]);
+  const [ov, nodes, trend] = await Promise.all([
+    api('/api/overview'), api('/api/nodes'),
+    api('/api/overview/trend?range=' + encodeURIComponent(state.ovRange)).catch(() => null),
+  ]);
   state.data.nodes = nodes;
+  state.data.trend = trend;
   // 静默轮询用它判断"数据是否真的变了"，避免每次轮询都整体重绘：
   // 重绘会重建搜索框、打断输入，也会让 KPI 数字闪一下。
   state.liveSig = JSON.stringify([ov, nodes]);
@@ -611,6 +981,8 @@ async function viewOverview() {
       </div>
     </section>` : ''}
 
+    ${fleetTrendHTML(trend)}
+
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">节点状态</h2>
@@ -635,6 +1007,22 @@ async function viewOverview() {
 
   const wiz = $('#wizBtn');
   if (wiz) wiz.onclick = showAgentWizard;
+  $$('[data-ov-range]').forEach((b) => {
+    b.onclick = () => {
+      if (state.ovRange === b.dataset.ovRange) return;
+      state.ovRange = b.dataset.ovRange;
+      viewOverview();
+    };
+  });
+  $$('[data-ov-top]').forEach((b) => {
+    b.onclick = () => {
+      state.ovTopMetric = b.dataset.ovTop;
+      $$('[data-ov-top]').forEach((x) => x.classList.toggle('primary', x === b));
+      const box = $('#topList');
+      if (box) box.innerHTML = topListHTML(trend, state.ovTopMetric);
+      bindNodeClicks();
+    };
+  });
   bindProvChips();
   bindNodeClicks();
   rememberLiveNodes(nodes);
@@ -679,6 +1067,11 @@ async function viewNodes() {
         <button class="btn tiny" data-batch="region">改地区</button>
         <button class="btn tiny" data-batch="expire">改到期日</button>
         <button class="btn tiny" data-batch="currency">改币种</button>
+        <button class="btn tiny" data-batch="weight">改权重</button>
+        <button class="btn tiny" data-batch="favorite">改收藏</button>
+        <button class="btn tiny" data-batch="traffic">改流量</button>
+        <button class="btn tiny" data-batch="tags">改标签</button>
+        <button class="btn tiny" data-batch="upgrade">加入升级清单</button>
         <button class="btn tiny danger" data-batch="delete">删除</button>
       </div>
       <div class="table-wrap"><table class="nodes-table">
@@ -757,6 +1150,7 @@ function bindBatchOps(list) {
       sync();
     };
   }
+  const reload = () => { state.data.nodes = null; viewNodes(); };
   const PROMPTS = {
     group: { label: '新分组名', ph: '例如：prod', def: '' },
     provider: { label: '服务商', ph: '例如：racknerd', def: '' },
@@ -772,33 +1166,119 @@ function bindBatchOps(list) {
       const action = b.dataset.batch;
       if (action === 'delete') {
         const names = ids.map((id) => { const n = list.find((x) => x.id === id); return n ? n.name : id; });
-        if (!confirm(`确认删除 ${ids.length} 台节点？\n\n${names.join('、')}\n\n历史数据会一并删除，且无法恢复。`)) return;
-      } else {
-        const p = PROMPTS[action];
-        const v = prompt(`${p.label}\n（将应用到 ${ids.length} 台节点）`, p.def);
+        if (!(await modalConfirm('批量删除节点',
+          `确认删除 ${ids.length} 台节点？\n\n${names.join('、')}\n\n历史数据会一并删除，且无法恢复。`,
+          { danger: true, okText: '删除' }))) return;
+        try {
+          const res = await adminApi('/api/admin/nodes/batch', {
+            method: 'POST',
+            body: JSON.stringify({ ids, action: 'delete' }),
+          });
+          toast(`已删除 ${res.changed} 台节点`);
+          reload();
+        } catch (err) { toast('删除失败：' + err.message, 'err'); }
+        return;
+      }
+      if (action === 'upgrade') { openUpgradeBatchDialog(list, ids, reload); return; }
+      if (action === 'traffic') { openBatchTrafficDialog(ids, reload); return; }
+      if (action === 'tags') { openBatchTagsDialog(ids, reload); return; }
+      if (action === 'favorite') { openBatchFavoriteDialog(ids, reload); return; }
+      if (action === 'weight') {
+        const v = await modalPrompt('修改排序权重', '排序权重（-1000–1000，数字越小越靠前）', {
+          type: 'number', value: '0', min: -1000, max: 1000,
+          hint: `将应用到 ${ids.length} 台节点`,
+        });
         if (v === null) return;
+        const weight = Number(v);
+        if (!Number.isInteger(weight) || weight < -1000 || weight > 1000) {
+          toast('请输入 -1000 到 1000 之间的整数', 'err'); return;
+        }
         try {
           await adminApi('/api/admin/nodes/batch', {
             method: 'POST',
-            body: JSON.stringify({ ids, action, value: v.trim() }),
+            body: JSON.stringify({ ids, action: 'weight', weight }),
           });
           toast(`已更新 ${ids.length} 台节点`);
-          state.data.nodes = null;
-          viewNodes();
+          reload();
         } catch (err) { toast('批量操作失败：' + err.message, 'err'); }
         return;
       }
+      const p = PROMPTS[action];
+      if (!p) return;
+      const v = await modalPrompt('批量修改', p.label, {
+        value: p.def, placeholder: p.ph, hint: `将应用到 ${ids.length} 台节点`,
+      });
+      if (v === null) return;
       try {
-        const res = await adminApi('/api/admin/nodes/batch', {
+        await adminApi('/api/admin/nodes/batch', {
           method: 'POST',
-          body: JSON.stringify({ ids, action: 'delete' }),
+          body: JSON.stringify({ ids, action, value: v }),
         });
-        toast(`已删除 ${res.changed} 台节点`);
-        state.data.nodes = null;
-        viewNodes();
-      } catch (err) { toast('删除失败：' + err.message, 'err'); }
+        toast(`已更新 ${ids.length} 台节点`);
+        reload();
+      } catch (err) { toast('批量操作失败：' + err.message, 'err'); }
     };
   });
+}
+
+// 批量对话框共用提交逻辑：成功后关闭并刷新节点列表。
+function batchDialog(ids, title, bodyHTML, after, buildBody) {
+  const dlg = openDialog(title + '（' + ids.length + ' 台）', `
+    <form id="batchForm" class="form-stack">
+      ${bodyHTML}
+      <div class="form-actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">应用到 ${ids.length} 台</button>
+      </div>
+    </form>`);
+  const f = dlg.querySelector('#batchForm');
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await adminApi('/api/admin/nodes/batch', {
+        method: 'POST',
+        body: JSON.stringify(Object.assign({ ids }, buildBody(f))),
+      });
+      dlg.close();
+      toast('已更新 ' + ids.length + ' 台节点');
+      (after || (() => {}))();
+    } catch (err) { toast('批量操作失败：' + err.message, 'err'); }
+  };
+}
+
+function openBatchTrafficDialog(ids, after) {
+  batchDialog(ids, '批量设置流量配额', `
+    <div class="grid-2">
+      ${field('月度配额（GB，0 = 不限制）', 'trafficQuotaGb', '', { type: 'number', placeholder: '0' })}
+      ${field('重置日', 'trafficResetDay', '1', { type: 'number', hint: '每月 1–28 日' })}
+    </div>
+    ${selectField('计费口径', 'trafficMode', 'sum', TRAFFIC_MODES.map((x) => ({ v: x.v, t: x.t })))}
+    <div class="field-hint">按商家计费方式选择：双边计费用「收发合计」，只算单向用对应单边口径。配额归零表示不限制。</div>`,
+  after, (f) => ({
+    trafficQuotaGb: Number(f.trafficQuotaGb.value) || 0,
+    trafficResetDay: Number(f.trafficResetDay.value) || 0,
+    trafficMode: f.trafficMode.value || 'sum',
+  }));
+}
+
+function openBatchTagsDialog(ids, after) {
+  batchDialog(ids, '批量修改标签', `
+    ${selectField('操作', 'tagMode', 'add', [
+      { v: 'add', t: '追加标签' }, { v: 'remove', t: '移除标签' }, { v: 'replace', t: '替换全部标签' },
+    ])}
+    ${field('标签', 'tags', '', { placeholder: 'cn2, 高防', hint: '逗号分隔，最多 8 个；移除时不存在的标签会被忽略' })}`,
+  after, (f) => ({
+    tagMode: f.tagMode.value,
+    tags: splitTags(f.tags.value),
+  }));
+}
+
+function openBatchFavoriteDialog(ids, after) {
+  batchDialog(ids, '批量设置收藏', `
+    ${selectField('收藏状态', 'favorite', '1', [
+      { v: '1', t: '设为收藏（对比页优先展示）' }, { v: '0', t: '取消收藏' },
+    ])}`,
+  after, (f) => ({ favorite: f.favorite.value === '1' }));
 }
 
 async function viewNodeDetail(id) {
@@ -815,9 +1295,12 @@ async function viewNodeDetail(id) {
     const pair = await Promise.all([
       api('/api/nodes/' + id),
       api(`/api/nodes/${id}/series?range=${state.range}`),
+      // 详情页的上一台/下一台需要完整节点顺序；首次直接打开详情时补拉一次。
+      state.data.nodes ? Promise.resolve(null) : api('/api/nodes').catch(() => []),
     ]);
     detail = pair[0];
     series = pair[1];
+    if (pair[2]) state.data.nodes = pair[2];
   }
   state.detailSig = JSON.stringify([detail, series]);
   const n = detail.node, host = detail.host || {};
@@ -841,6 +1324,8 @@ async function viewNodeDetail(id) {
       netVals.push(Math.max(0, d / dt));
     }
   }
+  const times = pts.map((p) => p.ts);
+  const netTimes = bucketSec > 0 ? times : times.slice(1);
   const loadVals = pts.map((p) => p.load1);
   const last = detail.latest || {};
   const traffic = detail.traffic || {};
@@ -853,6 +1338,10 @@ async function viewNodeDetail(id) {
   const quotaPctVal = quotaBytes > 0 ? (trafficUsed / quotaBytes) * 100 : 0;
   const mounts = last.mounts || [];
   const nics = last.nics || [];
+  const navList = state.data.nodes || [];
+  const navIdx = navList.findIndex((x) => x.id === id);
+  const prevNode = navIdx > 0 ? navList[navIdx - 1] : null;
+  const nextNode = navIdx >= 0 && navIdx < navList.length - 1 ? navList[navIdx + 1] : null;
 
   const memUsed = last.memUsed || 0, memTotal = last.memTotal || 1;
   const diskUsed = last.diskUsed || 0, diskTotal = last.diskTotal || 1;
@@ -876,10 +1365,16 @@ async function viewNodeDetail(id) {
         </p>
       </div>
       <div class="detail-actions">
+        ${navList.length > 1 ? `<div class="detail-nav">
+          <button class="btn sm" id="prevNode" type="button" ${prevNode ? '' : 'disabled'} title="${prevNode ? esc(prevNode.name) : ''}" aria-label="上一台节点">←</button>
+          <span class="field-hint" style="white-space:nowrap">${navIdx + 1} / ${navList.length}</span>
+          <button class="btn sm" id="nextNode" type="button" ${nextNode ? '' : 'disabled'} title="${nextNode ? esc(nextNode.name) : ''}" aria-label="下一台节点">→</button>
+        </div>` : ''}
         <div class="range-tabs">
           ${[['1h', '1 小时'], ['6h', '6 小时'], ['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['365d', '365 天']]
             .map(([r, label]) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${label}</button>`).join('')}
         </div>
+        <button class="btn sm" id="nodeCopyBtn" type="button">复制摘要</button>
         <button class="btn sm" id="nodeEditBtn" type="button">编辑资产</button>
         <button class="btn sm" id="nodeAgentBtn" type="button">接入/令牌</button>
       </div>
@@ -890,27 +1385,27 @@ async function viewNodeDetail(id) {
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">CPU 使用率</span>
             <span class="chart-val mono" style="color:${hasData && (last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—'}</span></div>
-          ${areaChart(cpuVals, 'var(--accent)')}
+          ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%' })}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">内存使用率</span>
             <span class="chart-val mono">${hasData ? `${pct(memUsed, memTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(memUsed)} / ${bytes(memTotal)}</span>` : '—'}</span></div>
-          ${areaChart(memVals, 'var(--accent-2)')}
+          ${areaChart(memVals, 'var(--accent-2)', { times, label: '内存', fmt: (v) => v.toFixed(1) + '%' })}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">磁盘使用率</span>
             <span class="chart-val mono">${hasData ? `${pct(diskUsed, diskTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(diskUsed)} / ${bytes(diskTotal)}</span>` : '—'}</span></div>
-          ${areaChart(diskVals, 'var(--warn)')}
+          ${areaChart(diskVals, 'var(--warn)', { times, label: '磁盘', fmt: (v) => v.toFixed(1) + '%' })}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">网络吞吐速率</span>
             <span class="chart-val" style="font-size:13px">${hasData ? `<span class="mono">↓${bytes(last.netRx)} ↑${bytes(last.netTx)}</span> <span style="color:var(--fg-3);font-weight:400;letter-spacing:0">累计</span>` : '—'}</span></div>
-          ${areaChart(netVals, 'var(--ok)', { height: 110, fmt: (v) => rate(v) })}
+          ${areaChart(netVals, 'var(--ok)', { height: 110, times: netTimes, label: '速率', fmt: (v) => rate(v) + '/s' })}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">1 分钟负载</span>
             <span class="chart-val mono">${hasData ? (last.load1 || 0).toFixed(2) : '—'}</span></div>
-          ${areaChart(loadVals, 'var(--fg-2)', { height: 100 })}
+          ${areaChart(loadVals, 'var(--fg-2)', { height: 100, times, label: '负载', fmt: (v) => v.toFixed(2) })}
         </div>
       </div>
 
@@ -1003,10 +1498,36 @@ async function viewNodeDetail(id) {
       showAgentConfig(an);
     } catch (e) { toast('读取接入信息失败：' + e.message, 'err'); }
   };
+  const prevBtn = $('#prevNode');
+  if (prevBtn) prevBtn.onclick = () => { if (prevNode) location.hash = '#/nodes/' + prevNode.id + '?range=' + state.range; };
+  const nextBtn = $('#nextNode');
+  if (nextBtn) nextBtn.onclick = () => { if (nextNode) location.hash = '#/nodes/' + nextNode.id + '?range=' + state.range; };
+  const copyBtn = $('#nodeCopyBtn');
+  if (copyBtn) copyBtn.onclick = async () => {
+    const cpuVal = hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—';
+    const memVal = hasData ? pct(memUsed, memTotal).toFixed(1) + '%' : '—';
+    const diskVal = hasData ? pct(diskUsed, diskTotal).toFixed(1) + '%' : '—';
+    const loadVal = hasData ? `${(last.load1 || 0).toFixed(2)} / ${(last.load5 || 0).toFixed(2)} / ${(last.load15 || 0).toFixed(2)}` : '—';
+    const lines = [
+      `【${n.name}】${st.text} · 24h 可用率 ${detail.uptime24 != null ? detail.uptime24.toFixed(1) + '%' : '—'}`,
+      `主机：${host.hostname || '—'} · ${host.os || '—'} · ${host.arch || '—'} · ${host.cores || '?'} 核`,
+      `CPU ${cpuVal} · 内存 ${memVal} · 磁盘 ${diskVal}`,
+      `负载 ${loadVal} · 运行 ${hasData ? dur(last.uptime) : '—'}`,
+      `网络 ↓ ${rate(last.netRx)}/s ↑ ${rate(last.netTx)}/s`,
+      `Agent ${n.agentVersion || '—'} · 最后上报 ${ago(detail.lastSeen)}`,
+      `服务商 ${n.provider || '—'} · 位置 ${n.region || '—'} · 分组 ${n.group || '—'}`,
+      `到期 ${n.expireAt || '—'} · 年付 ${n.price ? (n.currency === 'CNY' ? '¥' : '$') + n.price : '—'}`,
+    ];
+    const ok = await copyText(lines.join('\n'));
+    if (ok) toast('节点摘要已复制');
+    else toast('复制失败，请手动选择文本', 'err');
+  };
   $$('.range-tabs button', $('#view')).forEach((b) => {
     b.onclick = () => {
       state.range = b.dataset.range;
       state.detailCache = null;
+      // replaceState 不触发 hashchange，手动重渲染，避免整页闪回概览。
+      history.replaceState(null, '', '#/nodes/' + encodeURIComponent(id) + '?range=' + state.range);
       viewNodeDetail(id);
     };
   });
@@ -1181,7 +1702,8 @@ async function viewServices() {
   });
   $$('[data-svc-del]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('确认删除该探测目标？其历史探测数据会一并删除。')) return;
+      if (!(await modalConfirm('删除探测目标', '确认删除该探测目标？其历史探测数据会一并删除。',
+        { danger: true, okText: '删除' }))) return;
       b.disabled = true;
       try {
         await adminApi('/api/admin/services/' + encodeURIComponent(b.dataset.svcDel), { method: 'DELETE' });
@@ -1288,6 +1810,13 @@ async function viewAlerts() {
   const nq = d.notify || {};
   const silLabel = (s) => `至 ${clock(s.until)}${s.reason ? ' · ' + s.reason : ''}`;
 
+  // 告警记录是卡片列表而不是表格，通用表格分页覆盖不到，单独分页。
+  const alertPageSize = 12;
+  const alertPages = Math.max(1, Math.ceil(filteredItems.length / alertPageSize));
+  const alertPage = Math.max(1, Math.min(alertPages, state.alertPage || 1));
+  state.alertPage = alertPage;
+  const pageItems = filteredItems.slice((alertPage - 1) * alertPageSize, alertPage * alertPageSize);
+
   $('#view').innerHTML = `
     <div class="kpis" style="margin-bottom:20px">
       ${kpi('活跃告警', d.active, '', d.active ? '需要处理' : '全部恢复')}
@@ -1301,7 +1830,7 @@ async function viewAlerts() {
         <h2 class="section-title">告警规则</h2>
         ${sectionActions(`${filteredRules.length}/${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm" id="ruleTplBtn">规则模板</button> <button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
       </div>
-      <div class="table-wrap"><table class="alerts-table">
+      <div class="table-wrap"><table class="alerts-table" data-page-size="15">
         <thead><tr><th>规则</th><th>条件</th><th class="num">持续</th><th>级别</th><th class="num">启用</th><th class="num">操作</th></tr></thead>
         <tbody>${filteredRules.map((r) => {
           const m = metricMap[r.metric];
@@ -1335,7 +1864,7 @@ async function viewAlerts() {
         ${sectionActions(`${filteredItems.length}/${items.length} 条 · 最近 200 条`)}
       </div>
       <div class="panel">
-        ${filteredItems.map((a) => {
+        ${pageItems.map((a) => {
           const active = !a.resolvedAt;
           return `<div class="alert-item">
             <div class="alert-bar ${a.severity}"></div>
@@ -1353,6 +1882,11 @@ async function viewAlerts() {
             </div>
           </div>`;
         }).join('') || `<div class="empty">${items.length ? '没有匹配的告警记录' : '暂无告警记录'}</div>`}
+        ${alertPages > 1 ? `<div class="table-pager" style="padding:0 14px 14px">
+          <button class="btn tiny" data-alert-page="-1" ${alertPage <= 1 ? 'disabled' : ''}>上一页</button>
+          <span class="pager-info">第 <b class="mono">${alertPage}</b> / ${alertPages} 页 · 共 ${filteredItems.length} 条</span>
+          <button class="btn tiny" data-alert-page="1" ${alertPage >= alertPages ? 'disabled' : ''}>下一页</button>
+        </div>` : ''}
       </div>
     </section>
 
@@ -1391,7 +1925,8 @@ async function viewAlerts() {
   $$('[data-rule-del]').forEach((b) => {
     b.onclick = async () => {
       if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
-      if (!confirm('确认删除该规则？其进行中的告警会一并关闭。')) return;
+      if (!(await modalConfirm('删除告警规则', '确认删除该规则？其进行中的告警会一并关闭。',
+        { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/rules/' + b.dataset.ruleDel, { method: 'DELETE' });
         toast('规则已删除'); viewAlerts();
@@ -1443,6 +1978,12 @@ async function viewAlerts() {
       if (!canManage) { toast('当前会话没有管理权限', 'err'); return; }
       const r = (rules || []).find((x) => x.id === b.dataset.ruleSilence);
       if (r) openSilenceDialog(r.id, r.name, silenceMap[r.id]);
+    };
+  });
+  $$('[data-alert-page]').forEach((b) => {
+    b.onclick = () => {
+      state.alertPage = alertPage + Number(b.dataset.alertPage);
+      viewAlerts();
     };
   });
 }
@@ -1850,7 +2391,7 @@ async function viewAssets() {
         <h2 class="section-title">资产台账</h2>
         ${sectionActions(`${rows.length}/${rowsAll.length} 台 · 按到期时间排序`)}
       </div>
-      <div class="table-wrap"><table class="assets-table">
+      <div class="table-wrap"><table class="assets-table" data-page-size="20">
         <thead><tr><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
           <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th><th class="num">操作</th></tr></thead>
         <tbody>${rows.map((r) => {
@@ -1928,7 +2469,7 @@ async function viewAssets() {
   $$('[data-del-renew]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
-      if (!confirm('删除这条续费记录？')) return;
+      if (!(await modalConfirm('删除续费记录', '删除这条续费记录？', { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/renewals/' + encodeURIComponent(b.dataset.delRenew), { method: 'DELETE' });
         toast('续费记录已删除');
@@ -2548,8 +3089,11 @@ async function viewSettings() {
   let tokens = [];
   let health = null;
   let loadErr = '';
+  let autoBk = null;
+  let upgrades = { items: [], serverVersion: '' };
+  let storage = null;
   try {
-    const [n, svc, q, th, tk, hl, tp] = await Promise.all([
+    const [n, svc, q, th, tk, hl, tp, ab, au, sg] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
       adminApi('/api/admin/notify/jobs'),
@@ -2557,8 +3101,14 @@ async function viewSettings() {
       adminApi('/api/admin/tokens').catch(() => []),
       adminApi('/api/admin/health').catch(() => null),
       adminApi('/api/admin/theme-packs').catch(() => null),
+      adminApi('/api/admin/backup/auto').catch(() => null),
+      adminApi('/api/admin/agent-upgrades').catch(() => null),
+      adminApi('/api/admin/storage').catch(() => null),
     ]);
     health = hl;
+    autoBk = ab;
+    storage = sg;
+    if (au) upgrades = au;
     nodes = n; services = svc; queue = q || queue; tokens = Array.isArray(tk) ? tk : [];
     themeCfg = th || {};
     if (tp) themePacks = tp;
@@ -2622,6 +3172,65 @@ async function viewSettings() {
   );
   const badPacks = packList.filter((p) => p.error);
   const themeDirHint = themePacks.dir || '<数据目录>/themes';
+  const ab = autoBk || { enabled: false };
+  const abLatest = (ab.files || [])[0];
+  const upList = Array.isArray(upgrades.items) ? upgrades.items : [];
+  const upState = { done: ['ok', '已完成'], pending: ['warn', '待升级'], missing: ['mute', '已删除'] };
+  const upgradeCards = upList.map((b) => {
+    const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
+    const rows = (b.targets || []).map((t) => {
+      const [cls, label] = upState[t.state] || ['mute', t.state];
+      return `<tr>
+        <td class="strong">${esc(t.name || t.id)}</td>
+        <td class="mono">${esc(t.before || '—')}</td>
+        <td class="mono">${esc(t.current || '—')}</td>
+        <td><span class="badge ${cls}">${label}</span></td>
+      </tr>`;
+    }).join('') || `<tr><td colspan="4"><div class="empty">清单为空</div></td></tr>`;
+    return `<div class="panel panel-pad" style="margin-bottom:10px">
+      <div class="panel-head">
+        <span class="panel-title">目标 ${esc(b.targetVersion || '—')}
+          <span class="badge ${pct === 100 ? 'ok' : 'warn'}">${b.done}/${b.total} 完成</span>
+          ${b.note ? `<span class="field-hint" style="margin-left:8px">${esc(b.note)}</span>` : ''}
+        </span>
+        <button class="btn tiny danger" data-upgrade-del="${esc(b.id)}">删除</button>
+      </div>
+      <div class="meter" style="margin:8px 0 4px"><i style="width:${pct}%;background:${pct === 100 ? 'var(--ok)' : 'var(--warn)'}"></i></div>
+      <div class="field-hint" style="margin-bottom:10px">创建于 ${esc(clock(b.createdAt))} · ${b.total} 台 · 按各节点最近上报的 Agent 版本推导进度</div>
+      <details>
+        <summary class="sum">查看节点明细</summary>
+        <div class="table-wrap" style="margin-top:8px"><table class="maint-table">
+          <thead><tr><th>节点</th><th>创建时版本</th><th>当前版本</th><th>状态</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </details>
+    </div>`;
+  }).join('') || `<div class="empty" style="padding:18px">还没有升级批次。升级时先建一份清单，节点上报新版本后会自动标记完成。</div>`;
+
+  // 存储与容量：目录占用、历史点数、保留期与审计/备份体积。
+  const stg = storage || {};
+  const stgEntries = Array.isArray(stg.entries) ? stg.entries : [];
+  const stgTotal = stg.totalBytes || 0;
+  const stgHist = stg.history || { nodes: [], totals: {}, retentionDays: {} };
+  const stgTotals = stgHist.totals || {};
+  const stgDays = stgHist.retentionDays || {};
+  const stgAudit = stg.audit || {};
+  const storageBars = stgEntries.map((e) => {
+    const pct = stgTotal > 0 ? Math.max(1, (e.bytes / stgTotal) * 100) : 0;
+    return `<div class="kv-row">
+      <span class="kv-key mono" style="font-size:11.5px">${esc(e.name)}</span>
+      <span class="kv-val" style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+        <span class="nb-track" style="width:90px"><span class="nb-fill" style="width:${pct.toFixed(1)}%;background:var(--accent)"></span></span>
+        <span class="mono" style="font-size:11.5px">${bytes(e.bytes)} · ${e.files} 个文件</span>
+      </span>
+    </div>`;
+  }).join('') || '<div class="empty">数据目录为空或不可读</div>';
+  const histNodeRows = (stgHist.nodes || []).map((n) => `<tr>
+      <td class="strong">${esc(n.name)}</td>
+      <td class="num mono">${(n.points && n.points['1m']) || 0}</td>
+      <td class="num mono">${(n.points && n.points['5m']) || 0}</td>
+      <td class="num mono">${(n.points && n.points['1h']) || 0}</td>
+    </tr>`).join('') || `<tr><td colspan="4"><div class="empty">暂无历史数据</div></td></tr>`;
 
   $('#view').innerHTML = `
     <section class="section">
@@ -2637,7 +3246,7 @@ async function viewSettings() {
         <h2 class="section-title">节点管理</h2>
         <span class="section-meta">${nodes.length} 台${serverVersion ? ' · 控制端 ' + esc(serverVersion) : ''}</span>
       </div>
-      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-nodes-table">
+      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-nodes-table" data-page-size="20">
         <thead><tr><th>名称</th><th>服务商</th><th>位置</th><th>分组</th><th>到期</th><th>Agent</th><th class="num">操作</th></tr></thead>
         <tbody>${nodes.map((n) => `<tr>
           <td class="strong">${esc(n.name)}</td>
@@ -2673,11 +3282,21 @@ async function viewSettings() {
           ${field('流量重置日', 'trafficResetDay', '1', { type: 'number', hint: '每月 1–28 日' })}
           ${selectField('流量计费口径', 'trafficMode', 'sum', TRAFFIC_MODES.map((x) => ({ v: x.v, t: x.t })))}
           ${field('备注', 'note', '', { placeholder: '可选' })}
+          ${field('标签', 'tags', '', { placeholder: 'cn2, 高防', hint: '逗号分隔，最多 8 个' })}
           ${field('排序权重', 'weight', '', { type: 'number', placeholder: '0' })}
           ${checkbox('收藏（对比页优先展示）', 'favorite', false)}
           <div class="form-actions"><button class="btn primary" type="submit">创建并获取令牌</button></div>
         </form>
       </details>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">Agent 升级批次</h2>
+        ${sectionActions('只记录清单与基线版本，不远程执行升级', '<button class="btn sm primary" id="upBatchAdd">＋ 新建升级清单</button>')}
+      </div>
+      <p class="section-note">节点升级完成后会随下一次上报写入新版本，这里按「当前版本 ≠ 创建时版本」自动标记完成。控制端当前版本 ${esc(upgrades.serverVersion || serverVersion || '—')}。</p>
+      <div id="upgradeList">${upgradeCards}</div>
     </section>
 
     <section class="section">
@@ -2778,7 +3397,7 @@ async function viewSettings() {
         <h2 class="section-title">通知队列</h2>
         <span class="section-meta">待投递 ${qStats.pending || 0} · 失败 ${qStats.failed || 0} · 已送达 ${qStats.sent || 0} · 重试 ${qStats.retries || 0} · 拒收 ${qStats.rejected || 0}</span>
       </div>
-      <div class="table-wrap"><table class="queue-table">
+      <div class="table-wrap"><table class="queue-table" data-page-size="15">
         <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
         <tbody>${qJobs.map((j) => {
           const [cls, label] = qBadge[j.status] || ['mute', j.status];
@@ -2856,7 +3475,7 @@ async function viewSettings() {
           管理范围可执行写操作，请仅授予可信自动化。路径限定可把令牌收窄到
           <code>/api/overview</code>、<code>/api/nodes/n1</code> 等前缀（留空=全部）。
         </p>
-        <div class="table-wrap"><table class="queue-table">
+        <div class="table-wrap"><table class="queue-table" data-page-size="15">
           <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>路径限定</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
           <tbody>${tokenRows}</tbody>
         </table></div>
@@ -2949,6 +3568,65 @@ async function viewSettings() {
           导入后通知配置与节点令牌立即生效，请妥善保管备份文件与密码。
         </p>
       </div>
+      <div class="panel panel-pad" style="margin-top:10px">
+        <div class="section-head" style="margin-bottom:10px">
+          <div class="sub-title">自动备份</div>
+          <span class="badge ${ab.enabled ? 'ok' : 'mute'}">${ab.enabled ? '已启用' : '未启用'}</span>
+          ${sectionActions(ab.enabled ? `每 ${dur(ab.intervalSeconds || 86400)} · 保留 ${ab.keep || 0} 份` : '',
+            ab.enabled ? '<button class="btn tiny primary" id="autoBackupRun" type="button">立即备份</button>' : '')}
+        </div>
+        ${ab.enabled ? `
+          <div class="grid-2" style="gap:18px">
+            <div>
+              <div class="kv-row"><span class="kv-key">最近运行</span><span class="kv-val">${ab.lastAt ? clock(ab.lastAt) : '尚未运行'}</span></div>
+              <div class="kv-row"><span class="kv-key">下次运行</span><span class="kv-val">${ab.nextAt ? clock(ab.nextAt) : '—'}</span></div>
+              <div class="kv-row"><span class="kv-key">累计运行</span><span class="kv-val">${ab.runs || 0} 次 · 失败 ${ab.failures || 0} 次</span></div>
+              <div class="kv-row"><span class="kv-key">最近文件</span><span class="kv-val mono" style="font-size:11.5px">${esc(ab.lastFile || '—')}</span></div>
+            </div>
+            <div>
+              <div class="kv-row"><span class="kv-key">备份目录</span><span class="kv-val mono" style="font-size:11.5px">${esc(ab.dir || '—')}</span></div>
+              <div class="kv-row"><span class="kv-key">已有备份</span><span class="kv-val">${(ab.files || []).length} 份 · ${bytes(ab.totalBytes || 0)}</span></div>
+              <div class="kv-row"><span class="kv-key">最近校验</span><span class="kv-val mono" style="font-size:11.5px">${esc(ab.lastChecksum || '—')}${ab.lastSize ? ' · ' + bytes(ab.lastSize) : ''}</span></div>
+              <div class="kv-row"><span class="kv-key">最新文件</span><span class="kv-val">${abLatest ? clock(abLatest.modTime) : '—'}</span></div>
+            </div>
+          </div>
+          ${ab.lastError ? `<p class="field-hint" style="color:var(--crit)">最近一次失败：${esc(ab.lastError)}</p>` : ''}
+          <p class="field-hint section-hint">
+            自动备份使用服务端配置的备份密码加密，写入前会解密回读比对，确认文件可用后才计为成功；失败会进入通知队列。
+            调整间隔与保留份数请修改服务端启动参数 <code class="code-inline">-backup-interval</code> / <code class="code-inline">-backup-keep</code>。
+          </p>` : `
+          <p class="field-hint section-hint">${esc(ab.reason || '未启用：启动时需提供备份密码（-backup-password-file 或 ROLLCALL_BACKUP_PASSWORD）。')}</p>`}
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">存储与容量</h2>
+        <span class="section-meta">数据目录 ${esc(stg.dataDir || '—')} · 合计 ${bytes(stgTotal)}</span>
+      </div>
+      <div class="panel panel-pad">
+        <div class="grid-2" style="gap:18px">
+          <div>
+            <div class="sub-title" style="margin-bottom:8px">目录占用</div>
+            ${storageBars}
+          </div>
+          <div>
+            <div class="sub-title" style="margin-bottom:8px">历史与保留</div>
+            <div class="kv-row"><span class="kv-key">1 分钟粒度</span><span class="kv-val">${stgTotals['1m'] || 0} 点 · 保留 ${stgDays['1m'] || 0} 天</span></div>
+            <div class="kv-row"><span class="kv-key">5 分钟粒度</span><span class="kv-val">${stgTotals['5m'] || 0} 点 · 保留 ${stgDays['5m'] || 0} 天</span></div>
+            <div class="kv-row"><span class="kv-key">1 小时粒度</span><span class="kv-val">${stgTotals['1h'] || 0} 点 · 保留 ${stgDays['1h'] || 0} 天</span></div>
+            <div class="kv-row"><span class="kv-key">审计日志</span><span class="kv-val">${stgAudit.count || 0} 条 · ${bytes(stgAudit.bytes || 0)} · 保留 ${stgAudit.retentionDays || 0} 天</span></div>
+            <div class="kv-row"><span class="kv-key">自动备份</span><span class="kv-val">${stg.backup && stg.backup.enabled ? `${stg.backup.files || 0} 份 · ${bytes(stg.backup.totalBytes || 0)}` : '未启用'}</span></div>
+          </div>
+        </div>
+        <details style="margin-top:10px">
+          <summary class="sum">按节点查看历史点数</summary>
+          <div class="table-wrap" style="margin-top:8px"><table class="maint-table">
+            <thead><tr><th>节点</th><th class="num">1 分钟</th><th class="num">5 分钟</th><th class="num">1 小时</th></tr></thead>
+            <tbody>${histNodeRows}</tbody>
+          </table></div>
+        </details>
+      </div>
     </section>
 
     <section class="section">
@@ -2973,9 +3651,18 @@ async function viewSettings() {
           </select>
           <button class="btn" data-exp="metrics">指标 CSV</button>
         </div>
+        <div class="toolbar" style="margin-top:9px">
+          <select id="expArchiveRange" aria-label="归档时间范围">
+            <option value="24h" selected>归档：最近 24 小时（5 分钟粒度）</option>
+            <option value="7d">归档：最近 7 天（1 小时粒度）</option>
+            <option value="30d">归档：最近 30 天（1 小时粒度）</option>
+            <option value="365d">归档：最近一年（1 小时粒度）</option>
+          </select>
+          <button class="btn" data-exp="history">全机群历史归档 CSV</button>
+        </div>
         <p class="field-hint section-hint">
           Prometheus 抓取端点：<code class="code-inline">GET /metrics</code>
-          （Basic Auth 密码填管理令牌，用户名任意）
+          （Basic Auth 密码填管理令牌，用户名任意）；接口延迟、5xx 与 SSE 连接数均已输出。
         </p>
       </div>
     </section>`;
@@ -3021,7 +3708,8 @@ async function viewSettings() {
   };
   $$('[data-del-token]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除该 API 令牌？使用它的自动化会立即失去访问权限。')) return;
+      if (!(await modalConfirm('删除 API 令牌', '删除该 API 令牌？使用它的自动化会立即失去访问权限。',
+        { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/tokens/' + encodeURIComponent(b.dataset.delToken), { method: 'DELETE' });
         toast('令牌已删除');
@@ -3062,7 +3750,9 @@ async function viewSettings() {
     if (!file) { toast('请选择备份文件', 'err'); return; }
     if (!pwd) { toast('请输入备份密码', 'err'); return; }
     if (!confirmBox.checked) { toast('请先勾选确认覆盖配置', 'err'); return; }
-    if (!confirm('导入会覆盖备份中的节点、探测、规则与设置（本机独有的设置项保留），且无法撤销。继续？')) return;
+    if (!(await modalConfirm('恢复配置备份',
+      '导入会覆盖备份中的节点、探测、规则与设置（本机独有的设置项保留），且无法撤销。继续？',
+      { danger: true, okText: '继续导入' }))) return;
     const btn = $('#restoreBtn');
     btn.disabled = true;
     try {
@@ -3079,6 +3769,23 @@ async function viewSettings() {
       btn.disabled = false;
     }
   };
+
+  /* ---- 自动备份 ---- */
+  const autoBkRun = $('#autoBackupRun');
+  if (autoBkRun) {
+    autoBkRun.onclick = async () => {
+      autoBkRun.disabled = true;
+      try {
+        const r = await adminApi('/api/admin/backup/auto/run', { method: 'POST' });
+        const res = (r && r.result) || {};
+        toast('自动备份完成：' + (res.file || '已写入') + (res.checksum ? '（' + res.checksum + '）' : ''));
+        viewSettings();
+      } catch (e) {
+        toast('自动备份失败：' + e.message, 'err');
+        autoBkRun.disabled = false;
+      }
+    };
+  }
 
   /* ---- 外观主题 ---- */
   const themeForm = $('#themeForm');
@@ -3155,6 +3862,9 @@ async function viewSettings() {
         const rng = $('#expRange') ? $('#expRange').value : '24h';
         if (!nid) { toast('没有可导出的节点', 'err'); return; }
         url += '?node=' + encodeURIComponent(nid) + '&range=' + rng;
+      } else if (b.dataset.exp === 'history') {
+        const rng = $('#expArchiveRange') ? $('#expArchiveRange').value : '24h';
+        url += '?range=' + rng;
       }
       b.disabled = true;
       try {
@@ -3197,7 +3907,8 @@ async function viewSettings() {
 
   $$('[data-del-node]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('确认删除该节点？其监控数据也会一并移除。')) return;
+      if (!(await modalConfirm('删除节点', '确认删除该节点？其监控数据也会一并移除。',
+        { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/nodes/' + b.dataset.delNode, { method: 'DELETE' });
         toast('节点已删除'); viewSettings();
@@ -3207,7 +3918,7 @@ async function viewSettings() {
 
   $$('[data-del-svc]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('确认删除该探测目标？')) return;
+      if (!(await modalConfirm('删除探测目标', '确认删除该探测目标？', { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/services/' + b.dataset.delSvc, { method: 'DELETE' });
         toast('探测目标已删除'); viewSettings();
@@ -3226,6 +3937,7 @@ async function viewSettings() {
         trafficQuotaGb: Number(d.trafficQuotaGb) || 0,
         trafficResetDay: Number(d.trafficResetDay) || 0,
         trafficMode: d.trafficMode || 'sum',
+        tags: splitTags(d.tags),
         note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
       }) });
       toast('节点已创建');
@@ -3233,6 +3945,20 @@ async function viewSettings() {
       viewSettings();
     } catch (err) { toast('创建失败：' + err.message, 'err'); }
   };
+
+  const upAdd = $('#upBatchAdd');
+  if (upAdd) upAdd.onclick = () => openUpgradeBatchDialog(nodes);
+  $$('[data-upgrade-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!(await modalConfirm('删除升级清单', '删除这条升级清单记录？不会影响节点本身。',
+        { danger: true, okText: '删除' }))) return;
+      try {
+        await adminApi('/api/admin/agent-upgrades/' + encodeURIComponent(b.dataset.upgradeDel), { method: 'DELETE' });
+        toast('升级清单已删除');
+        viewSettings();
+      } catch (e) { toast('删除失败：' + e.message, 'err'); }
+    };
+  });
 
   $('#settingsSvcAdd').onclick = () => openServiceDialog(null, nodes, viewSettings);
   $$('[data-svc-setting-test]').forEach((b) => {
@@ -3510,7 +4236,9 @@ systemctl enable --now rollcall-agent`;
     }
   };
   dlg.querySelector('#rotateTok').onclick = async (ev) => {
-    if (!confirm('确认轮换该节点的令牌？旧令牌会立即失效，现有 Agent 将停止上报，直到更新配置。')) return;
+    if (!(await modalConfirm('轮换节点令牌',
+      '确认轮换该节点的令牌？旧令牌会立即失效，现有 Agent 将停止上报，直到更新配置。',
+      { danger: true, okText: '轮换' }))) return;
     ev.target.disabled = true;
     try {
       const updated = await adminApi('/api/admin/nodes/' + encodeURIComponent(node.id) + '/rotate-token', { method: 'POST' });
@@ -3534,12 +4262,19 @@ systemctl enable --now rollcall-agent`;
 // openDialog 统一的模态框脚手架。
 // 返回 { close, querySelector }：close 关闭并解绑，
 // querySelector 委托到弹窗根节点，调用方不用再自己 create/remove。
-function openDialog(title, bodyHTML) {
+// onClose 在任意方式关闭后触发（含点击遮罩），供确认框回传"取消"。
+function openDialog(title, bodyHTML, onClose) {
   const mask = document.createElement('div');
   mask.className = 'modal-mask';
   mask.innerHTML = `<div class="modal"><div class="modal-title">${esc(title)}</div>${bodyHTML}</div>`;
   document.body.appendChild(mask);
-  const close = () => mask.remove();
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    mask.remove();
+    if (onClose) onClose();
+  };
   mask.onclick = (e) => { if (e.target === mask) close(); };
   $$('[data-close]', mask).forEach((b) => { b.onclick = close; });
   return {
@@ -3547,6 +4282,61 @@ function openDialog(title, bodyHTML) {
     querySelector: (s) => mask.querySelector(s),
     querySelectorAll: (s) => mask.querySelectorAll(s),
   };
+}
+
+// modalConfirm 用界面内弹窗代替原生 confirm：
+// 原生 confirm 在部分浏览器里会被"阻止此页面再显示对话框"静默吞掉，
+// 导致删除操作既不执行也没有任何反馈。
+function modalConfirm(title, text, opts = {}) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const d = openDialog(title, `
+      <p class="modal-text">${esc(text)}</p>
+      <div class="form-actions">
+        <button class="btn" type="button" data-cancel>取消</button>
+        <button class="btn ${opts.danger ? 'danger' : 'primary'}" type="button" data-ok>${esc(opts.okText || '确认')}</button>
+      </div>`, () => { if (!answered) resolve(false); });
+    d.querySelector('[data-ok]').onclick = () => { answered = true; d.close(); resolve(true); };
+    d.querySelector('[data-cancel]').onclick = () => { answered = true; d.close(); resolve(false); };
+    d.querySelector('[data-ok]').focus();
+  });
+}
+
+// modalPrompt 对应原生 prompt；返回 null 表示取消，空字符串仅在 allowEmpty 时出现。
+function modalPrompt(title, label, opts = {}) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const attrs = [
+      `type="${esc(opts.type || 'text')}"`,
+      `value="${esc(opts.value || '')}"`,
+      `placeholder="${esc(opts.placeholder || '')}"`,
+      opts.min != null ? `min="${esc(String(opts.min))}"` : '',
+      opts.max != null ? `max="${esc(String(opts.max))}"` : '',
+    ].filter(Boolean).join(' ');
+    const d = openDialog(title, `
+      <div class="modal-form">
+        <label class="field-label" for="modalPromptInput">${esc(label)}</label>
+        <input class="input" id="modalPromptInput" ${attrs}>
+        ${opts.hint ? `<div class="hint">${esc(opts.hint)}</div>` : ''}
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="button" data-cancel>取消</button>
+        <button class="btn primary" type="button" data-ok>${esc(opts.okText || '确定')}</button>
+      </div>`, () => { if (!answered) resolve(null); });
+    const input = d.querySelector('#modalPromptInput');
+    const submit = () => {
+      const v = input.value.trim();
+      if (!v && !opts.allowEmpty) { toast('请输入内容', 'err'); input.focus(); return; }
+      answered = true;
+      d.close();
+      resolve(v);
+    };
+    d.querySelector('[data-ok]').onclick = submit;
+    d.querySelector('[data-cancel]').onclick = () => { answered = true; d.close(); resolve(null); };
+    input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+    input.focus();
+    input.select();
+  });
 }
 
 const STATUS_VIS_ITEMS = [
@@ -3559,6 +4349,10 @@ const STATUS_VIS_ITEMS = [
   ['swap', 'Swap 用量'],
   ['region', '地区'],
   ['provider', '服务商'],
+  ['tags', '节点标签（资产台账中的自由标签）'],
+  ['billing', '续费价格与币种（资产类，慎开）'],
+  ['expire', '到期日（资产类，慎开）'],
+  ['quota', '流量配额与周期用量'],
   ['country', '国家/地区（用于「地区分布」区块）'],
   ['hostname', '真实主机名（可用于指纹识别，慎开）'],
   ['os', '操作系统'],
@@ -3577,6 +4371,13 @@ const STATUS_BLOCK_ITEMS = [
   ['activity', '最近活动流'],
   ['nodeDetail', '允许访客点进节点详情'],
 ];
+
+const INC_UPDATE_LABELS = {
+  investigating: '调查中',
+  identified: '已定位',
+  monitoring: '观察中',
+  resolved: '已恢复',
+};
 
 async function viewStatusPage() {
   const [cfgRes, nodes, mtRes, incRes] = await Promise.all([
@@ -3627,12 +4428,16 @@ async function viewStatusPage() {
       ? it.nodeIds.map((id) => { const n = nodes.find((x) => x.id === id); return n ? n.name : id; }).join('、')
       : '全局';
     const ongoing = !it.endAt;
+    const updates = it.updates || [];
+    const latest = updates.length ? updates[updates.length - 1] : null;
     return `<tr>
-      <td class="strong">${esc(it.title)}${it.body ? `<div class="cell-sub">${esc(it.body.slice(0, 60))}</div>` : ''}</td>
+      <td class="strong">${esc(it.title)}${it.body ? `<div class="cell-sub">${esc(it.body.slice(0, 60))}</div>` : ''}
+        ${latest ? `<div class="cell-sub">最新：${esc(INC_UPDATE_LABELS[latest.status] || latest.status)} · ${esc(latest.text.slice(0, 40))}</div>` : ''}</td>
       <td><span class="badge ${it.level === 'critical' ? 'crit' : it.level === 'warn' ? 'warn' : 'mute'}">${sevText[it.level] || esc(it.level)}</span></td>
       <td>${esc(scope)}</td>
       <td class="mono cell-compact">${esc(fullTs(it.startAt))}${it.endAt ? '<br>→ ' + esc(fullTs(it.endAt)) : '<br><span class="text-warn">进行中</span>'}</td>
       <td class="num"><div class="row-actions">
+        <button class="btn tiny" data-update-inc="${esc(it.id)}">进展${updates.length ? ` (${updates.length})` : ''}</button>
         ${ongoing && nowSec >= it.startAt ? `<button class="btn tiny" data-end-inc="${esc(it.id)}">结束</button>` : ''}
         <button class="btn tiny" data-edit-inc="${esc(it.id)}">编辑</button>
         <button class="btn tiny danger" data-del-inc="${esc(it.id)}">删除</button>
@@ -3739,7 +4544,7 @@ async function viewStatusPage() {
     b.onclick = async () => {
       const m = mts.find((x) => x.id === b.dataset.endMt);
       if (!m) return;
-      if (!confirm(`立即结束维护窗口「${m.title}」？`)) return;
+      if (!(await modalConfirm('结束维护窗口', `立即结束维护窗口「${m.title}」？`, { okText: '结束' }))) return;
       try {
         await adminApi('/api/admin/maintenance', {
           method: 'POST',
@@ -3755,7 +4560,8 @@ async function viewStatusPage() {
   });
   $$('[data-del-mt]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除该维护窗口？窗口内正在进行的维护不会再显示。')) return;
+      if (!(await modalConfirm('删除维护窗口', '删除该维护窗口？窗口内正在进行的维护不会再显示。',
+        { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/maintenance/' + encodeURIComponent(b.dataset.delMt), { method: 'DELETE' });
         toast('已删除');
@@ -3766,6 +4572,12 @@ async function viewStatusPage() {
 
   // ---- 人工事件 ----
   $('#incAdd').onclick = () => openIncidentDialog(nodes);
+  $$('[data-update-inc]').forEach((b) => {
+    b.onclick = () => {
+      const it = incs.find((x) => x.id === b.dataset.updateInc);
+      if (it) openIncidentUpdateDialog(it);
+    };
+  });
   $$('[data-edit-inc]').forEach((b) => {
     b.onclick = () => {
       const it = incs.find((x) => x.id === b.dataset.editInc);
@@ -3776,7 +4588,7 @@ async function viewStatusPage() {
     b.onclick = async () => {
       const it = incs.find((x) => x.id === b.dataset.endInc);
       if (!it) return;
-      if (!confirm(`将事件「${it.title}」标记为已结束？`)) return;
+      if (!(await modalConfirm('结束事件', `将事件「${it.title}」标记为已结束？`, { okText: '标记结束' }))) return;
       try {
         await adminApi('/api/admin/incidents', {
           method: 'POST',
@@ -3793,7 +4605,8 @@ async function viewStatusPage() {
   });
   $$('[data-del-inc]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除该事件？它会同时从公开页时间线消失。')) return;
+      if (!(await modalConfirm('删除事件', '删除该事件？它会同时从公开页时间线消失。',
+        { danger: true, okText: '删除' }))) return;
       try {
         await adminApi('/api/admin/incidents/' + encodeURIComponent(b.dataset.delInc), { method: 'DELETE' });
         toast('已删除');
@@ -3911,11 +4724,122 @@ function openIncidentDialog(nodes, inc) {
   };
 }
 
+// openIncidentUpdateDialog 给已有事件追加一条公开进展。
+// 与"编辑事件"分开：编辑改的是标题/级别等元数据，进展是追加记录，
+// 后者会保留时间线，访客能看到事件的处理过程。
+function openIncidentUpdateDialog(inc) {
+  const updates = inc.updates || [];
+  const history = updates.length
+    ? `<div class="info-list" style="margin-bottom:4px">${updates.slice().reverse().map((u) => `
+        <div class="kv-row"><span class="kv-key mono">${esc(fullTs(u.ts))}</span>
+        <span class="kv-val"><b>${esc(INC_UPDATE_LABELS[u.status] || u.status)}</b> · ${esc(u.text)}</span></div>`).join('')}</div>`
+    : '<div class="field-hint">还没有进展记录。</div>';
+  const dlg = openDialog('事件进展 · ' + inc.title, `
+    <form id="incUpdForm" class="form-stack">
+      <div class="field-hint">已发布记录（${updates.length}）</div>
+      ${history}
+      <div class="grid-2">
+        ${selectField('状态', 'status', updates.length ? 'monitoring' : 'investigating',
+          Object.entries(INC_UPDATE_LABELS).map(([v, t]) => ({ v, t })))}
+      </div>
+      <div class="field"><span class="field-label">进展说明</span>
+        <textarea name="text" rows="3" required maxlength="500"
+          placeholder="例如：已定位上游线路问题，正在切换备用出口。">${esc('')}</textarea></div>
+      <div class="field-hint">发布后立即出现在公开事件时间线；状态选择「已恢复」时会同时把事件标记为结束。</div>
+      <div class="form-actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">发布进展</button>
+      </div>
+    </form>`);
+  const f = dlg.querySelector('#incUpdForm');
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const text = f.text.value.trim();
+    if (!text) { toast('请填写进展说明', 'err'); return; }
+    try {
+      await adminApi('/api/admin/incidents/' + encodeURIComponent(inc.id) + '/updates', {
+        method: 'POST',
+        body: JSON.stringify({ status: f.status.value, text }),
+      });
+      dlg.close();
+      toast('进展已发布');
+      viewStatusPage();
+    } catch (err) { toast('发布失败：' + err.message, 'err'); }
+  };
+}
+
+// openUpgradeBatchDialog 创建 Agent 升级清单。
+// 服务端不远程执行升级，清单只记录"升级前的版本"用于推导进度；
+// 目标版本默认填控制端版本，便于统一升级到同一版本。
+function openUpgradeBatchDialog(nodes, presetIDs, after) {
+  if (!nodes.length) { toast('还没有节点可以加入清单', 'err'); return; }
+  const picked = new Set(presetIDs || []);
+  const current = state.serverVersion || '';
+  const rows = nodes.map((n) => `<label class="check">
+      <input type="checkbox" name="upNode" value="${esc(n.id)}"${picked.has(n.id) ? ' checked' : ''}>
+      <span>${esc(n.name)} <span class="mono" style="color:var(--fg-3);font-size:11px">${esc(n.agentVersion || '未上报')}</span></span>
+    </label>`).join('');
+  const dlg = openDialog('新建 Agent 升级清单', `
+    <form id="upBatchForm" class="form-stack">
+      <div class="grid-2">
+        ${field('目标版本', 'targetVersion', current, { placeholder: current || '例如 v1.14.0', hint: '留空则使用控制端版本' })}
+        ${field('备注', 'note', '', { placeholder: '例如：周末维护窗口内升级' })}
+      </div>
+      <div class="field">
+        <span class="field-label">选择节点（${nodes.length} 台）</span>
+        <div class="row-actions" style="margin-bottom:8px">
+          <button class="btn tiny" type="button" id="upPickOutdated">仅选可升级</button>
+          <button class="btn tiny" type="button" id="upPickAll">全选</button>
+          <button class="btn tiny" type="button" id="upPickNone">清空</button>
+        </div>
+        <div class="check-grid">${rows}</div>
+      </div>
+      <div class="field-hint">清单创建后按「节点当前 Agent 版本 ≠ 创建时版本」自动计算完成数；节点删除后标记为「已删除」。</div>
+      <div class="form-actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">创建清单</button>
+      </div>
+    </form>`);
+  const f = dlg.querySelector('#upBatchForm');
+  const setPick = (fn) => {
+    $$('input[name="upNode"]', f).forEach((c) => {
+      const n = nodes.find((x) => x.id === c.value);
+      c.checked = fn(n);
+    });
+  };
+  dlg.querySelector('#upPickOutdated').onclick = () => setPick((n) => !!n && !!n.agentVersion && n.agentVersion !== current);
+  dlg.querySelector('#upPickAll').onclick = () => setPick(() => true);
+  dlg.querySelector('#upPickNone').onclick = () => setPick(() => false);
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const ids = pickedIDs(f, 'upNode');
+    if (!ids.length) { toast('至少选择一个节点', 'err'); return; }
+    try {
+      await adminApi('/api/admin/agent-upgrades', {
+        method: 'POST',
+        body: JSON.stringify({
+          nodeIds: ids,
+          targetVersion: f.targetVersion.value.trim(),
+          note: f.note.value.trim(),
+        }),
+      });
+      dlg.close();
+      toast('升级清单已创建（' + ids.length + ' 台）');
+      (after || viewSettings)();
+    } catch (err) { toast('创建失败：' + err.message, 'err'); }
+  };
+}
+
 // showNodeEdit 编辑节点台账，避免为了改名/改价删除节点、丢失历史。
 // editNodeById 拉取完整节点台账后打开编辑弹窗，完成后刷新调用方页面。
 async function editNodeById(id, after) {
   const n = await adminApi('/api/admin/nodes/' + encodeURIComponent(id));
   showNodeEdit(n, after);
+}
+
+// splitTags 解析逗号分隔的标签输入（中英文逗号都接受）。
+function splitTags(s) {
+  return String(s || '').split(/[,，]/).map((t) => t.trim()).filter(Boolean).slice(0, 8);
 }
 
 function showNodeEdit(n, after) {
@@ -3938,6 +4862,7 @@ function showNodeEdit(n, after) {
       ${selectField('流量计费口径', 'trafficMode', n.trafficMode || 'sum', TRAFFIC_MODES.map((x) => ({ v: x.v, t: x.t })))}
       <div class="field-hint" style="grid-column:1/-1;margin-top:-6px">按商家计费方式选择：双边计费用「收发合计」，只算单向用对应单边口径。切换后本周期已用量会立即按新口径重算。</div>
       ${field('备注', 'note', n.note, { placeholder: '可选' })}
+      ${field('标签', 'tags', (n.tags || []).join(', '), { placeholder: '例如：cn2, 高防, 备机', hint: '逗号分隔，最多 8 个；公开页开启「节点标签」后可见' })}
       ${field('排序权重', 'weight', n.weight, { type: 'number', placeholder: '0' })}
       ${checkbox('收藏（对比页优先展示）', 'favorite', !!n.favorite)}
       <div class="form-actions">
@@ -3963,6 +4888,7 @@ function showNodeEdit(n, after) {
           trafficQuotaGb: Number(d.trafficQuotaGb) || 0,
           trafficResetDay: Number(d.trafficResetDay) || 0,
           trafficMode: d.trafficMode || 'sum',
+          tags: splitTags(d.tags),
           note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
         }),
       });
@@ -3975,6 +4901,138 @@ function showNodeEdit(n, after) {
   };
 }
 
+/* ---------------- 审计日志 ---------------- */
+
+const AUDIT_ACTIONS = [
+  ['', '全部动作'],
+  ['auth.login', '登录成功'],
+  ['auth.login_failed', '登录失败'],
+  ['auth.logout', '退出登录'],
+  ['nodes.create', '新增节点'],
+  ['nodes.update', '编辑节点'],
+  ['nodes.delete', '删除节点'],
+  ['nodes.batch', '批量操作节点'],
+  ['agent-upgrades.create', '创建升级清单'],
+  ['agent-upgrades.delete', '删除升级清单'],
+  ['services.create', '新增服务'],
+  ['services.update', '编辑服务'],
+  ['services.delete', '删除服务'],
+  ['rules.create', '新增告警规则'],
+  ['rules.update', '编辑告警规则'],
+  ['rules.delete', '删除告警规则'],
+  ['settings.update', '修改设置'],
+  ['statuspage.update', '修改状态页'],
+  ['incidents.create', '发布事件'],
+  ['incidents.update', '更新事件进展'],
+  ['maintenance.create', '创建维护窗口'],
+  ['tokens.create', '创建令牌'],
+  ['tokens.delete', '删除令牌'],
+  ['backup.export', '导出备份'],
+  ['backup.run', '手动自动备份'],
+  ['backup.restore', '导入备份'],
+  ['export.action', '导出数据'],
+  ['notify.test', '测试通知'],
+];
+
+async function viewAudit() {
+  if (!state.authenticated) {
+    state.authRequired = true;
+    showLoginGate();
+    return;
+  }
+  const f = state.auditFilters;
+  const limit = 20;
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(Math.max(0, (state.auditPage - 1) * limit)),
+    range: f.range,
+  });
+  if (f.action) params.set('action', f.action);
+  if (state.search) params.set('q', state.search);
+  const d = await adminApi('/api/admin/audit?' + params.toString());
+  const entries = d.entries || [];
+  const stats = d.stats || {};
+  const total = d.total || 0;
+  const pages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.max(1, Math.min(pages, state.auditPage));
+  state.auditPage = page;
+
+  const statusBadge = (code) => {
+    const cls = code >= 500 ? 'crit' : code >= 400 ? 'warn' : 'ok';
+    return `<span class="badge ${cls}">${code || '—'}</span>`;
+  };
+  const roleLabel = { session: '会话', 'api-token': 'API 令牌', 'admin-token': '管理令牌', basic: 'Basic' };
+  const fmtTime = (ts) => new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+
+  $('#view').innerHTML = `
+    <div class="kpis" style="margin-bottom:20px">
+      ${kpi('匹配记录', total, '条', `当前筛选 · 每页 ${limit} 条`)}
+      ${kpi('内存保留', stats.count || 0, '条', '最近操作可直接检索')}
+      ${kpi('保留期', stats.retentionDays || 90, '天', '过期自动清理')}
+      ${kpi('审计文件', bytes(stats.bytes || 0), '', stats.earliest ? '最早 ' + clock(stats.earliest) : '尚无记录')}
+    </div>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">管理操作</h2>
+        ${sectionActions('只记录元数据，不保存请求体与密码')}
+      </div>
+      <div class="panel panel-pad" style="margin-bottom:12px">
+        <div class="toolbar">
+          <select id="auditRange">
+            ${[['24h', '最近 24 小时'], ['7d', '最近 7 天'], ['30d', '最近 30 天'], ['90d', '最近 90 天'], ['', '全部时间']]
+              .map(([v, t]) => `<option value="${v}"${v === f.range ? ' selected' : ''}>${t}</option>`).join('')}
+          </select>
+          <select id="auditAction">
+            ${AUDIT_ACTIONS.map(([v, t]) => `<option value="${esc(v)}"${v === f.action ? ' selected' : ''}>${esc(t)}</option>`).join('')}
+          </select>
+          <span class="section-meta">${state.search ? '关键词：' + esc(state.search) : '可在右上角搜索操作人、路径或 IP'}</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="audit-table">
+          <thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>方式</th><th>方法</th><th>路径</th><th class="num">状态</th><th>IP</th></tr></thead>
+          <tbody>${entries.map((e) => `<tr>
+            <td class="mono" style="font-size:11.5px;white-space:nowrap">${esc(fmtTime(e.ts))}</td>
+            <td class="strong">${esc(e.action)}${e.detail ? `<div class="field-hint">${esc(e.detail)}</div>` : ''}</td>
+            <td>${esc(e.actor || '—')}</td>
+            <td>${roleLabel[e.role] ? `<span class="badge mute">${roleLabel[e.role]}</span>` : '—'}</td>
+            <td class="mono" style="font-size:11px">${esc(e.method || '—')}</td>
+            <td class="mono" style="font-size:11.5px">${esc(e.path || '—')}</td>
+            <td class="num">${statusBadge(e.status)}</td>
+            <td class="mono" style="font-size:11.5px">${esc(e.ip || '—')}</td>
+          </tr>`).join('') || `<tr><td colspan="8"><div class="empty">没有匹配的审计记录</div></td></tr>`}</tbody>
+        </table>
+      </div>
+      ${pages > 1 ? `<div class="table-pager">
+        <button class="btn tiny" data-audit-page="-1" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+        <span class="pager-info">第 <b class="mono">${page}</b> / ${pages} 页 · 共 ${total} 条</span>
+        <button class="btn tiny" data-audit-page="1" ${page >= pages ? 'disabled' : ''}>下一页</button>
+      </div>` : ''}
+      <p class="field-hint section-hint">
+        审计日志保存在数据目录的 <code>audit.jsonl</code>（权限 0600），保留 ${stats.retentionDays || 90} 天。
+        登录失败、令牌增删、配置修改与数据导出都会记录；不记录请求体，避免密码与令牌泄露。
+      </p>
+    </section>`;
+
+  $('#auditRange').onchange = (e) => {
+    state.auditFilters.range = e.target.value;
+    state.auditPage = 1;
+    viewAudit();
+  };
+  $('#auditAction').onchange = (e) => {
+    state.auditFilters.action = e.target.value;
+    state.auditPage = 1;
+    viewAudit();
+  };
+  $$('[data-audit-page]').forEach((b) => {
+    b.onclick = () => {
+      state.auditPage = page + Number(b.dataset.auditPage);
+      viewAudit();
+    };
+  });
+}
+
 /* ---------------- 路由 ---------------- */
 
 const ROUTES = {
@@ -3985,6 +5043,7 @@ const ROUTES = {
   alerts: { title: '告警', sub: '规则触发与历史记录', fn: viewAlerts, search: '搜索规则 / 节点 / 告警…' },
   assets: { title: '台账', sub: '资产、到期与成本', fn: viewAssets, search: '搜索资产 / 服务商 / 到期日…' },
   statuspage: { title: '状态页', sub: '公开页 /status 的展示、维护窗口与事件', fn: viewStatusPage },
+  audit: { title: '审计日志', sub: '管理操作、登录与导出记录', fn: viewAudit, search: '搜索操作人 / 路径 / IP…' },
   settings: { title: '设置', sub: '节点、探测与通知配置', fn: viewSettings },
 };
 
@@ -4212,9 +5271,17 @@ async function render() {
   // 幂等：连接已存在时内部直接返回，不会重复建连。
   if (window.__ensureStream) window.__ensureStream();
   const hash = location.hash.replace(/^#\/?/, '') || 'overview';
-  const [route, param] = hash.split('/');
+  // 节点详情支持 #/nodes/<id>?range=7d：刷新/分享后保留所选区间。
+  const qIdx = hash.indexOf('?');
+  const pathPart = qIdx >= 0 ? hash.slice(0, qIdx) : hash;
+  const hashQuery = new URLSearchParams(qIdx >= 0 ? hash.slice(qIdx + 1) : '');
+  const [route, param] = pathPart.split('/');
   state.route = route;
   state.param = param || null;
+  if (route === 'nodes' && param) {
+    const r = hashQuery.get('range');
+    if (VALID_RANGES.includes(r)) state.range = r;
+  }
 
   const meta = ROUTES[route];
   if (meta) {
@@ -4578,6 +5645,16 @@ async function boot() {
 }
 
 boot();
+
+// 图表与表格增强：都依赖 #view 内新渲染出的 DOM，
+// 用 MutationObserver 比在每个视图函数尾部手动调用更不容易漏。
+bindChartHover();
+new MutationObserver(() => {
+  requestAnimationFrame(() => {
+    bindChartHover();
+    enhanceTables();
+  });
+}).observe($('#view'), { childList: true, subtree: true });
 
 // showAgentWizard 一站式接入向导：填台账 → 创建节点 → 直接给出安装命令。
 // 以前要「设置页建节点 → 复制 JSON → 手拼 systemd」，现在三步并一步。

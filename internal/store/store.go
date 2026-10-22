@@ -170,6 +170,13 @@ type Store struct {
 	historyDirty  bool
 	historySaveMu sync.Mutex
 
+	// 审计日志独立于快照以 JSONL 追加写入：管理操作频率低，
+	// 放主快照会让每分钟一次的全量保存携带大量只增不改的数据。
+	auditPath   string
+	auditMu     sync.Mutex
+	audit       []*model.AuditEntry // 按时间升序，只保留最近 auditMemoryLimit 条
+	auditWrites int
+
 	path    string
 	loadErr error
 	saveMu  sync.Mutex
@@ -226,6 +233,7 @@ func New(dataDir string) *Store {
 		seriesSaved:  map[string]uint64{},
 		path:         filepath.Join(dataDir, "state.json"),
 		historyPath:  filepath.Join(dataDir, "history.json"),
+		auditPath:    filepath.Join(dataDir, "audit.jsonl"),
 		saveReq:      make(chan struct{}, 1),
 	}
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
@@ -238,6 +246,11 @@ func New(dataDir string) *Store {
 	}
 	if s.loadErr == nil {
 		s.loadErr = s.loadHistory()
+	}
+	if s.loadErr == nil {
+		// 审计文件损坏不应阻止服务启动：它只是旁路记录，
+		// 隔离坏文件后继续提供监控能力。
+		s.loadAudit()
 	}
 	if s.loadErr == nil {
 		// 从旧格式（series 内嵌在 state.json）升级上来时，主快照里已有的点
