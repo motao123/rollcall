@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.13.1**（`./rollcall-server -version` 可查）。
+当前版本 **v1.14.0**（`./rollcall-server -version` 可查）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -508,7 +508,7 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 **方式 0：不装 Go，直接用发布包**（推荐，`v1.10.5` 起 CI 会随 tag 发布预编译二进制）
 
 ```bash
-VERSION=v1.13.1
+VERSION=v1.14.0
 ARCH=amd64          # amd64 / arm64 / arm / 386
 BASE="https://github.com/motao123/rollcall/releases/download/${VERSION}"
 
@@ -549,7 +549,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o rollcall-agent ./cmd/agent
 > 在任意目录（包括 git 工作区与非 git 目录）都能得到字节一致的二进制。
 > 发布时先用 `cd dist && sha256sum -c SHA256SUMS` 自检，再把校验和与版本号一起记录。
 >
-> 版本号通过 ldflags 注入：`make linux VERSION=v1.13.1`。直接 `go build` 时
+> 版本号通过 ldflags 注入：`make linux VERSION=v1.14.0`。直接 `go build` 时
 > 版本为 `dev`；`./rollcall-server -version` 与 `/metrics` 的 `rollcall_build_info` 均可查看。
 >
 > 并发回归测试用 `go test -race ./...`（需要 gcc/CGO）；CI 已单独配置 `race` job。
@@ -1005,15 +1005,15 @@ TLS（或 `X-Forwarded-Proto: https`）下自动加 `Secure`；会话签名密�
 
 ```bash
 # 方式 A：自己构建（注意产物名带 -linux-<arch> 后缀，dist/rollcall-server 并不存在）
-make linux VERSION=v1.13.1
+make linux VERSION=v1.14.0
 (cd dist && sha256sum -c SHA256SUMS)
 scp dist/rollcall-server-linux-amd64 root@<控制端>:/tmp/rollcall-server.new
 ```
 
 ```bash
 # 方式 B：直接用发布包（v1.10.5 起 CI 随 tag 发布，无需构建机）
-curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.13.1/rollcall-server-linux-amd64"
-curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.13.1/SHA256SUMS"
+curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.14.0/rollcall-server-linux-amd64"
+curl -fsSLO "https://github.com/motao123/rollcall/releases/download/v1.14.0/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS
 mv rollcall-server-linux-amd64 /tmp/rollcall-server.new
 ```
@@ -1437,6 +1437,30 @@ certificate_days_remaining,uptime_percent_24h}`
 ---
 
 ## 十二、实际部署验证
+
+### v1.14.0（2026-10-22）
+
+本轮把对比报告里剩下的三条 P1/P2 建议一次做完：公开页目录主题包、探测跨节点并排对比、
+API 令牌路径限定与分钟级有效期；另落地服务端发行签名、自动加密备份、审计日志、
+容量可观测性与面板行级 patch。控制端已从 v1.13.1 升级到 v1.14.0 并在生产逐项验证：
+
+| 项目 | 结果 |
+|---|---|
+| 构建与测试 | 用 **CI 同版本 Go 1.24.0**（`GOTOOLCHAIN=go1.24.0`）跑 `go test ./...`：20 包全绿 |
+| CI 修复 | 此前 CI 连续 4 次红在 `TestAPITokenPathScopeAndShortExpiry`：它写死 ServeMux 的重定向码为 308，而该码随 Go 版本变化（**Go 1.24 为 301、Go 1.26 为 308**），于是本地 Go 1.26.2 绿、CI 的 1.24.0 红。改为只断言「是 3xx 重定向」，安全性质仍由「清理后的 n10 必须 401」覆盖 |
+| 控制端升级 | `deploy/rollcall-server-upgrade.sh` 从 v1.13.1 升到 v1.14.0：sha256 `8f0788be…`、`/readyz` = `{"ready":true,"version":"v1.14.0"}`、服务 active + enabled、`.prev` 保留 v1.13.1、数据目录已打包为 `/root/rollcall-data-before-v1.14.tar.gz` |
+| 主题包往返 | 在 `/opt/rollcall/data/themes/verify-pack/` 放入临时主题 → `GET /api/admin/theme-packs` 识别（含 title/version）→ 启用后 `/status` 引用 `/themes/verify-pack/status.css` → 该资源 200 + `text/css` + `no-cache` → `/themes/verify-pack/../etc/passwd/status.css` 返回 404 → 切回内置后页面不再引用 → 删除目录后 packs 为空 |
+| 探测并排对比 | 临时建一条 `https://www.baidu.com/` 探测，`GET /api/services/compare` 返回 `vantage=control-server` 并注明「探测均由控制服务器发起」，随后删除该探测（生产探测数回到 0） |
+| 令牌路径限定 | 建 10 分钟有效期、仅限 `/api/overview` 的只读令牌：白名单内 200，`/api/nodes` 与 `/api/assets` 均 401，不带令牌 401；用完立即删除 |
+| 审计日志 | `data/audit.jsonl` 记录了上述 `tokens.create` / `tokens.delete`（含 actor / role / ip / status），`GET /api/admin/audit` 的 `stats` 显示保留 90 天 |
+| 自动备份 | 启用 `-backup-password-file`（密码文件 0400、仅服务用户可读），立即备份产出 5459 字节 `.rcbk`，内置写后解密校验通过（`lastError` 为空） |
+| 恢复演练 | 在隔离实例（`127.0.0.1:19081` + 临时数据目录）上用该备份恢复：`nodes=13 / rules=7 / services=0`，节点名称正确；同一文件用错误密码恢复返回 400「备份密码错误或文件已损坏」，证明备份确实受密码保护。演练后临时实例与目录已删除 |
+| 备份调度缺陷 | 演练时发现重复备份：启动后首次运行排在 30 秒后，期间手动点「立即备份」仍会按原 deadline 补跑一次。已修（到点先比对 `next`）并补回归测试（去掉判断即报「实际文件数 2」） |
+| 可观测接口 | `/api/overview/trend?range=24h` 返回 288 个点、`/api/admin/storage` 返回数据目录/审计/备份容量与保留策略、`/api/admin/health`、`/api/admin/agent-upgrades` 均 200 |
+| 公开页重写 | `/status` 走 Element Plus 资源（`/vendor/element-plus/index.css` 200、361 KB、`no-cache`），页面仍为 `default-src 'self'` 的 CSP；`/api/status` 13 节点 |
+| 未做 | 发行公钥未在控制端注册（本次升级按 `--allow-unsigned` 显式跳过验签）；Agent 自 v1.13.1 起无源码变更，机群仍为 v1.13.1（面板可用 `/agent/install.sh --upgrade` 或 Agent 升级清单逐台推进） |
+
+### v1.13.1（2026-10-21）
 
 已在 Debian 13 / AMD EPYC 16 核 / 32GB 环境（Go 1.27.3）完成控制端 + 12 台远端被控端的验证与升级（v1.13.1）：
 
