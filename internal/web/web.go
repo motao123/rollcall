@@ -697,6 +697,9 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	if v := sanitizetext.Text(strings.TrimSpace(r.Header.Get("X-Agent-Version")), 64); v != "" {
 		s.st.SetAgentVersion(node.ID, v)
 	}
+	// 来源 IP 只记通过鉴权的那一次：面板据此排查「这台机器从哪个地址连过来」。
+	// trustedProxies 生效时取 X-Forwarded-For 的第一跳，否则用直连地址。
+	s.st.SetNodeIP(node.ID, clientIP(r, s.trustedProxies))
 
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()

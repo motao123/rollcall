@@ -103,8 +103,8 @@ make rollsign
 ./rollsign pubkey -key /root/rollcall-release.key -out /root/rollcall-release.pub
 
 # 构建并签名服务端产物；-version 必须与 VERSION 完全一致（含 v 前缀）
-make linux VERSION=v1.14.0
-make sign-release ROLLSIGN_KEY=/root/rollcall-release.key VERSION=v1.14.0
+make linux VERSION=v1.15.0
+make sign-release ROLLSIGN_KEY=/root/rollcall-release.key VERSION=v1.15.0
 # 生成 dist/rollcall-server-linux-<arch>.sig，与对应二进制一起分发
 
 # 控制端：安装公钥与本机验签工具
@@ -122,8 +122,8 @@ sudo install -m 0755 rollsign-linux-amd64 /opt/rollcall/rollsign
 
 ```bash
 # 从发布页取二进制与签名，两者一起校验
-curl -fsSLO .../v1.14.1/rollcall-server-linux-amd64
-curl -fsSLO .../v1.14.1/rollcall-server-linux-amd64.sig
+curl -fsSLO .../v1.15.0/rollcall-server-linux-amd64
+curl -fsSLO .../v1.15.0/rollcall-server-linux-amd64.sig
 sudo sh deploy/rollcall-server-upgrade.sh upgrade \
   --file rollcall-server-linux-amd64 --signature rollcall-server-linux-amd64.sig
 ```

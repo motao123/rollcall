@@ -238,7 +238,12 @@ health_ok() {
         return 1
       fi
       if [ "$fetched" = 1 ]; then
-        if [ -z "$EXPECT_VERSION" ] || printf '%s' "$body" | grep -Fq "\"version\":\"$EXPECT_VERSION\""; then
+        # 严格取值再比对，而不是 grep 子串：`"version":"v1.14.1"` 是子串匹配，
+        # 拼错/多字段时可能命中别的位置；这里的语义是「版本必须完全相等」。
+        # 不依赖 jq（目标机可能没有），用 sed 取第一个 version 字段。
+        reported=$(printf '%s' "$body" |
+          sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+        if [ -z "$EXPECT_VERSION" ] || [ "$reported" = "$EXPECT_VERSION" ]; then
           return 0
         fi
       fi

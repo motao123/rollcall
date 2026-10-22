@@ -1263,6 +1263,24 @@ func (s *Store) SetAgentVersion(nodeID, ver string) {
 	s.RequestSave()
 }
 
+// SetNodeIP 记录最近一次通过鉴权上报的来源 IP。
+// 与 SetAgentVersion 同样只在变化时落盘：13 台节点 30 秒一报，
+// 每次保存都唤醒快照队列毫无意义，而 IP 变动本身极少。
+func (s *Store) SetNodeIP(nodeID, ip string) {
+	if ip == "" {
+		return
+	}
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok || n.LastIP == ip {
+		s.mu.Unlock()
+		return
+	}
+	n.LastIP = ip
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
 func (s *Store) Host(nodeID string) model.HostInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

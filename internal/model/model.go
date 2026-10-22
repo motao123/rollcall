@@ -34,7 +34,11 @@ type Node struct {
 	// AgentVersion 是 Agent 最近一次上报的版本，由上报请求头写入，
 	// 台账 API 不能修改；用于面板提示落后的 Agent。
 	AgentVersion string `json:"agentVersion,omitempty"`
-	Token        string `json:"-"` // 上报凭证，永不下发给前端
+	// LastIP 是最近一次通过鉴权上报的来源 IP，由服务端写入，台账 API 不能修改。
+	// 只出现在管理端接口：公开页用独立的脱敏视图，导出也按列白名单生成。
+	// 用途是排查「这台机器到底从哪个地址连过来的」，也是批量运维时定位主机的线索。
+	LastIP string `json:"lastIP,omitempty"`
+	Token  string `json:"-"` // 上报凭证，永不下发给前端
 }
 
 // MountInfo 是一个文件系统的用量快照。
