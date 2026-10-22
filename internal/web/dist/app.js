@@ -1424,6 +1424,7 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">TCP 连接</span><span class="info-v mono">${hasData ? last.tcpConn || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${hasData ? last.procs || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">Agent 版本</span><span class="info-v mono">${esc(n.agentVersion || '—')}${detail.agentOutdated ? ' <span class="badge warn">可升级</span>' : ''}</span></div>
+            <div class="info-row"><span class="info-k">上报来源</span><span class="info-v mono">${esc(n.lastIP || '—')}</span></div>
             <div class="info-row"><span class="info-k">最后上报</span><span class="info-v">${ago(detail.lastSeen)}</span></div>
           </div>
         </div>
