@@ -246,7 +246,12 @@ func (s *Server) routes(static http.Handler) []route {
 		// 升级脚本以它决定是否回滚。
 		{"/readyz", authPublic, http.HandlerFunc(s.handleReadyz)},
 		{"/status", authPublic, http.HandlerFunc(s.handleStatusPage)},
+		// 公开页的全部静态资源都必须显式登记：启用 -auth 时 "/" 受保护，
+		// 少登记一个就会让页面卡在骨架屏或裸样式。
 		{"/status.js", authPublic, static},
+		{"/status.css", authPublic, static},
+		{"/theme-boot.js", authPublic, static},
+		{"/vendor/", authPublic, static},
 		// 公开状态页主题包资源：只提供 status.css / status.js 两个固定文件名。
 		{"/themes/", authPublic, http.HandlerFunc(s.handleStatusThemeAsset)},
 		{"/api/status", authPublic, http.HandlerFunc(rejectNonGET(s.handleStatus))},
