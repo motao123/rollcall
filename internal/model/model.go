@@ -2,7 +2,10 @@
 // 设计约束：只包含数据结构与纯函数，不引入任何外部依赖。
 package model
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Node 是一个被监控节点的台账条目。
 // 它同时承担两个职责：监控节点的元信息、以及资产台账（服务商/到期/价格）。
@@ -195,6 +198,61 @@ type ServiceResult struct {
 	CertDays  int    `json:"certDays"` // TLS 证书剩余天数：-1=非 TLS，0=已过期，>0=剩余天数（不足一天按 1 计）
 	Status    int    `json:"status"`   // HTTP 状态码，TCP 为 0
 	Detail    string `json:"detail"`
+}
+
+// ServiceSample 是探测历史的存储形态。
+//
+// 早期实现把探测结果塞进 Metrics 的字段里：CPUPct 存延迟、TCPConn 存成功、
+// Procs 存证书天数。那种"压缩存储"每读一处都要靠注释解释，而且任何人按字段名
+// 理解都会静默得到错误的延迟数据 —— 现在拆成独立类型。
+// 旧快照的兼容解析放在 UnmarshalJSON 里，升级不用丢探测历史。
+type ServiceSample struct {
+	TS        int64 `json:"ts"`
+	LatencyMs int   `json:"lat"`
+	OK        bool  `json:"ok"`
+	CertDays  int   `json:"cert"` // -1=非 TLS，0=已过期，>0=剩余天数
+}
+
+// UnmarshalJSON 同时接受新格式与旧格式（Metrics 字段复用）。
+//
+// 用"某个键是否存在"来判形态，而不是看数值：旧的 cpuPct 完全可能是 0，
+// 靠值判断会把 0 延迟的旧样本误判成新格式的空样本。
+func (s *ServiceSample) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		TS   int64 `json:"ts"`
+		Lat  *int  `json:"lat"`
+		OK   *bool `json:"ok"`
+		Cert *int  `json:"cert"`
+		// 旧格式（v1.17.2 及以前）
+		CPU   *float64 `json:"cpuPct"`
+		TCP   *int     `json:"tcpConn"`
+		Procs *int     `json:"procs"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	s.TS = raw.TS
+	switch {
+	case raw.Lat != nil:
+		s.LatencyMs = *raw.Lat
+	case raw.CPU != nil:
+		s.LatencyMs = int(*raw.CPU)
+	}
+	switch {
+	case raw.OK != nil:
+		s.OK = *raw.OK
+	case raw.TCP != nil:
+		s.OK = *raw.TCP == 1
+	}
+	switch {
+	case raw.Cert != nil:
+		s.CertDays = *raw.Cert
+	case raw.Procs != nil:
+		s.CertDays = *raw.Procs
+	default:
+		s.CertDays = -1
+	}
+	return nil
 }
 
 // AlertRule 是告警规则。

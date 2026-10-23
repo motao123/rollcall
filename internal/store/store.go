@@ -64,32 +64,52 @@ func NodeState(lastSeen, now int64) string {
 	}
 }
 
-// Ring 是定长环形缓冲，用于保存单节点时序。
-type Ring struct {
-	buf  []model.Metrics
+// Ring 是定长环形缓冲，用于保存单节点时序与服务探测序列。
+//
+// 泛型化是因为两种序列的元素类型不同（节点指标 / 探测采样）。
+// 时间戳怎么取由构造时的 at 提供，而不是让元素类型去实现某个接口 ——
+// 元素是 model 包里的纯数据结构，不该为了存储细节反向依赖 store。
+type Ring[T any] struct {
+	buf  []T
 	size int
 	head int // 下一个写入位置
 	n    int
+	at   func(T) int64
+	zero T
 }
 
-func NewRing(size int) *Ring {
-	return &Ring{buf: make([]model.Metrics, size), size: size}
+func newRing[T any](size int, at func(T) int64) *Ring[T] {
+	if size <= 0 {
+		size = 1
+	}
+	return &Ring[T]{buf: make([]T, size), size: size, at: at}
 }
 
-func (r *Ring) Add(m model.Metrics) {
+// NewRing 是节点指标序列的构造函数。
+func NewRing(size int) *Ring[model.Metrics] {
+	return newRing(size, func(m model.Metrics) int64 { return m.TS })
+}
+
+// NewServiceRing 是服务探测序列的构造函数。
+func NewServiceRing(size int) *Ring[model.ServiceSample] {
+	return newRing(size, func(s model.ServiceSample) int64 { return s.TS })
+}
+
+func (r *Ring[T]) Add(v T) {
+	ts := r.at(v)
 	// 同一秒内的重复上报覆盖，避免 Agent 重启产生重复点；
 	// 时间倒退的点直接丢弃，否则 Slice/Since 的升序假设会被破坏。
 	if r.n > 0 {
 		last := (r.head - 1 + r.size) % r.size
-		if r.buf[last].TS == m.TS {
-			r.buf[last] = m
+		if r.at(r.buf[last]) == ts {
+			r.buf[last] = v
 			return
 		}
-		if m.TS < r.buf[last].TS {
+		if ts < r.at(r.buf[last]) {
 			return
 		}
 	}
-	r.buf[r.head] = m
+	r.buf[r.head] = v
 	r.head = (r.head + 1) % r.size
 	if r.n < r.size {
 		r.n++
@@ -97,8 +117,8 @@ func (r *Ring) Add(m model.Metrics) {
 }
 
 // Slice 返回按时间升序排列的副本。
-func (r *Ring) Slice() []model.Metrics {
-	out := make([]model.Metrics, 0, r.n)
+func (r *Ring[T]) Slice() []T {
+	out := make([]T, 0, r.n)
 	start := (r.head - r.n + r.size) % r.size
 	for i := 0; i < r.n; i++ {
 		out = append(out, r.buf[(start+i)%r.size])
@@ -107,10 +127,10 @@ func (r *Ring) Slice() []model.Metrics {
 }
 
 // Since 返回 ts 之后的点。
-func (r *Ring) Since(ts int64) []model.Metrics {
+func (r *Ring[T]) Since(ts int64) []T {
 	all := r.Slice()
 	for i, p := range all {
-		if p.TS >= ts {
+		if r.at(p) >= ts {
 			return all[i:]
 		}
 	}
@@ -118,9 +138,9 @@ func (r *Ring) Since(ts int64) []model.Metrics {
 }
 
 // Last 返回最新一点。
-func (r *Ring) Last() (model.Metrics, bool) {
+func (r *Ring[T]) Last() (T, bool) {
 	if r.n == 0 {
-		return model.Metrics{}, false
+		return r.zero, false
 	}
 	return r.buf[(r.head-1+r.size)%r.size], true
 }
@@ -130,9 +150,9 @@ type Store struct {
 	mu       sync.RWMutex
 	nodes    map[string]*model.Node
 	hosts    map[string]model.HostInfo
-	series   map[string]*Ring
+	series   map[string]*Ring[model.Metrics]
 	services map[string]*model.Service
-	svcRes   map[string]*Ring
+	svcRes   map[string]*Ring[model.ServiceSample]
 	rules    map[string]*model.AlertRule
 	alerts   []*model.Alert
 	settings map[string]string
@@ -217,9 +237,9 @@ func New(dataDir string) *Store {
 	s := &Store{
 		nodes:        map[string]*model.Node{},
 		hosts:        map[string]model.HostInfo{},
-		series:       map[string]*Ring{},
+		series:       map[string]*Ring[model.Metrics]{},
 		services:     map[string]*model.Service{},
-		svcRes:       map[string]*Ring{},
+		svcRes:       map[string]*Ring[model.ServiceSample]{},
 		rules:        map[string]*model.AlertRule{},
 		settings:     map[string]string{},
 		notifyJobs:   map[string]*model.NotifyJob{},
@@ -315,17 +335,22 @@ func decodeSnapshot(b []byte) ([]byte, error) {
 //
 // v4 增加月度流量周期、续费记录、范围化令牌与活动流；
 // 旧快照中缺失的字段均为零值，可无缝载入。
-const SnapshotSchemaVersion = 4
+//
+// v5 把探测历史从「Metrics 字段复用」改为独立 ServiceSample（ts/lat/ok/cert）。
+// 新程序能读 v4（UnmarshalJSON 兼容旧键），但**旧程序读不懂 v5** ——
+// 若不提升版本号，降级回 v1.17.x 会把探测历史静默读成"延迟 0、全部失败"，
+// 看起来像所有站点同时挂掉。提升后旧程序会明确拒绝并备份，而不是给假数据。
+const SnapshotSchemaVersion = 5
 
 type snapshot struct {
-	SchemaVersion int                         `json:"schemaVersion"`
-	Nodes         map[string]*model.Node      `json:"nodes"`
-	Hosts         map[string]model.HostInfo   `json:"hosts"`
-	Series        map[string][]model.Metrics  `json:"series"`
-	Services      map[string]*model.Service   `json:"services"`
-	SvcRes        map[string][]model.Metrics  `json:"svcRes"`
-	Rules         map[string]*model.AlertRule `json:"rules"`
-	Alerts        []*model.Alert              `json:"alerts"`
+	SchemaVersion int                              `json:"schemaVersion"`
+	Nodes         map[string]*model.Node           `json:"nodes"`
+	Hosts         map[string]model.HostInfo        `json:"hosts"`
+	Series        map[string][]model.Metrics       `json:"series"`
+	Services      map[string]*model.Service        `json:"services"`
+	SvcRes        map[string][]model.ServiceSample `json:"svcRes"`
+	Rules         map[string]*model.AlertRule      `json:"rules"`
+	Alerts        []*model.Alert                   `json:"alerts"`
 	// Tokens 单独持久化：model.Node.Token 标了 json:"-"，
 	// 不会随节点一起写入，否则重启后 Agent 全部认证失败。
 	Tokens       map[string]string              `json:"tokens"`
@@ -412,7 +437,7 @@ func (s *Store) load() error {
 			continue
 		}
 		sort.Slice(pts, func(i, j int) bool { return pts[i].TS < pts[j].TS })
-		r := NewRing(ServiceRingSize)
+		r := NewServiceRing(ServiceRingSize)
 		for _, p := range pts {
 			r.Add(p)
 		}
@@ -510,7 +535,7 @@ func (s *Store) Save() (err error) {
 		Alerts:        make([]*model.Alert, 0, len(s.alerts)),
 		// ★ Series 刻意留空：历史点走 data/series/<id>.json.gz 分片，
 		// 只有读取旧版本快照时才需要这个字段（见 load）。
-		SvcRes:         make(map[string][]model.Metrics, len(s.svcRes)),
+		SvcRes:         make(map[string][]model.ServiceSample, len(s.svcRes)),
 		Tokens:         make(map[string]string, len(s.nodes)),
 		Settings:       make(map[string]string, len(s.settings)),
 		NotifyJobs:     make([]*model.NotifyJob, 0, len(s.notifyJobs)),
@@ -1391,7 +1416,7 @@ func (s *Store) Series(nodeID string, since int64) []model.Metrics {
 func (s *Store) UpsertService(sv *model.Service) {
 	s.mu.Lock()
 	if s.svcRes[sv.ID] == nil {
-		s.svcRes[sv.ID] = NewRing(ServiceRingSize)
+		s.svcRes[sv.ID] = NewServiceRing(ServiceRingSize)
 	}
 	s.services[sv.ID] = sv
 	s.mu.Unlock()
@@ -1407,7 +1432,7 @@ func (s *Store) CreateService(sv *model.Service) bool {
 		return false
 	}
 	if s.svcRes[sv.ID] == nil {
-		s.svcRes[sv.ID] = NewRing(ServiceRingSize)
+		s.svcRes[sv.ID] = NewServiceRing(ServiceRingSize)
 	}
 	cp := *sv
 	s.services[sv.ID] = &cp
@@ -1456,11 +1481,10 @@ func (s *Store) AddServiceResult(sr model.ServiceResult) {
 	}
 	r := s.svcRes[sr.ServiceID]
 	if r == nil {
-		r = NewRing(ServiceRingSize)
+		r = NewServiceRing(ServiceRingSize)
 		s.svcRes[sr.ServiceID] = r
 	}
-	// 复用 Metrics.TS 存时间戳，CPUPct 存延迟（压缩存储）
-	r.Add(model.Metrics{TS: sr.TS, CPUPct: float64(sr.LatencyMs), TCPConn: b2i(sr.OK), Procs: sr.CertDays})
+	r.Add(model.ServiceSample{TS: sr.TS, LatencyMs: sr.LatencyMs, OK: sr.OK, CertDays: sr.CertDays})
 }
 
 func b2i(b bool) int {
@@ -1481,7 +1505,7 @@ func (s *Store) ServiceSeries(id string) [][3]int64 {
 	all := r.Slice()
 	out := make([][3]int64, 0, len(all))
 	for _, p := range all {
-		out = append(out, [3]int64{p.TS, int64(p.CPUPct), int64(p.TCPConn)})
+		out = append(out, [3]int64{p.TS, int64(p.LatencyMs), int64(b2i(p.OK))})
 	}
 	return out
 }
@@ -1504,7 +1528,7 @@ func (s *Store) ServiceLastFull(id string) (ts int64, latency int, ok bool, cert
 	if !ok2 {
 		return 0, 0, false, -1, false
 	}
-	return p.TS, int(p.CPUPct), p.TCPConn == 1, p.Procs, true
+	return p.TS, p.LatencyMs, p.OK, p.CertDays, true
 }
 
 // ServiceStats 是对最近一段时间探测结果的抖动/丢包统计。
@@ -1532,19 +1556,19 @@ func (s *Store) ServiceStats(id string, since int64) ServiceStats {
 	var hasPrev bool
 	var jitterSum float64
 	for _, p := range pts {
-		if p.TCPConn != 1 {
+		if !p.OK {
 			fail++
 			continue
 		}
 		okCount++
 		if hasPrev {
-			d := p.CPUPct - prevLat
+			d := float64(p.LatencyMs) - prevLat
 			if d < 0 {
 				d = -d
 			}
 			jitterSum += d
 		}
-		prevLat, hasPrev = p.CPUPct, true
+		prevLat, hasPrev = float64(p.LatencyMs), true
 	}
 	st := ServiceStats{LossPct: float64(fail) / float64(len(pts)) * 100, Samples: len(pts), Has: true}
 	if okCount > 1 {

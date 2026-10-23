@@ -46,8 +46,8 @@ func TestOrphanServiceSeriesDroppedOnLoad(t *testing.T) {
 	st.AddServiceResult(model.ServiceResult{ServiceID: "live", TS: now, OK: true, LatencyMs: 3})
 	// 手工塞一个孤儿：模拟"修好之前就已经落盘"的脏数据
 	st.mu.Lock()
-	r := NewRing(ServiceRingSize)
-	r.Add(model.Metrics{TS: now, CPUPct: 1})
+	r := NewServiceRing(ServiceRingSize)
+	r.Add(model.ServiceSample{TS: now, LatencyMs: 1, OK: true, CertDays: -1})
 	st.svcRes["ghost"] = r
 	st.mu.Unlock()
 	if err := st.Save(); err != nil {
