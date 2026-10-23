@@ -1262,6 +1262,11 @@ function loginStateHtml(n) {
   if (st === 'wtmp-stale') {
     return `<span class="badge warn">未在写入</span> wtmp 最后写入 ${ageText || '未知'}，登录告警可能不触发`;
   }
+  if (st === 'wtmp-quiet') {
+    const last = Number(n.loginLastTs || 0);
+    const lastText = last > 0 ? `最后一条登录记录 ${ago(last)}前` : '窗口内没有任何登录记录';
+    return `<span class="badge warn">没有登录记录</span> wtmp 在写，但${lastText}。若你刚登录过，说明本机 sshd 没把登录写进 wtmp`;
+  }
   if (st === 'wtmp') {
     return `<span class="badge ok">正常</span> wtmp${ageText ? `（最后写入 ${ageText}）` : ''}`;
   }

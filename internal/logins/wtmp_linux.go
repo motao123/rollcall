@@ -14,9 +14,10 @@ const wtmpPath = "/var/log/wtmp"
 
 // tailRecords 是每次读取的记录条数。
 //
-// 8 条 = 3KB，一次 read 就够；即使一个上报周期里连续有 8 个人登录（罕见），
-// 也仍在上限内。读更多只会白白增加每个周期的磁盘读。
-const tailRecords = 8
+// 取 256 条（96KB）而不是几条：wtmp 里混着大量非登录记录（有的机器每 10 秒
+// 就写一条 LOGIN_PROCESS），窗口太小时真正的 USER_PROCESS 会被挤出视野——
+// 生产上就是因此在控制端一条登录都没看到。
+const tailRecords = 256
 
 // readTail 读取 wtmp 末尾若干条记录。
 //

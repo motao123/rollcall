@@ -753,7 +753,8 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		if age < -1 {
 			age = -1
 		}
-		s.st.SetNodeLoginState(node.ID, st, age)
+		lastTS, _ := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-Login-Last")), 10, 64)
+		s.st.SetNodeLoginState(node.ID, st, age, lastTS)
 	}
 
 	// 新登录事件：正常情况下这个数组是空的（Agent 只报增量）。

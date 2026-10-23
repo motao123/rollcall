@@ -145,18 +145,23 @@ func TestParseRecordsTrimsPadding(t *testing.T) {
 // 功能看起来是正常的（更糟的是反过来，把正常的机器标成坏了）。
 func TestClassifyLoginState(t *testing.T) {
 	cases := []struct {
-		age  time.Duration
-		want string
+		age    time.Duration
+		lastTS int64
+		want   string
 	}{
-		{0, StateWtmp},
-		{time.Hour, StateWtmp},
-		{6 * 24 * time.Hour, StateWtmp},
-		{8 * 24 * time.Hour, StateWtmpStale},
-		{365 * 24 * time.Hour, StateWtmpStale},
+		{0, 1700000000, StateWtmp},
+		{time.Hour, 1700000000, StateWtmp},
+		{6 * 24 * time.Hour, 1700000000, StateWtmp},
+		// 文件在写但窗口内没有登录记录：只能陈述事实（可能是没人登录，
+		// 也可能是 sshd 没在写），不能报"正常"
+		{0, 0, StateQuiet},
+		{6 * 24 * time.Hour, 0, StateQuiet},
+		{8 * 24 * time.Hour, 1700000000, StateWtmpStale},
+		{8 * 24 * time.Hour, 0, StateWtmpStale},
 	}
 	for _, c := range cases {
-		if got := classify(c.age); got != c.want {
-			t.Fatalf("age=%v 应判为 %s，实际 %s", c.age, c.want, got)
+		if got := classify(c.age, c.lastTS); got != c.want {
+			t.Fatalf("age=%v lastTS=%d 应判为 %s，实际 %s", c.age, c.lastTS, c.want, got)
 		}
 	}
 }

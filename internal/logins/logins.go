@@ -105,19 +105,24 @@ type Watcher struct {
 	// 之所以要报这个：wtmp 在裁剪过的镜像上可能根本不写（缺 /run/utmp、
 	// PAM 未配 utmp），此时功能会静默不触发 —— 那比"没有这个功能"更糟，
 	// 因为运维以为有人在盯着。把状态报上去，面板就能显示"最近写入 N 天前"。
-	note string
-	age  int64
+	note   string
+	age    int64
+	lastTS int64 // 窗口内最后一条 USER_PROCESS 的时间戳，0 表示窗口内没有
 }
 
 // 采集状态取值（随请求头上报，服务端只做展示）。
 const (
-	StateWtmp        = "wtmp"        // 可读，且最近有写入
+	StateWtmp        = "wtmp"        // 窗口内有登录记录，说明确实在记
+	StateQuiet       = "wtmp-quiet"  // 文件在写，但窗口内没有任何 USER_PROCESS
 	StateWtmpStale   = "wtmp-stale"  // 可读，但很久没写过（大概率 sshd 没在写）
 	StateUnavailable = "unavailable" // 读不到
 )
 
-// LoginState 返回最近一次 Poll 观察到的采集状态与 wtmp 的最后写入时间（秒）。
-func (w *Watcher) LoginState() (string, int64) { return w.note, w.age }
+// LoginState 返回最近一次 Poll 观察到的采集状态、wtmp 最后写入距今秒数，
+// 以及窗口内最后一条登录记录的时间戳（0 = 窗口内没有登录记录）。
+func (w *Watcher) LoginState() (state string, age, lastTS int64) {
+	return w.note, w.age, w.lastTS
+}
 
 func NewWatcher() *Watcher { return &Watcher{} }
 
@@ -134,7 +139,13 @@ func (w *Watcher) Poll() []model.LoginEvent {
 		return nil
 	}
 	w.age = int64(age.Seconds())
-	w.note = classify(age)
+	w.lastTS = 0
+	for _, e := range parseRecords(recs) {
+		if e.TS > w.lastTS {
+			w.lastTS = e.TS
+		}
+	}
+	w.note = classify(age, w.lastTS)
 	if len(recs) == 0 {
 		return nil
 	}
@@ -148,9 +159,15 @@ const staleAfter = 7 * 24 * time.Hour
 //
 // 正常节点每次登录/开关机都会写一条记录；一周没写基本可以断定写不进去
 // （缺 /run/utmp、PAM 没配 utmp 之类），而不是"恰好一周没人登录"。
-func classify(age time.Duration) string {
+func classify(age time.Duration, lastTS int64) string {
 	if age > staleAfter {
 		return StateWtmpStale
+	}
+	// 文件在写但没有一条登录记录：这两种情况在数据上无法区分
+	// 「确实没人登录」与「sshd 没把登录写进 wtmp」，所以只陈述事实，
+	// 由界面提示运维"如果你刚登录过，那就是本机没在记录"。
+	if lastTS == 0 {
+		return StateQuiet
 	}
 	return StateWtmp
 }
