@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/motao123/rollcall/internal/model"
 )
@@ -99,7 +100,24 @@ func formatIPv4(b []byte) string {
 type Watcher struct {
 	wm      int64
 	started bool
+
+	// 最近一次采集的可用性，供上报时带给服务端。
+	// 之所以要报这个：wtmp 在裁剪过的镜像上可能根本不写（缺 /run/utmp、
+	// PAM 未配 utmp），此时功能会静默不触发 —— 那比"没有这个功能"更糟，
+	// 因为运维以为有人在盯着。把状态报上去，面板就能显示"最近写入 N 天前"。
+	note string
+	age  int64
 }
+
+// 采集状态取值（随请求头上报，服务端只做展示）。
+const (
+	StateWtmp        = "wtmp"        // 可读，且最近有写入
+	StateWtmpStale   = "wtmp-stale"  // 可读，但很久没写过（大概率 sshd 没在写）
+	StateUnavailable = "unavailable" // 读不到
+)
+
+// LoginState 返回最近一次 Poll 观察到的采集状态与 wtmp 的最后写入时间（秒）。
+func (w *Watcher) LoginState() (string, int64) { return w.note, w.age }
 
 func NewWatcher() *Watcher { return &Watcher{} }
 
@@ -110,11 +128,31 @@ func NewWatcher() *Watcher { return &Watcher{} }
 // 代价是 Agent 重启前几秒内的登录可能被漏掉 —— 相比每天几条误报，这个
 // 取舍更划算，也在文档里写明了。
 func (w *Watcher) Poll() []model.LoginEvent {
-	recs, err := readTail()
-	if err != nil || len(recs) == 0 {
+	recs, age, err := readTail()
+	if err != nil {
+		w.note, w.age = StateUnavailable, -1
+		return nil
+	}
+	w.age = int64(age.Seconds())
+	w.note = classify(age)
+	if len(recs) == 0 {
 		return nil
 	}
 	return w.absorb(parseRecords(recs))
+}
+
+// staleAfter 是判定"wtmp 没在写"的阈值。
+const staleAfter = 7 * 24 * time.Hour
+
+// classify 把 wtmp 的最后写入年龄映射成采集状态。
+//
+// 正常节点每次登录/开关机都会写一条记录；一周没写基本可以断定写不进去
+// （缺 /run/utmp、PAM 没配 utmp 之类），而不是"恰好一周没人登录"。
+func classify(age time.Duration) string {
+	if age > staleAfter {
+		return StateWtmpStale
+	}
+	return StateWtmp
 }
 
 // absorb 处理一批已解析的事件，返回需要上报的新事件。

@@ -1249,6 +1249,25 @@ function batchDialog(ids, title, bodyHTML, after, buildBody) {
 // openTrafficAdjustDialog 人工校正本周期已用流量。
 // 场景：月中才配好重置日、或机器从别处迁移过来，服务端没见过本周期已跑掉的量，
 // 不补录就永远和服务商面板对不上。填一次即可，之后的增量会继续累加。
+// loginStateHtml 把 Agent 自报的 wtmp 采集状态渲染成人话。
+// 为什么要显示：wtmp 在裁剪过的镜像上可能根本不写（缺 /run/utmp、PAM 未配 utmp），
+// 此时登录告警永远不会触发。不显示状态的话，运维会以为有人在盯着。
+function loginStateHtml(n) {
+  const st = n.loginState || '';
+  const age = Number(n.loginAge == null ? -1 : n.loginAge);
+  const ageText = age < 0 ? '' : `${ago(Math.floor(Date.now() / 1000) - age)}前`;
+  if (st === 'unavailable') {
+    return '<span class="badge crit">不可用</span> 读不到 /var/log/wtmp，本机不会有登录告警';
+  }
+  if (st === 'wtmp-stale') {
+    return `<span class="badge warn">未在写入</span> wtmp 最后写入 ${ageText || '未知'}，登录告警可能不触发`;
+  }
+  if (st === 'wtmp') {
+    return `<span class="badge ok">正常</span> wtmp${ageText ? `（最后写入 ${ageText}）` : ''}`;
+  }
+  return '<span class="badge mute">未上报</span> Agent 版本较旧（v1.19.1+ 才报状态）';
+}
+
 function openTrafficAdjustDialog(nodeId, currentUsed, after) {
   const gb = (currentUsed / (1024 ** 3)).toFixed(2);
   const d = openDialog('校正本周期已用流量', `
@@ -1461,6 +1480,7 @@ async function viewNodeDetail(id) {
               ? `已签名${n.clockSkew ? ` <span class="badge ${Math.abs(n.clockSkew) > 30 ? 'warn' : 'mute'}">时钟偏差 ${n.clockSkew > 0 ? '+' : ''}${n.clockSkew}s</span>` : ''}`
               : '<span class="badge mute">未签名</span>'}</span></div>
             <div class="info-row"><span class="info-k">最后上报</span><span class="info-v">${ago(detail.lastSeen)}</span></div>
+            <div class="info-row"><span class="info-k">登录采集</span><span class="info-v">${loginStateHtml(n)}</span></div>
             <div class="info-row"><span class="info-k">最近登录</span><span class="info-v">${n.lastLogin
               ? `${esc(n.lastLogin.user)} @ <span class="mono">${esc(n.lastLogin.host || '本地控制台')}</span>
                  <span class="badge mute">${esc(n.lastLogin.line || '未知终端')}</span> ${ago(n.lastLogin.ts)}`

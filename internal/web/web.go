@@ -746,6 +746,16 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	rep.Metrics.TS = time.Now().Unix()
 	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics))
 
+	// 登录采集的可用性（请求头，旧 Agent 不发）。存下来是为了让面板能显示
+	// "最近写入 N 天前"，而不是让一个在这台机器上永远不触发的功能假装正常。
+	if st := sanitizetext.Text(strings.TrimSpace(r.Header.Get("X-Login-State")), 24); st != "" {
+		age, _ := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-Login-Age")), 10, 64)
+		if age < -1 {
+			age = -1
+		}
+		s.st.SetNodeLoginState(node.ID, st, age)
+	}
+
 	// 新登录事件：正常情况下这个数组是空的（Agent 只报增量）。
 	// 放在鉴权与签名校验之后处理 —— 未通过校验的请求不该产生任何副作用。
 	for _, ev := range rep.Logins {

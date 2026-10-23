@@ -5,6 +5,7 @@ package logins
 import (
 	"io"
 	"os"
+	"time"
 )
 
 // wtmpPath 是登录历史文件。相对 /run/utmp（当前会话）而言，wtmp 才是
@@ -22,34 +23,35 @@ const tailRecords = 8
 // 只读尾部而不是整个文件：wtmp 可以有几十 MB（几年的记录），每 30 秒读一遍
 // 是纯浪费。文件大小不是 384 的整数倍时（写入中断、轮转中）向下取整到记录
 // 边界，避免把半条记录当数据解析出垃圾。
-func readTail() ([]byte, error) {
+func readTail() ([]byte, time.Duration, error) {
 	f, err := os.Open(wtmpPath)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	age := time.Since(st.ModTime())
 	size := st.Size()
 	// 对齐到记录边界：从 newest 往下数，只取完整记录。
 	end := size - size%recordSize
 	if end <= 0 {
-		return nil, nil
+		return nil, age, nil
 	}
 	start := end - int64(tailRecords*recordSize)
 	if start < 0 {
 		start = 0
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return nil, err
+		return nil, age, err
 	}
 	buf := make([]byte, end-start)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		return nil, err
+		return nil, age, err
 	}
-	return buf[:n], nil
+	return buf[:n], age, nil
 }

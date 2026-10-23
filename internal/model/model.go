@@ -50,7 +50,12 @@ type Node struct {
 	// LastLogin 是最近一次被记录的交互式登录（由上报写入，台账 API 不可改）。
 	// 同时用于通知去重：同一节点同一 (ts,user,host) 只推一次。
 	LastLogin *LoginEvent `json:"lastLogin,omitempty"`
-	Token     string      `json:"-"` // 上报凭证，永不下发给前端
+	// LoginState/LoginAge 是 Agent 自报的登录采集可用性（请求头写入）。
+	// 取值 wtmp / wtmp-stale / unavailable；Age 是 wtmp 最后写入距今的秒数，
+	// 读不到时为 -1。面板据此显示"最近写入 N 天前"，而不是静默不触发。
+	LoginState string `json:"loginState,omitempty"`
+	LoginAge   int64  `json:"loginAge,omitempty"`
+	Token      string `json:"-"` // 上报凭证，永不下发给前端
 }
 
 // MountInfo 是一个文件系统的用量快照。

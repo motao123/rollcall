@@ -824,8 +824,19 @@ curl -sS -H "X-Admin-Token: $TOKEN" http://127.0.0.1:19080/api/admin/nodes/<id> 
 - **升级顺序：服务端 → Agent**。`Report` 用 `DisallowUnknownFields`，
   先升 Agent 会让旧服务端整份 400、节点全部失联（与上报签名那轮的顺序**相反**）
 - 水位是进程内的：Agent 重启后首次上报只记录当前最新时间、不补报历史
-- Agent 需要对 `/var/log/wtmp` 有读权限（发行版通常 `0644 root:utmp`，普通用户可读）；
-  读不到时静默跳过，不影响其它指标上报
+- Agent 需要对 `/var/log/wtmp` 有读权限（发行版通常 `0664 root:utmp`，普通用户可读）；
+  读不到时跳过，不影响其它指标上报
+- **★ 先确认这台机器到底有没有在写 wtmp**。裁剪过的镜像常常缺 `/run/utmp`、
+  `pam.d` 也没配 utmp，此时 sshd 不写 wtmp，登录告警永远不会触发：
+
+  ```bash
+  ls -l /var/log/wtmp /run/utmp     # /run/utmp 不存在 = 基本可断定没在写
+  stat -c '%y' /var/log/wtmp        # 登一次录，再看这个时间有没有变
+  ```
+
+  节点详情里的「登录采集」会显示 Agent 实测到的状态（正常 / 未在写入 N 天 / 不可用）。
+  要修：`touch /run/utmp && chown root:utmp /run/utmp && chmod 0664 /run/utmp`
+  并补一条 tmpfiles（`f /run/utmp 0664 root utmp -`），再让 sshd 重新加载
 - 通知级别：root 从网络登录 → `warn`，其余 → `info`；每条登录一条消息（不合并）
 
 ### 7.8 上报签名（v1.16.0+）

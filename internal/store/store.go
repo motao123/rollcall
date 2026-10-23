@@ -1370,6 +1370,27 @@ func (s *Store) SetNodeLastLogin(nodeID string, ev model.LoginEvent) bool {
 	return true
 }
 
+// SetNodeLoginState 记录 Agent 自报的登录采集可用性（只在此变化时落盘）。
+func (s *Store) SetNodeLoginState(nodeID, state string, age int64) {
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	// age 逐次抖动，超过 1 小时才更新一次，避免每次心跳都唤醒快照。
+	ageChanged := n.LoginAge-age > 3600 || age-n.LoginAge > 3600
+	if n.LoginState == state && !ageChanged {
+		s.mu.Unlock()
+		return
+	}
+	n.LoginState = state
+	// 读不到 wtmp 时 age 是 -1，保留它以便界面区分"不可用"与"刚写过"。
+	n.LoginAge = age
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
 // AdjustTrafficUsed 把节点当前周期的用量直接改成 want（按当前计费口径）。
 //
 // 用途是"和服务商面板对账"：月中才配好重置日时，本周期已经跑掉的量拿不到，

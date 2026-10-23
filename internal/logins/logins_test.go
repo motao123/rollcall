@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/motao123/rollcall/internal/model"
 )
@@ -135,5 +136,27 @@ func TestParseRecordsTrimsPadding(t *testing.T) {
 	evs := parseRecords(rec)
 	if len(evs) != 1 || strings.TrimSpace(evs[0].User) != "root" || evs[0].User != "root" {
 		t.Fatalf("用户名应被裁掉尾部空格，实际 %q", evs[0].User)
+	}
+}
+
+// TestClassifyLoginState 覆盖采集状态的判定阈值。
+//
+// 这条决定了面板显示"正常"还是"未在写入"：判错方向会让一个永远不触发的
+// 功能看起来是正常的（更糟的是反过来，把正常的机器标成坏了）。
+func TestClassifyLoginState(t *testing.T) {
+	cases := []struct {
+		age  time.Duration
+		want string
+	}{
+		{0, StateWtmp},
+		{time.Hour, StateWtmp},
+		{6 * 24 * time.Hour, StateWtmp},
+		{8 * 24 * time.Hour, StateWtmpStale},
+		{365 * 24 * time.Hour, StateWtmpStale},
+	}
+	for _, c := range cases {
+		if got := classify(c.age); got != c.want {
+			t.Fatalf("age=%v 应判为 %s，实际 %s", c.age, c.want, got)
+		}
 	}
 }

@@ -294,6 +294,12 @@ func main() {
 		req.Header.Set(agentwire.HeaderNodeTS, strconv.FormatInt(ts, 10))
 		req.Header.Set(agentwire.HeaderNodeNonce, nonce)
 		req.Header.Set(agentwire.HeaderNodeSig, agentwire.ReportSignature(cfg.Token, ts, nonce, body))
+		// 登录采集的可用性走请求头而不是 JSON 字段：头不影响旧服务端解码
+		// （JSON 是 DisallowUnknownFields，加字段会让旧服务端整份 400），
+		// 与 X-Agent-Version 是同一套做法。
+		state, age := loginWatcher.LoginState()
+		req.Header.Set("X-Login-State", state)
+		req.Header.Set("X-Login-Age", strconv.FormatInt(age, 10))
 		// 用请求头而不是 JSON 字段：旧服务端启用了 DisallowUnknownFields，
 		// 加字段会让先升级 Agent 的节点整份上报被拒。
 		req.Header.Set("X-Agent-Version", version.Version)
