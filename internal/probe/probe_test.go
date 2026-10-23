@@ -57,7 +57,8 @@ func TestValidateServiceBlocksPrivateByDefault(t *testing.T) {
 	if err := r.ValidateService(model.Service{Type: "http", Target: "ftp://example.com/"}); err == nil {
 		t.Error("非 http/https 协议应被拒绝")
 	}
-	if err := r.ValidateService(model.Service{Type: "icmp", Target: "example.com"}); err == nil {
+	// icmp 自 v1.17.0 起受支持，这里改用真正不存在的类型
+	if err := r.ValidateService(model.Service{Type: "udp", Target: "example.com"}); err == nil {
 		t.Error("不支持的类型应被拒绝")
 	}
 }

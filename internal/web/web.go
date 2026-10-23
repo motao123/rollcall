@@ -1946,8 +1946,8 @@ func (s *Server) normalizeService(in *model.Service) string {
 		return "name is required"
 	}
 	typ := strings.ToLower(strings.TrimSpace(in.Type))
-	if typ != "http" && typ != "https" && typ != "tcp" && typ != "dns" {
-		return "type 必须是 http / https / tcp / dns"
+	if typ != "http" && typ != "https" && typ != "tcp" && typ != "dns" && typ != "icmp" {
+		return "type 必须是 http / https / tcp / dns / icmp"
 	}
 	in.Type = typ
 	in.Target = strings.TrimSpace(in.Target)

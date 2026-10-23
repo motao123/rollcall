@@ -240,3 +240,47 @@ func (p Policy) DialContext(ctx context.Context, network, addr string) (net.Conn
 	}
 	return nil, lastErr
 }
+
+// ResolveAllowed 解析主机并只返回通过地址策略的 IP。
+//
+// 供"不走 TCP 的出站探测"（ICMP）复用同一套 SSRF 判定：ICMP 的
+// 收包路径自己造包，不经过 DialContext，所以必须显式走一遍
+// CheckIP —— 否则 http/tcp 探测被拦住的内网地址，换成 icmp 类型就绕过去了。
+func (p Policy) ResolveAllowed(ctx context.Context, host string) ([]net.IP, error) {
+	host = normalizeIPHost(host)
+	if host == "" {
+		return nil, errors.New("目标主机为空")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if err := p.CheckIP(ip); err != nil {
+			return nil, err
+		}
+		return []net.IP{ip}, nil
+	}
+	timeout := p.Timeout
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]net.IP, 0, len(addrs))
+	var lastErr error
+	for _, a := range addrs {
+		if err := p.CheckIP(a.IP); err != nil {
+			lastErr = err
+			continue
+		}
+		out = append(out, a.IP)
+	}
+	if len(out) == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("域名 %s 没有可用地址", host)
+	}
+	return out, nil
+}

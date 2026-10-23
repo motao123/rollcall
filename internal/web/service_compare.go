@@ -212,6 +212,9 @@ func probeTargetHost(typ, target string) string {
 		if h != "" {
 			return normalizeProbeHost(h)
 		}
+	case "icmp":
+		// ICMP 目标就是裸主机（不带端口），可直接归一化。
+		return normalizeProbeHost(t)
 	}
 	// 无法解析的目标仍按原文归组，避免从视图中静默消失。
 	return normalizeProbeHost(t)

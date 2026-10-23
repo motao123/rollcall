@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.16.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.17.0**（`./rollcall-server -version` 可查）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -83,7 +83,12 @@ go tool nm /tmp/server-full | grep -cE 'net\.Listen|TCPListener' # 期望：>0
   长范围自动使用 1m / 5m / 1h 聚合，不会一次返回数十万原始点
 
 ### 2. 服务探测（Nezha 强项）
-- 协议：HTTP(S) / TCP / **DNS**（解析 A/AAAA，可配合 `loss`、`latency` 规则）
+- 协议：HTTP(S) / TCP / **DNS** / **ICMP（ping）**（可配合 `loss`、`latency` 规则）
+  · ICMP 回答的是另一个问题：「机器在不在线、往返多久」。服务全挂但机器还在时，
+    只有它能区分「网络断了」和「进程挂了」。目前限 IPv4；走**非特权** datagram socket，
+    只要控制端内核允许（`net.ipv4.ping_group_range` 覆盖服务用户的组）就不需要 root
+    或 `CAP_NET_RAW`，也不给 systemd 单元加任何 capability。内核不允许时，
+    探测详情会写明「请确认 sysctl … 覆盖服务用户的组」
 - 指标：可用性、延迟、HTTP 状态码、**TLS 证书剩余天数**（不足一天按 1 计，`0`=已过期，`-1`=非 TLS）、
   **抖动（jitter）与丢包率（loss）**（基于该服务最近探测样本计算）
 - 24 小时可用率统计 + 最近 2 小时延迟迷你曲线
@@ -1458,6 +1463,18 @@ certificate_days_remaining,uptime_percent_24h}`
 ---
 
 ## 十二、实际部署验证
+
+### v1.17.0（2026-10-23）
+
+- **新增 ICMP（ping）探测目标**：测「机器是否在线 + 往返延迟」，与 HTTP/TCP「服务是否活着」
+  互补。走非特权 datagram socket（`SOCK_DGRAM` + `IPPROTO_ICMP`），不需要 root 或
+  `CAP_NET_RAW`；只在 `ping_group_range` 不覆盖服务用户时才退回 raw socket，两条路都失败
+  会在探测详情里给出可执行的修复建议
+  · 沿用同一套 SSRF 策略：ICMP 自己造包、不走 `DialContext`，因此解析出的每个 IP
+    都显式过 `CheckIP`，否则「http 被拦的内网地址换成 icmp 就绕过去了」
+  · 双栈目标里跳过 IPv6（ICMPv6 的校验和路径不同，未实机验证的不写）并在详情里说明；
+    亚毫秒延迟记为 1ms 而不是 0（0 与「未测到」在图表上同形）
+- 面板服务对话框新增 ICMP 类型；`type` 白名单与同目标对比接口同步支持
 
 ### v1.16.0（2026-10-23）
 

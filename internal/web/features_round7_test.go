@@ -219,7 +219,7 @@ func TestServiceUpdateAPI(t *testing.T) {
 
 	for _, body := range []string{
 		`{"name":"","type":"http","target":"https://example.com"}`,
-		`{"name":"x","type":"icmp","target":"example.com"}`,
+		`{"name":"x","type":"udp","target":"example.com"}`,
 		`{"name":"x","type":"http","target":"  "}`,
 		`{"name":"x","type":"http","target":"https://example.com","interval":9}`,
 		`{"name":"x","type":"http","target":"https://example.com","interval":86401}`,

@@ -1787,11 +1787,11 @@ async function testServiceNow(svc, btn) {
 function openServiceDialog(svc, nodes, after) {
   const editing = !!svc;
   const dlg = openDialog(editing ? '编辑探测目标' : '新增探测目标', `
-    <p class="modal-sub">HTTP/HTTPS 会同时校验证书；TCP/DNS 只判断连通性。间隔最小 10 秒。</p>
+    <p class="modal-sub">HTTP/HTTPS 会同时校验证书；TCP/DNS 只判断连通性；ICMP 测的是「机器在不在线 + 往返延迟」（仅 IPv4，需控制端内核允许非特权 ping）。间隔最小 10 秒。</p>
     <form id="svcDialogForm" class="form-grid">
       ${field('名称', 'name', svc?.name || '', { required: true, placeholder: '例如 imotao.com' })}
-      ${selectField('类型', 'type', svc?.type || 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }, { v: 'dns', t: 'DNS' }])}
-      ${field('目标', 'target', svc?.target || '', { required: true, placeholder: 'https://example.com / 1.2.3.4:3306' })}
+      ${selectField('类型', 'type', svc?.type || 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }, { v: 'dns', t: 'DNS' }, { v: 'icmp', t: 'ICMP（ping）' }])}
+      ${field('目标', 'target', svc?.target || '', { required: true, placeholder: 'https://example.com / 1.2.3.4:3306 / 1.1.1.1（ICMP 只填主机）' })}
       ${field('间隔（秒）', 'interval', String(svc?.interval || 60), { type: 'number', hint: '10–86400 秒' })}
       ${selectField('归属节点', 'nodeId', svc?.nodeId || '', [{ v: '', t: '不关联' }].concat(nodes.map((n) => ({ v: n.id, t: n.name }))))}
       ${checkbox('启用探测', 'enabled', editing ? svc.enabled !== false : true)}

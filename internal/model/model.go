@@ -175,12 +175,12 @@ type Report struct {
 	Metrics Metrics  `json:"metrics"`
 }
 
-// Service 是一个服务探测目标（HTTP / TCP）。
+// Service 是一个服务探测目标（HTTP / TCP / DNS / ICMP）。
 type Service struct {
 	ID       string `json:"id"`
 	NodeID   string `json:"nodeId"` // 归组到某个节点，用于展示
 	Name     string `json:"name"`
-	Type     string `json:"type"` // http | tcp
+	Type     string `json:"type"` // http | https | tcp | dns | icmp
 	Target   string `json:"target"`
 	Interval int    `json:"interval"` // 秒
 	Enabled  bool   `json:"enabled"`

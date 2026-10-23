@@ -791,6 +791,24 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
   需要管理令牌或已登录会话
 - 设置页的「重置」会恢复默认主题；强调色以可读性为准，避免与文字/背景对比不足
 
+### 7.7 ICMP 探测的前提（v1.17.0+）
+
+ICMP 探测（ping）默认可用，但依赖内核允许非特权 ping：
+
+```bash
+# 应覆盖 rollcall 用户的组（0 2147483647 表示全部放行）
+sysctl net.ipv4.ping_group_range
+```
+
+- 不覆盖时不会崩，只是 ICMP 探测会在详情里报
+  `没有 ICMP 权限：请确认 sysctl net.ipv4.ping_group_range …`
+- 放开的办法（把范围设成全部组）：
+  `sysctl -w net.ipv4.ping_group_range="0 2147483647"`，并写进 `/etc/sysctl.d/`
+- **不要**为此给服务单元加 `CAP_NET_RAW`：非特权路径可用时提权没有收益，
+  只会扩大被攻破后的能力面
+- 目标只填主机名或 IP，不带协议与端口；只支持 IPv4，IPv6 目标会明确报错
+- 与 http/tcp 一样受「默认拒绝内网目标」约束，确有需要时用 `-allow-private-probes`
+
 ### 7.8 上报签名（v1.16.0+）
 
 上报除了令牌还带签名：`X-Node-Ts`（秒）、`X-Node-Nonce`（16 字节随机）、

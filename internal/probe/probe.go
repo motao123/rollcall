@@ -109,8 +109,15 @@ func (r *Runner) ValidateService(sv model.Service) error {
 			return r.policy.CheckHost(h)
 		}
 		return nil
+	case "icmp":
+		host, err := parseICMPTarget(sv.Target)
+		if err != nil {
+			return err
+		}
+		// 只做字面量校验；域名在探测时解析，并对每个结果过 CheckIP。
+		return r.policy.CheckHost(host)
 	default:
-		return fmt.Errorf("不支持的类型 %q，可选 http/https/tcp/dns", sv.Type)
+		return fmt.Errorf("不支持的类型 %q，可选 http/https/tcp/dns/icmp", sv.Type)
 	}
 }
 
@@ -138,6 +145,8 @@ func (r *Runner) Do(sv model.Service) model.ServiceResult {
 		r.doTCP(sv, &res)
 	case "dns":
 		r.doDNS(sv, &res)
+	case "icmp":
+		r.doICMP(sv, &res)
 	default:
 		res.OK = false
 		res.Detail = "unsupported type: " + sv.Type
