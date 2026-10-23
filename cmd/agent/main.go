@@ -18,6 +18,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -29,12 +31,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/motao123/rollcall/internal/agentwire"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/motao123/rollcall/internal/agentwire"
 	"github.com/motao123/rollcall/internal/collect"
 	"github.com/motao123/rollcall/internal/model"
 	"github.com/motao123/rollcall/internal/selfupdate"
@@ -91,6 +93,27 @@ func loadConfig(path string) (*config, error) {
 		}
 	}
 	return &c, nil
+}
+
+// oneLine 把服务端返回的片段压成一行并截断，避免多行 JSON 撑乱日志。
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
+}
+
+// newNonce 生成上报用的随机 nonce（16 字节的十六进制）。
+//
+// 用 crypto/rand 而不是 math/rand 或时间：nonce 的职责是让"同一秒内的两次
+// 上报"和"重放"可区分，可预测的 nonce 等于没有。
+func newNonce() (string, error) {
+	b := make([]byte, agentwire.NonceLen/2)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func main() {
@@ -251,6 +274,17 @@ func main() {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Node-Token", cfg.Token)
+		// 上报签名：时间戳 + nonce + HMAC。★★ 必须签**上面这份 body** 的原始字节，
+		// 不能重新序列化一次 —— JSON 的字段顺序与浮点格式不保证稳定。
+		// 旧服务端不认识这三个头，会忽略它们，因此先升 Agent 是安全的。
+		nonce, nerr := newNonce()
+		if nerr != nil {
+			return fmt.Errorf("生成 nonce 失败: %w", nerr)
+		}
+		ts := time.Now().Unix()
+		req.Header.Set(agentwire.HeaderNodeTS, strconv.FormatInt(ts, 10))
+		req.Header.Set(agentwire.HeaderNodeNonce, nonce)
+		req.Header.Set(agentwire.HeaderNodeSig, agentwire.ReportSignature(cfg.Token, ts, nonce, body))
 		// 用请求头而不是 JSON 字段：旧服务端启用了 DisallowUnknownFields，
 		// 加字段会让先升级 Agent 的节点整份上报被拒。
 		req.Header.Set("X-Agent-Version", version.Version)
@@ -260,11 +294,18 @@ func main() {
 			return fmt.Errorf("上报失败: %w", err)
 		}
 		defer resp.Body.Close()
-		// 响应正文没有用途。有界读取并丢弃：既兑现 MaxResponseBytes
-		// 承诺（服务端被控也不能诱导 Agent 下载大文件），又能让
+		// 保留响应开头一小段：被拒时服务端会给出可执行的原因
+		// （"签名时间戳超出允许范围，请检查本机时钟"这类），
+		// 只有状态码的话运维在机器上什么也判断不出来。
+		// 仍然有界读取并丢弃剩余部分：既兑现 MaxResponseBytes 承诺
+		// （服务端被控也不能诱导 Agent 下载大文件），又能让
 		// keep-alive 连接在响应读完后复用。
+		head, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, agentwire.MaxResponseBytes))
 		if resp.StatusCode != http.StatusOK {
+			if hint := oneLine(string(head), 200); hint != "" {
+				return fmt.Errorf("上报被拒绝: HTTP %d %s", resp.StatusCode, hint)
+			}
 			return fmt.Errorf("上报被拒绝: HTTP %d", resp.StatusCode)
 		}
 		log.Printf("已上报 cpu=%.1f%% mem=%.1f%% disk=%.1f%%",

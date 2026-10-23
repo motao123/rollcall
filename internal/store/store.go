@@ -1287,6 +1287,35 @@ func (s *Store) SetNodeIP(nodeID, ip string) (prev string, changed bool) {
 	return prev, true
 }
 
+// SetReportAuth 记录最近一次上报的签名状态与时钟偏差。
+//
+// 只做"变了才落盘"：时钟偏差逐次抖动 ±1 秒是常态，每报一次都 RequestSave
+// 等于用 13 台机器的正常心跳去反复唤醒快照队列。因此偏差要累计到 5 秒
+// 才写一次 —— 这个精度对"要不要去校时"的判断完全够用。
+func (s *Store) SetReportAuth(nodeID string, signed bool, skew int64) {
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	signedChanged := n.Signed != signed
+	skewChanged := n.ClockSkew-skew > 5 || skew-n.ClockSkew > 5
+	if !signedChanged && !skewChanged {
+		s.mu.Unlock()
+		return
+	}
+	n.Signed = signed
+	if signed {
+		n.ClockSkew = skew
+	} else {
+		// 未签名时那个时间戳不可信，不能留在台账里误导人。
+		n.ClockSkew = 0
+	}
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
 // AdjustTrafficUsed 把节点当前周期的用量直接改成 want（按当前计费口径）。
 //
 // 用途是"和服务商面板对账"：月中才配好重置日时，本周期已经跑掉的量拿不到，

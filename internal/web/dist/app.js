@@ -1457,6 +1457,9 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${hasData ? last.procs || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">Agent 版本</span><span class="info-v mono">${esc(n.agentVersion || '—')}${detail.agentOutdated ? ' <span class="badge warn">可升级</span>' : ''}</span></div>
             <div class="info-row"><span class="info-k">上报来源</span><span class="info-v mono">${esc(n.lastIP || '—')}</span></div>
+            <div class="info-row"><span class="info-k">上报签名</span><span class="info-v">${n.signed
+              ? `已签名${n.clockSkew ? ` <span class="badge ${Math.abs(n.clockSkew) > 30 ? 'warn' : 'mute'}">时钟偏差 ${n.clockSkew > 0 ? '+' : ''}${n.clockSkew}s</span>` : ''}`
+              : '<span class="badge mute">未签名</span>'}</span></div>
             <div class="info-row"><span class="info-k">最后上报</span><span class="info-v">${ago(detail.lastSeen)}</span></div>
           </div>
         </div>
@@ -3132,8 +3135,9 @@ async function viewSettings() {
   let autoBk = null;
   let upgrades = { items: [], serverVersion: '' };
   let storage = null;
+  let repSec = null;
   try {
-    const [n, svc, q, th, tk, hl, tp, ab, au, sg] = await Promise.all([
+    const [n, svc, q, th, tk, hl, tp, ab, au, sg, rs] = await Promise.all([
       adminApi('/api/admin/nodes'),
       adminApi('/api/admin/services'),
       adminApi('/api/admin/notify/jobs'),
@@ -3144,7 +3148,9 @@ async function viewSettings() {
       adminApi('/api/admin/backup/auto').catch(() => null),
       adminApi('/api/admin/agent-upgrades').catch(() => null),
       adminApi('/api/admin/storage').catch(() => null),
+      adminApi('/api/admin/report-security').catch(() => null),
     ]);
+    repSec = rs;
     health = hl;
     autoBk = ab;
     storage = sg;
@@ -3492,6 +3498,14 @@ async function viewSettings() {
         <span class="section-meta">登录时在密码之外额外校验身份验证器动态码（TOTP，30 秒轮换）。</span>
         <button class="btn ${totpOn ? 'danger' : 'primary'}" id="totpBtn" type="button">${totpOn ? '停用两步验证' : '启用两步验证'}</button>
       </div>
+      <div class="panel panel-pad inline-panel">
+        <span class="badge ${repSec && repSec.requireSignature ? 'ok' : 'mute'}">${repSec && repSec.requireSignature ? '已要求签名上报' : '未强制签名上报'}</span>
+        <span class="section-meta">
+          上报带时间戳与 HMAC-SHA256 签名，服务端只接受 ±${repSec ? repSec.windowSeconds : 90} 秒内的请求，重复 nonce 直接拒绝。
+          关闭时未签名的旧 Agent 仍可上报${repSec && repSec.signedCount ? `（当前 ${repSec.signedCount} 台已签名` : ''}${repSec && (repSec.unsignedNodes || []).length ? `，未签名：${esc((repSec.unsignedNodes || []).join('、'))}）` : repSec && repSec.signedCount ? '）' : ''}。
+        </span>
+        <button class="btn ${repSec && repSec.requireSignature ? 'danger' : 'primary'}" id="repSigBtn" type="button">${repSec && repSec.requireSignature ? '取消强制' : '要求签名上报'}</button>
+      </div>
       <div class="panel panel-pad">
         <div class="toolbar token-form">
           <input id="tokenName" type="text" maxlength="64" placeholder="令牌名称，例如 CI 只读" class="w-name">
@@ -3721,6 +3735,34 @@ async function viewSettings() {
     if (String((state.user || {}).totpEnabled) === 'true') showTOTPDisableDialog();
     else showTOTPSetupDialog();
   };
+
+  /* ---- 上报签名策略 ---- */
+  const repSigBtn = $('#repSigBtn');
+  if (repSigBtn) {
+    repSigBtn.onclick = async () => {
+      const on = !(repSec && repSec.requireSignature);
+      const pending = (repSec && repSec.unsignedNodes) || [];
+      // 开启会把没签名的节点踢下线（它们会一直 401），必须先说清楚。
+      if (on && pending.length) {
+        const ok = await modalConfirm('这些节点会立刻失联',
+          `以下 ${pending.length} 台节点还没有签名上报，开启后会立刻被 401 拒绝、在面板上显示离线：${pending.join('、')}。建议先把它们升到 v1.16.0 再开启。`,
+          { danger: true, okText: '仍然开启' });
+        if (!ok) return;
+      }
+      repSigBtn.disabled = true;
+      try {
+        await adminApi('/api/admin/report-security', {
+          method: 'PUT', body: JSON.stringify({ requireSignature: on }),
+        });
+        toast(on ? '已要求签名上报' : '已取消强制签名');
+        viewSettings();
+      } catch (e) {
+        toast('保存失败：' + e.message, 'err');
+      } finally {
+        repSigBtn.disabled = false;
+      }
+    };
+  }
 
   /* ---- API 令牌 ---- */
   $('#createTokenBtn').onclick = async () => {

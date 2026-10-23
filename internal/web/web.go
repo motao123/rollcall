@@ -2,6 +2,7 @@
 package web
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/subtle"
 	"embed"
@@ -58,6 +59,10 @@ type Server struct {
 	// opNotifyMu/opNotifyAt 是运营类通知的去重窗口（IP 变更等）。
 	opNotifyMu sync.Mutex
 	opNotifyAt map[string]int64
+
+	// sigMu/sigNonce 是上报签名的 nonce 去重表（±SigWindow 窗口内不许重复）。
+	sigMu    sync.Mutex
+	sigNonce map[string]int64
 
 	// userMu 保护 user 指针：账号修改时整体替换副本，读方拿到指针后
 	// 可安全使用（User 一经发布不再原地修改）。
@@ -345,6 +350,7 @@ func (s *Server) routes(static http.Handler) []route {
 		// 这些直接影响匿名访客看到的内容，必须是管理写操作。
 		{"/api/admin/status-page", authAdmin, http.HandlerFunc(s.handleAdminStatusPage)},
 		{"/api/admin/status-page/token", authAdmin, http.HandlerFunc(s.handleAdminStatusToken)},
+		{"/api/admin/report-security", authAdmin, http.HandlerFunc(s.handleAdminReportSecurity)},
 		{"/api/admin/maintenance", authAdmin, http.HandlerFunc(s.handleAdminMaintenance)},
 		{"/api/admin/maintenance/", authAdmin, http.HandlerFunc(s.handleAdminMaintenanceByID)},
 		{"/api/admin/incidents", authAdmin, http.HandlerFunc(s.handleAdminIncidents)},
@@ -676,10 +682,17 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		fail(w, 405, "method not allowed")
 		return
 	}
-	// 限制请求体，防止内存滥用
-	body := http.MaxBytesReader(w, r.Body, 64<<10)
+	// 限制请求体，防止内存滥用。
+	// ★ 必须先把字节读下来再解码：签名覆盖的是**实际发送的 body 字节**，
+	// 直接流式解码拿不到它们，而重新序列化一次得到的字节不保证相同
+	// （JSON 的字段顺序与浮点格式都不稳定），签名会永远对不上。
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		fail(w, 400, "读取请求体失败")
+		return
+	}
 	var rep model.Report
-	dec := json.NewDecoder(body)
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rep); err != nil {
 		fail(w, 400, "bad json")
@@ -692,6 +705,19 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "invalid token")
 		return
 	}
+
+	// 签名校验放在"令牌正确"之后：连令牌都不对的请求已经 401 了，
+	// 再算一遍 HMAC 只是给对方提供一个无需令牌的 CPU 消耗入口。
+	//
+	// 注意顺序：先校验签名、再计命中。一个令牌正确但签名过期的上报
+	// 不该被算作"这台机器还活着"——那正是时钟漂移最该被发现的地方。
+	code, reason, skew, signed := s.checkReportSignature(r, node, token, raw)
+	if code != 0 {
+		log.Printf("拒绝上报 node=%s ip=%s: %s", node.Name, clientIP(r, s.trustedProxies), reason)
+		fail(w, code, reason)
+		return
+	}
+	s.st.SetReportAuth(node.ID, signed, skew)
 
 	// 只统计通过鉴权的上报：健康卡片用它与预期值对比判断采集是否掉队，
 	// 未认证请求（扫描器、错误配置的 Agent）混进来会让速率虚高。

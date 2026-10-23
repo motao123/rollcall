@@ -791,6 +791,38 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
   需要管理令牌或已登录会话
 - 设置页的「重置」会恢复默认主题；强调色以可读性为准，避免与文字/背景对比不足
 
+### 7.8 上报签名（v1.16.0+）
+
+上报除了令牌还带签名：`X-Node-Ts`（秒）、`X-Node-Nonce`（16 字节随机）、
+`X-Node-Sig`。规范：
+
+```
+sig = hex(HMAC-SHA256(token, "v1\n" + ts + "\n" + nonce + "\n" + hex(sha256(body))))
+```
+
+服务端只接受 `|ts − 服务端时间| <= 90` 的上报，窗口内 nonce 不可重复。
+
+**是否强制由开关决定**，默认关闭：
+
+```bash
+TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
+# 看现状：还有哪些在线节点没签名（这个名单就是"开启后会失联"的准确名单）
+curl -sS -H "X-Admin-Token: $TOKEN" http://127.0.0.1:19080/api/admin/report-security
+# 开启强制
+curl -sS -X PUT http://127.0.0.1:19080/api/admin/report-security \
+  -H "X-Admin-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"requireSignature":true}'
+```
+
+- **升级顺序**：Agent → 服务端 → 开强制。新 Agent 发给旧服务端时签名头会被忽略
+  （旧服务端不认识这些头），所以先升 Agent 安全；反过来先开强制会让旧 Agent 立刻 401
+- 被拒时会写日志 `拒绝上报 node=… ip=…: <原因>`，Agent 侧日志也会带上同一句原因
+- 时钟偏差显示在节点详情（>30 秒标黄）。偏差来自 Agent 自报的时间戳，
+  只在签名有效时才采信
+- 令牌轮换后 Agent 还用旧令牌 → 签名校验失败（`令牌不匹配或请求体被改动`），
+  在节点上改 `agent.json` 的 token 即可
+- 强制开启后想回退：把 `requireSignature` 置 false 即可，已签名的 Agent 不受影响
+
 ### 7.9 运营类通知与流量校正（v1.15.3+）
 
 三类"非告警"事件复用现有通知渠道（在「设置 → 通知」里启用任意渠道后生效）：

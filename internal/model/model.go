@@ -38,7 +38,13 @@ type Node struct {
 	// 只出现在管理端接口：公开页用独立的脱敏视图，导出也按列白名单生成。
 	// 用途是排查「这台机器到底从哪个地址连过来的」，也是批量运维时定位主机的线索。
 	LastIP string `json:"lastIP,omitempty"`
-	Token  string `json:"-"` // 上报凭证，永不下发给前端
+	// Signed 表示最近一次被接受的上报带有效签名（v1.16.0 起的 Agent 才发）。
+	// 由服务端写入，台账 API 不能修改；用于在"要求签名"前后看谁还没升上来。
+	Signed bool `json:"signed,omitempty"`
+	// ClockSkew 是 Agent 自报时间与服务端时间的差值（秒，Agent − 服务端）。
+	// 只在收到签名上报时更新：未签名的上报里那个 ts 本身就不受信任。
+	ClockSkew int64 `json:"clockSkew,omitempty"`
+	Token     string `json:"-"` // 上报凭证，永不下发给前端
 }
 
 // MountInfo 是一个文件系统的用量快照。
