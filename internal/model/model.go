@@ -43,7 +43,7 @@ type Node struct {
 	Signed bool `json:"signed,omitempty"`
 	// ClockSkew 是 Agent 自报时间与服务端时间的差值（秒，Agent − 服务端）。
 	// 只在收到签名上报时更新：未签名的上报里那个 ts 本身就不受信任。
-	ClockSkew int64 `json:"clockSkew,omitempty"`
+	ClockSkew int64  `json:"clockSkew,omitempty"`
 	Token     string `json:"-"` // 上报凭证，永不下发给前端
 }
 

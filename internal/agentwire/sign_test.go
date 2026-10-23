@@ -26,10 +26,10 @@ func TestReportSignatureCoversInputs(t *testing.T) {
 	body := []byte(`{"a":1}`)
 	base := ReportSignature("tok", 1700000000, "n", body)
 	cases := map[string]string{
-		"换令牌":  ReportSignature("tok2", 1700000000, "n", body),
-		"换时间":  ReportSignature("tok", 1700000001, "n", body),
+		"换令牌":    ReportSignature("tok2", 1700000000, "n", body),
+		"换时间":    ReportSignature("tok", 1700000001, "n", body),
 		"换nonce": ReportSignature("tok", 1700000000, "m", body),
-		"换正文":  ReportSignature("tok", 1700000000, "n", []byte(`{"a":2}`)),
+		"换正文":    ReportSignature("tok", 1700000000, "n", []byte(`{"a":2}`)),
 	}
 	for name, sig := range cases {
 		if sig == base {
