@@ -1461,6 +1461,10 @@ async function viewNodeDetail(id) {
               ? `已签名${n.clockSkew ? ` <span class="badge ${Math.abs(n.clockSkew) > 30 ? 'warn' : 'mute'}">时钟偏差 ${n.clockSkew > 0 ? '+' : ''}${n.clockSkew}s</span>` : ''}`
               : '<span class="badge mute">未签名</span>'}</span></div>
             <div class="info-row"><span class="info-k">最后上报</span><span class="info-v">${ago(detail.lastSeen)}</span></div>
+            <div class="info-row"><span class="info-k">最近登录</span><span class="info-v">${n.lastLogin
+              ? `${esc(n.lastLogin.user)} @ <span class="mono">${esc(n.lastLogin.host || '本地控制台')}</span>
+                 <span class="badge mute">${esc(n.lastLogin.line || '未知终端')}</span> ${ago(n.lastLogin.ts)}`
+              : '—'}</span></div>
           </div>
         </div>
 

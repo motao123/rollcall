@@ -809,6 +809,25 @@ sysctl net.ipv4.ping_group_range
 - 目标只填主机名或 IP，不带协议与端口；只支持 IPv4，IPv6 目标会明确报错
 - 与 http/tcp 一样受「默认拒绝内网目标」约束，确有需要时用 `-allow-private-probes`
 
+### 7.6 节点登录告警（v1.19.0+）
+
+Agent 读 `/var/log/wtmp`，只把「自上次上报以来的新登录」随上报带回；服务端去重后
+写入节点台账并推送通知（复用「设置 → 通知」里的渠道）。
+
+```bash
+# 看某台节点的最近登录
+curl -sS -H "X-Admin-Token: $TOKEN" http://127.0.0.1:19080/api/admin/nodes/<id> \
+  | grep -o '"lastLogin":[^}]*}'
+```
+
+- **只能看到成功登录**：wtmp 不记录失败尝试。防爆破要靠 fail2ban/sshd 日志，不是这里
+- **升级顺序：服务端 → Agent**。`Report` 用 `DisallowUnknownFields`，
+  先升 Agent 会让旧服务端整份 400、节点全部失联（与上报签名那轮的顺序**相反**）
+- 水位是进程内的：Agent 重启后首次上报只记录当前最新时间、不补报历史
+- Agent 需要对 `/var/log/wtmp` 有读权限（发行版通常 `0644 root:utmp`，普通用户可读）；
+  读不到时静默跳过，不影响其它指标上报
+- 通知级别：root 从网络登录 → `warn`，其余 → `info`；每条登录一条消息（不合并）
+
 ### 7.8 上报签名（v1.16.0+）
 
 上报除了令牌还带签名：`X-Node-Ts`（秒）、`X-Node-Nonce`（16 字节随机）、

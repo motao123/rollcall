@@ -38,6 +38,7 @@ import (
 
 	"github.com/motao123/rollcall/internal/agentwire"
 	"github.com/motao123/rollcall/internal/collect"
+	"github.com/motao123/rollcall/internal/logins"
 	"github.com/motao123/rollcall/internal/model"
 	"github.com/motao123/rollcall/internal/selfupdate"
 	"github.com/motao123/rollcall/internal/version"
@@ -248,6 +249,10 @@ func main() {
 		time.Sleep(time.Duration(cfg.Interval) * time.Second)
 	}
 
+	// 登录事件采集只需一次初始化：水位保存在进程内，重启后重新建立
+	// （首次 Poll 只记录当前最新时间，不会把历史登录当成新事件）。
+	loginWatcher := logins.NewWatcher()
+
 	// 上报接口不需要重定向：拒绝跟随可确保 X-Node-Token 绝不会被转发到其他主机
 	client := &http.Client{
 		Timeout: 15 * time.Second,
@@ -264,6 +269,10 @@ func main() {
 		}
 		m := c.Collect()
 		rep := model.Report{NodeID: cfg.NodeID, Host: host, Metrics: m}
+		// 只带"自上次上报以来的新登录"，平时为空数组。
+		// 注意：这个字段要求服务端**先升级**（服务端用 DisallowUnknownFields 解码），
+		// 所以本版的升级顺序是 服务端 → Agent，与上报签名那轮相反。
+		rep.Logins = loginWatcher.Poll()
 		body, err := json.Marshal(rep)
 		if err != nil {
 			return fmt.Errorf("序列化失败: %w", err)

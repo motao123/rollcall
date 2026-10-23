@@ -46,8 +46,11 @@ type Node struct {
 	Signed bool `json:"signed,omitempty"`
 	// ClockSkew 是 Agent 自报时间与服务端时间的差值（秒，Agent − 服务端）。
 	// 只在收到签名上报时更新：未签名的上报里那个 ts 本身就不受信任。
-	ClockSkew int64  `json:"clockSkew,omitempty"`
-	Token     string `json:"-"` // 上报凭证，永不下发给前端
+	ClockSkew int64 `json:"clockSkew,omitempty"`
+	// LastLogin 是最近一次被记录的交互式登录（由上报写入，台账 API 不可改）。
+	// 同时用于通知去重：同一节点同一 (ts,user,host) 只推一次。
+	LastLogin *LoginEvent `json:"lastLogin,omitempty"`
+	Token     string      `json:"-"` // 上报凭证，永不下发给前端
 }
 
 // MountInfo 是一个文件系统的用量快照。
@@ -176,6 +179,21 @@ type Report struct {
 	NodeID  string   `json:"nodeId"`
 	Host    HostInfo `json:"host"`
 	Metrics Metrics  `json:"metrics"`
+	// Logins 是"自上次上报以来的新登录"，正常情况下为空。
+	//
+	// ★ 这个字段决定了升级顺序：服务端用 DisallowUnknownFields 解码，
+	// 所以**必须先升服务端、再升 Agent**（与上报签名那轮相反）。
+	// 旧服务端收到带 logins 的上报会整份 400，节点直接失联。
+	Logins []LoginEvent `json:"logins,omitempty"`
+}
+
+// LoginEvent 是一次成功登录（wtmp 的 USER_PROCESS 记录）。
+// 失败尝试不写进 wtmp，因此这里代表"确实有人进来了"。
+type LoginEvent struct {
+	TS   int64  `json:"ts"`
+	User string `json:"user"`
+	Host string `json:"host"` // 来源地址；本地控制台登录为空
+	Line string `json:"line"` // tty / pts/N
 }
 
 // Service 是一个服务探测目标（HTTP / TCP / DNS / ICMP）。

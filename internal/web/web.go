@@ -64,6 +64,12 @@ type Server struct {
 	sigMu    sync.Mutex
 	sigNonce map[string]int64
 
+	// loginMu/loginSeen 是登录通知的去重表（键为 节点|时间戳|用户|来源）。
+	// 只放内存：Agent 的水位保证同一条登录只上报一次，这张表只是防
+	// "Agent 重启后重发最近几条"这一类边界情况。
+	loginMu   sync.Mutex
+	loginSeen map[string]struct{}
+
 	// userMu 保护 user 指针：账号修改时整体替换副本，读方拿到指针后
 	// 可安全使用（User 一经发布不再原地修改）。
 	userMu sync.RWMutex
@@ -739,6 +745,12 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
 	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics))
+
+	// 新登录事件：正常情况下这个数组是空的（Agent 只报增量）。
+	// 放在鉴权与签名校验之后处理 —— 未通过校验的请求不该产生任何副作用。
+	for _, ev := range rep.Logins {
+		s.handleNodeLogin(node, ev)
+	}
 
 	// 唤醒 SSE 订阅者：面板不必再等下一次轮询，上报落地即可刷新。
 	s.publishChange()

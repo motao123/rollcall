@@ -1347,6 +1347,29 @@ func (s *Store) SetReportAuth(nodeID string, signed bool, skew int64) {
 	s.RequestSave()
 }
 
+// SetNodeLastLogin 记录最近一次交互式登录，返回是否有变化（用于决定要不要通知）。
+//
+// 只有"更新"才落盘：一条登录事件被上报一次就够，重复上报（Agent 重启后
+// 水位重建的边界情况）不该再唤醒快照队列，也不该重复通知。
+func (s *Store) SetNodeLastLogin(nodeID string, ev model.LoginEvent) bool {
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	if n.LastLogin != nil && n.LastLogin.TS >= ev.TS {
+		// 不比现有更新：既包括重复上报，也包括乱序到达的旧事件。
+		s.mu.Unlock()
+		return false
+	}
+	cp := ev
+	n.LastLogin = &cp
+	s.mu.Unlock()
+	s.RequestSave()
+	return true
+}
+
 // AdjustTrafficUsed 把节点当前周期的用量直接改成 want（按当前计费口径）。
 //
 // 用途是"和服务商面板对账"：月中才配好重置日时，本周期已经跑掉的量拿不到，
