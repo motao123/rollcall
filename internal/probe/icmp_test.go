@@ -15,7 +15,7 @@ import (
 // 而不只是"报错了"。
 func TestParseICMPTarget(t *testing.T) {
 	ok := []string{"example.com", "1.1.1.1", "vps-01.example.com", "  example.com  ",
-		"example.com.", "[2606:4700::1111]"}
+		"example.com.", "[2606:4700::1111]", "2606:4700::1111"}
 	for _, in := range ok {
 		if _, err := parseICMPTarget(in); err != nil {
 			t.Fatalf("%q 应被接受，实际 %v", in, err)

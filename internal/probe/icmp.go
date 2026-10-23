@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"net"
 	"strings"
 	"time"
 
@@ -51,10 +52,13 @@ func parseICMPTarget(target string) (string, error) {
 		return "", errors.New("ICMP 目标不能包含路径或空白")
 	}
 	s = strings.TrimSuffix(s, ".")
-	// 允许 [::1] 这种带方括号的写法，其余含冒号的一律当作"误填了端口"。
+	// 顺序很重要：先认 IP 字面量，再看冒号是不是"误填端口"。
+	// 裸 IPv6（2606:4700::1111）本身含冒号，若先判冒号就会把它当成带端口的
+	// 主机名拒掉 —— 生产验证时正是这么踩到的。
 	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
 		s = s[1 : len(s)-1]
-	} else if strings.Contains(s, ":") {
+	}
+	if !isIPLiteral(s) && strings.Contains(s, ":") {
 		return "", errors.New("ICMP 目标不要带端口，只填主机名或 IP")
 	}
 	if len(s) == 0 || len(s) > 253 {
@@ -78,31 +82,13 @@ func parseICMPTarget(target string) (string, error) {
 	return s, nil
 }
 
+// isIPLiteral 判断一个目标是不是 IP 字面量。
+//
+// 必须用 net.ParseIP 而不是"含冒号就算 IPv6"这种形状判断：后者会把
+// example.com:80 当成 IPv6 放行，于是"误填端口"这个最常见的输入错误
+// 一路走到探测阶段才失败。地址是否可用仍由 netguard.CheckIP 判定。
 func isIPLiteral(s string) bool {
-	// 只做形状判断，不复用 net.ParseIP：这里要区分的是"看起来像 IP"
-	// 与"像域名"，而 ParseIP 会把 1.2.3 之类当作失败。真正的地址校验
-	// 发生在 netguard.CheckIP。
-	if !strings.Contains(s, ".") && !strings.Contains(s, ":") {
-		return false
-	}
-	if strings.Contains(s, ":") {
-		return true // IPv6
-	}
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		if p == "" || len(p) > 3 {
-			return false
-		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-	}
-	return true
+	return net.ParseIP(s) != nil
 }
 
 // icmpChecksum 计算 RFC 1071 的 16 位反码和。
