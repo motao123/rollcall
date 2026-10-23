@@ -1249,28 +1249,33 @@ function batchDialog(ids, title, bodyHTML, after, buildBody) {
 // openTrafficAdjustDialog 人工校正本周期已用流量。
 // 场景：月中才配好重置日、或机器从别处迁移过来，服务端没见过本周期已跑掉的量，
 // 不补录就永远和服务商面板对不上。填一次即可，之后的增量会继续累加。
-// loginStateHtml 把 Agent 自报的 wtmp 采集状态渲染成人话。
-// 为什么要显示：wtmp 在裁剪过的镜像上可能根本不写（缺 /run/utmp、PAM 未配 utmp），
-// 此时登录告警永远不会触发。不显示状态的话，运维会以为有人在盯着。
+// loginStateHtml 渲染 Agent 自报的 wtmp 采集状态。
+//
+// 刻意不写"正常/异常"这种判定：这批节点上实测到的两种情况（wtmp 多日未写、
+// 或只写 LOGIN_PROCESS 没有登录记录）在数据上无法与"最近确实没人登录"区分。
+// 摆事实 + 一句自查提示，比给一个可能是错的结论有用。
 function loginStateHtml(n) {
   const st = n.loginState || '';
-  const age = Number(n.loginAge == null ? -1 : n.loginAge);
-  const ageText = age < 0 ? '' : `${ago(Math.floor(Date.now() / 1000) - age)}前`;
+  if (!st) {
+    return '<span class="badge mute">未上报</span> Agent 较旧（v1.19.1+ 才报状态）';
+  }
   if (st === 'unavailable') {
     return '<span class="badge crit">不可用</span> 读不到 /var/log/wtmp，本机不会有登录告警';
   }
-  if (st === 'wtmp-stale') {
-    return `<span class="badge warn">未在写入</span> wtmp 最后写入 ${ageText || '未知'}，登录告警可能不触发`;
-  }
-  if (st === 'wtmp-quiet') {
-    const last = Number(n.loginLastTs || 0);
-    const lastText = last > 0 ? `最后一条登录记录 ${ago(last)}前` : '窗口内没有任何登录记录';
-    return `<span class="badge warn">没有登录记录</span> wtmp 在写，但${lastText}。若你刚登录过，说明本机 sshd 没把登录写进 wtmp`;
-  }
-  if (st === 'wtmp') {
-    return `<span class="badge ok">正常</span> wtmp${ageText ? `（最后写入 ${ageText}）` : ''}`;
-  }
-  return '<span class="badge mute">未上报</span> Agent 版本较旧（v1.19.1+ 才报状态）';
+  const age = Number(n.loginAge == null ? -1 : n.loginAge);
+  const last = Number(n.loginLastTs || 0);
+  const now = Math.floor(Date.now() / 1000);
+  const wrote = age >= 0 ? `最后写入 ${ago(now - age)}前` : '写入时间未知';
+  const seen = last > 0
+    ? `最后一条登录记录 ${ago(last)}前`
+    : '窗口内没有登录记录';
+  // 登录记录超过一天没更新、或压根没有：给出自查提示（不判定为故障）
+  const suspicious = last === 0 || (now - last) > 86400;
+  const badge = suspicious ? '<span class="badge warn">待确认</span>' : '<span class="badge ok">有记录</span>';
+  const hint = suspicious
+    ? '若你刚登录过这台机器而这里没更新，说明本机 sshd 没把登录写进 wtmp'
+    : '';
+  return `${badge} ${wrote} · ${seen}${hint ? ` <span class="muted">${hint}</span>` : ''}`;
 }
 
 function openTrafficAdjustDialog(nodeId, currentUsed, after) {
