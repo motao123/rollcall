@@ -405,6 +405,12 @@ func (s *Store) load() error {
 		s.services[k] = v
 	}
 	for k, pts := range snap.SvcRes {
+		// 服务已不存在的历史直接丢弃：删除服务的那一刻若正好有一次探测
+		// 在飞，它的结果会给已删服务重建一个环，此后这份数据既没人看、
+		// 也不会自己过期。加载时顺手清掉，免得脏数据一直跟着快照走。
+		if _, ok := s.services[k]; !ok {
+			continue
+		}
 		sort.Slice(pts, func(i, j int) bool { return pts[i].TS < pts[j].TS })
 		r := NewRing(ServiceRingSize)
 		for _, p := range pts {
@@ -1443,6 +1449,11 @@ func (s *Store) Service(id string) (*model.Service, bool) {
 func (s *Store) AddServiceResult(sr model.ServiceResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 丢弃"已删除服务"的迟到结果：探针在删除瞬间可能还在飞。
+	// 不丢的话这里会给它重建一个环，产生永不显示、永不过期的孤儿数据。
+	if _, ok := s.services[sr.ServiceID]; !ok {
+		return
+	}
 	r := s.svcRes[sr.ServiceID]
 	if r == nil {
 		r = NewRing(ServiceRingSize)
