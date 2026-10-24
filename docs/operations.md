@@ -119,6 +119,11 @@ sudo install -m 0755 rollsign-linux-amd64 /opt/rollcall/rollsign
   忘带会直接失败，`--allow-unsigned` 也会因为"与公钥冲突"被拒绝 —— 这是设计如此
 - 每次发版都要同步维护签名：CI 只产二进制与 `SHA256SUMS`，`.sig` 只能在签名机上生成，
   **私钥丢了就只能换一把新的公钥**（旧签名全部失效，需重新分发 `release.pub`）
+- **发版时序（v1.21.0 起已由 CI 保障，仍建议遵守）**：先推 tag 等流水线全绿，再由签名机
+  `gh release create/upload` 上传本地构建 + `.sig`。签名机构建与 CI 构建可能字节不同
+  （Go 版本差异），CI 一旦 `--clobber` 覆盖已签名的二进制，release 上就会出现
+  「二进制与签名失配」，升级脚本验签必然失败——v1.20.0–v1.20.1 曾实际发生并于
+  2026-10-24 重传修复；CI 现已改为「release 已存在则跳过上传」
 
 ```bash
 # 从发布页取二进制与签名，两者一起校验

@@ -135,11 +135,15 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } > /tmp/rollcall-notes.md
-          # 幂等：上一次可能已经建好 release 但上传/后续步骤失败，
-          # 直接 create 会因"release 已存在"让整条流水线失败。
+          # ★ 只在 release 不存在时创建并上传：CI 的产物没有发行签名
+          #   （.sig 只能在签名机上生成）。如果签名机已上传本地构建
+          #   （与 CI 构建字节不同：Go 版本可能不同），这里的 --clobber
+          #   会把已签名的二进制覆盖成未签名的，而 .sig 不在 CI 的
+          #   dist 里不会被覆盖——结果是 release 上二进制与签名失配，
+          #   升级脚本验签必然失败（v1.20.0–v1.20.1 实际踩过）。
+          #   正确时序：先推 tag 等 CI 绿，再由签名机上传构建+签名。
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-            gh release edit "$GITHUB_REF_NAME" --notes-file /tmp/rollcall-notes.md
+            echo "release 已存在（签名机上传过），跳过 CI 产物上传"
           else
             gh release create "$GITHUB_REF_NAME" dist/* \
               --title "Rollcall $GITHUB_REF_NAME" \
