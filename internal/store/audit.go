@@ -83,6 +83,35 @@ func (s *Store) appendAuditLocked(e *model.AuditEntry) error {
 }
 
 // QueryAudit 按时间倒序返回匹配记录与匹配总数。
+// auditMatch 是内存与冷查询共用的过滤判定，保证两条路径语义一致。
+func auditMatch(e *model.AuditEntry, since, until int64, actor, action, search string) bool {
+	if since > 0 && e.TS < since {
+		return false
+	}
+	if until > 0 && e.TS > until {
+		return false
+	}
+	if actor != "" && !strings.Contains(strings.ToLower(e.Actor), actor) {
+		return false
+	}
+	if action != "" && strings.ToLower(e.Action) != action {
+		return false
+	}
+	if search != "" {
+		hay := strings.ToLower(e.Actor + " " + e.Path + " " + e.Action + " " + e.IP + " " + e.Detail)
+		if !strings.Contains(hay, search) {
+			return false
+		}
+	}
+	return true
+}
+
+// QueryAudit 按时间倒序返回匹配记录与匹配总数。
+//
+// 内存只保留最近 auditMemoryLimit 条；窗口一旦装满，文件里必然还有
+// 更早的保留期内记录。此时若查询范围可能涉及更早记录（Since 未指定，
+// 或早于内存最早一条），就回源扫描审计文件——文件在保留期内是内存的
+// 超集，冷路径直接以文件为准，不会与内存重复计数。
 func (s *Store) QueryAudit(q AuditQuery) ([]model.AuditEntry, int) {
 	limit := q.Limit
 	if limit <= 0 {
@@ -100,28 +129,26 @@ func (s *Store) QueryAudit(q AuditQuery) ([]model.AuditEntry, int) {
 	search := strings.ToLower(strings.TrimSpace(q.Search))
 
 	s.auditMu.Lock()
+	var earliest int64
+	if len(s.audit) > 0 {
+		earliest = s.audit[0].TS
+	}
+	windowFull := len(s.audit) >= auditMemoryLimit
+	path := s.auditPath
+	s.auditMu.Unlock()
+
+	if windowFull && path != "" && (q.Since <= 0 || q.Since < earliest) {
+		return queryAuditFile(path, q.Since, q.Until, limit, offset, actor, action, search)
+	}
+
+	s.auditMu.Lock()
 	defer s.auditMu.Unlock()
 	out := make([]model.AuditEntry, 0, limit)
 	total, skipped := 0, 0
 	for i := len(s.audit) - 1; i >= 0; i-- {
 		e := s.audit[i]
-		if q.Since > 0 && e.TS < q.Since {
+		if !auditMatch(e, q.Since, q.Until, actor, action, search) {
 			continue
-		}
-		if q.Until > 0 && e.TS > q.Until {
-			continue
-		}
-		if actor != "" && !strings.Contains(strings.ToLower(e.Actor), actor) {
-			continue
-		}
-		if action != "" && strings.ToLower(e.Action) != action {
-			continue
-		}
-		if search != "" {
-			hay := strings.ToLower(e.Actor + " " + e.Path + " " + e.Action + " " + e.IP + " " + e.Detail)
-			if !strings.Contains(hay, search) {
-				continue
-			}
 		}
 		total++
 		if skipped < offset {
@@ -130,6 +157,52 @@ func (s *Store) QueryAudit(q AuditQuery) ([]model.AuditEntry, int) {
 		}
 		if len(out) < limit {
 			out = append(out, *e)
+		}
+	}
+	return out, total
+}
+
+// queryAuditFile 流式扫描审计文件并按时间倒序分页。
+// 在锁外执行：审计文件最多几 MB，慢一点也无妨，但不该阻塞写路径。
+func queryAuditFile(path string, since, until int64, limit, offset int, actor, action, search string) ([]model.AuditEntry, int) {
+	f, err := os.Open(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("冷查询打开审计日志失败: %v", err)
+		}
+		return nil, 0
+	}
+	defer f.Close()
+	var matches []*model.AuditEntry
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var e model.AuditEntry
+		if json.Unmarshal([]byte(line), &e) != nil || e.TS <= 0 {
+			continue
+		}
+		if !auditMatch(&e, since, until, actor, action, search) {
+			continue
+		}
+		matches = append(matches, &e)
+	}
+	if err := sc.Err(); err != nil {
+		log.Printf("冷查询读取审计日志中断: %v", err)
+	}
+	out := make([]model.AuditEntry, 0, limit)
+	total, skipped := 0, 0
+	for i := len(matches) - 1; i >= 0; i-- {
+		total++
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		if len(out) < limit {
+			out = append(out, *matches[i])
 		}
 	}
 	return out, total
