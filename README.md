@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.19.3**（`./rollcall-server -version` 可查）。
+当前版本 **v1.20.0**（`./rollcall-server -version` 可查）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -527,6 +527,9 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 > ```
 >
 > 不想装 Go 也可以直接用发布包里的预编译二进制，见下一节的「方式 0」。
+> 容器环境可用仓库根目录的 `Dockerfile` 自行构建镜像
+> （`docker build --build-arg VERSION=v1.20.0 -t rollcall .`，
+> distroless 运行时、nonroot、数据卷 `/data`，详见文件内注释）。
 
 ### 1. 获取源码并构建
 
@@ -1463,6 +1466,29 @@ certificate_days_remaining,uptime_percent_24h}`
 ---
 
 ## 十二、实际部署验证
+
+### v1.20.0（2026-10-24）
+
+- **剩余价值估算**：未到期资产按「年付价 × 剩余天数 / 365」折算（USD 口径与月摊一致，
+  CNY 按 cnyRate 折算），三处展示：概览 KPI、台账每行 + 合计、对比页分组聚合 + KPI。
+  未登记到期日或已过期的资产不计入；成本合计与分组之和保持同口径可对账
+  （生产实测 demo：分组 19.75 + 57.7 + 0.81 ≈ 合计 78.27）。当前生产 `remainingValue=0`
+  是因为台账价格/到期字段尚未补录——功能就绪，等数据
+- **能力矩阵页**（设置页尾部）：静态自述「我们有什么 / 部分具备什么 / 不提供什么」，
+  按 KPanel 竞品对照页的 ●◐○ 口径分组呈现，条目链接到对应视图。它是文档不是状态面板，
+  与 README 功能清单同步维护
+- **Dockerfile**：多阶段构建（golang:1.24-alpine → distroless/static:nonroot），
+  自带 CA 证书与 tzdata、无 shell；预建 `/data` 归 nonroot，构建时 `RUN -version` 做冒烟。
+  `docker build --build-arg VERSION=v1.20.0 -t rollcall .` 即得与 systemd 部署
+  完全一致（`-trimpath -buildvcs=false` 可复现）的二进制
+- 生产升级路径：四架构本地构建 → `SHA256SUMS` → Ed25519 签名 → SFTP 上传 →
+  `rollcall-server-upgrade.sh --signature`（发行验签 + readyz 版本一致性 + 失败自动回滚）。
+  升级日志「发行签名校验通过（版本 v1.20.0）」，`readyz` 返回 v1.20.0，
+  13/13 节点在线，线上 sha256 与本地构建/SHA256SUMS 三方一致（`b92f3677…`），
+  公开页匿名 404 保持，无错误日志
+- `docs/comparison-kpanel-2026-10-22.md` 增补「0.9 更新」节：P0-1/2/3/4、ICMP、
+  SSH 登录告警、ServiceSample 结构债等均已落地并标注版本；KPanel 对照页本身停在
+  2026-10-04 未更新
 
 ### v1.19.3（2026-10-23）
 
