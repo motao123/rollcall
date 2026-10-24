@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.20.1**（`./rollcall-server -version` 可查）。
+当前版本 **v1.21.0**（`./rollcall-server -version` 可查）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -1463,9 +1463,50 @@ certificate_days_remaining,uptime_percent_24h}`
 `rollcall_notify_suppressed_total`、`rollcall_notify_rejected_total`、
 `rollcall_notify_last_success_timestamp_seconds`、`rollcall_notify_silences_active`
 
+*只读 MCP 服务器*（v1.21.0 起，`rollcall-mcp`，随发布包分发）
+
+让 Claude Desktop 等 MCP 客户端直接查询机群状态。stdio 传输、换行分帧 JSON-RPC 2.0，
+零第三方依赖；它是面板的普通 HTTP 客户端——**只读、不下发任何指令、不接触节点**。
+7 个工具：`get_overview` / `list_nodes` / `get_node` / `get_node_series` / `list_services` /
+`list_alerts` / `list_assets`，全部映射到 `authReadonly` GET 端点。
+
+令牌在面板「设置 → API 令牌」创建：`scopes=["read"]`，`paths` 限定到上述端点前缀。
+客户端配置示例：
+
+```json
+{
+  "mcpServers": {
+    "rollcall": {
+      "command": "/path/to/rollcall-mcp",
+      "env": { "ROLLCALL_URL": "http://127.0.0.1:19080", "ROLLCALL_TOKEN": "rct_…" }
+    }
+  }
+}
+```
+
+也可用命令行参数 `-url` / `-token`。stdout 是协议通道，日志一律走 stderr；
+令牌明文会存进 MCP 客户端配置，请用只读作用域令牌而非管理令牌。
+
 ---
 
 ## 十二、实际部署验证
+
+### v1.21.0（2026-10-24）
+
+- **只读 MCP 服务器 `rollcall-mcp`**（`cmd/mcp` + `internal/mcpserver`）：stdio 传输、
+  换行分帧 JSON-RPC 2.0，零第三方依赖。7 个只读工具全部映射 `authReadonly` GET 端点，
+  鉴权走 `Authorization: Bearer rct_...` 作用域令牌（建议 `scopes=["read"]` + 路径限定），
+  与 Agent 单向边界无关——它只是面板的另一个 HTTP 客户端。工具执行失败按 MCP 语义返回
+  `isError` 结果（协议层错误才用 JSON-RPC error）；节点 ID 客户端先做路径穿越校验
+- 协议兼容：回显客户端请求的 `protocolVersion`（缺省 `2025-06-18`）；通知不应答；
+  未知方法 -32601、坏帧 -32700；stdout 只走协议、日志全进 stderr
+- 验证：23 个包测试全绿（协议层/工具校验/stdio 循环 5 组单测）；本地 demo 端到端
+  ——创建 read 作用域令牌 → MCP 客户端完整会话（initialize / tools/list / 4 个工具调用）
+  全部返回真实数据；生产机上用临时令牌跑同一会话，`get_overview` 返回 13/13 在线
+- 期间发现并修正过一个**测试脚本的坑**：令牌创建响应里 `meta.prefix`（12 字符）排在
+  `token`（52 字符）之前，用 `grep … | head -1` 提取会拿到前缀，面板正确地 401，
+  险些误判为产品缺陷——提取令牌必须按完整长度匹配
+- Makefile `linux` 目标与 `SHA256SUMS` 增加 `rollcall-mcp-linux-*` 四架构产物
 
 ### v1.20.1（2026-10-24）
 
