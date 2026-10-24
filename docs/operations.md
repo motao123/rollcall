@@ -624,8 +624,10 @@ sudo runuser -u rollcall-agent -- \
 （`session` / `admin-token` / `api-token`）、来源 IP、方法、路径、响应状态码。
 
 - **只记元数据，绝不读取请求体** —— 请求体里可能有密码、令牌与私钥
-- 落盘 `<data>/audit.jsonl`（0600，逐行 JSON，追加写），内存里保留最近若干条供快速查询；
-  保留 90 天，超期由后台自动裁剪
+- 落盘 `<data>/audit.jsonl`（0600，逐行 JSON，追加写），内存里保留最近 1 万条走快速路径；
+  **查询覆盖整个保留期**（v1.20.1 起）：内存窗口装满且查询涉及更早记录时自动回源扫描文件，
+  冷路径在锁外流式执行，不阻塞写操作
+- 保留 90 天，超期由后台自动裁剪（文件上限 5 万条）
 - 查询：`GET /api/admin/audit?limit=50&offset=0&actor=&action=&q=&range=7d|30d|90d`，
   返回 `entries` / `total` / `stats`（`count`、`earliest`、`latest`、`retentionDays`）
 - 容量与保留策略可看 `GET /api/admin/storage`
