@@ -1959,3 +1959,14 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
   .fleet-grid { grid-template-columns: 1fr; }
   .top-row { grid-template-columns: 20px minmax(70px, 110px) 1fr 66px; }
 }
+
+/* ---------------- 能力矩阵（设置页尾部） ---------------- */
+.cap-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--fg-2); margin-bottom: 10px; }
+.cap-legend b { font-weight: 500; }
+.cap-dot { font-size: 13px; line-height: 1; }
+.cap-yes { color: var(--ok); }
+.cap-part { color: var(--warn); }
+.cap-no { color: var(--fg-3); }
+.cap-na { color: var(--fg-3); }
+.cap-group td { background: var(--panel-2); font-weight: 600; font-size: 12px; color: var(--fg-2); letter-spacing: .02em; }
+.cap-desc { color: var(--fg-2); font-size: 12.5px; }

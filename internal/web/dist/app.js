@@ -700,6 +700,7 @@ function overviewKpisHTML(ov) {
       ${kpi('平均内存', ov.avgMem.toFixed(1), '%', '在线节点均值')}
       ${kpi('服务探测', `${ov.services - ov.svcDown}/${ov.services}`, '', ov.svcDown > 0 ? `${ov.svcDown} 个不可用` : '全部可用')}
       ${kpi('月度成本', '$' + ov.monthlyCost.toFixed(1), '', `${expiring.length} 台 30 天内到期`)}
+      ${kpi('剩余价值', '$' + (ov.remainingValue || 0).toFixed(0), '', '未到期资产按剩余天数折算')}
       ${kpi('累计流量', bytes(ov.trafficIn || 0), '↓', '↑ ' + bytes(ov.trafficOut || 0))}`;
 }
 
@@ -2409,6 +2410,7 @@ async function viewAssets() {
   const rows = rowsAll.filter((r) => matchesSearch([r.name, r.provider, r.region, r.os, r.expireAt]));
   const renewRows = Array.isArray(renewals) ? renewals : [];
   const total = d.monthlyTotal || 0;
+  const remainingTotal = d.remainingTotal || 0;
 
   // 续费日历：资产到期日与人工登记的续费记录合并到同一条时间线。
   const events = [];
@@ -2460,6 +2462,7 @@ async function viewAssets() {
     <div class="kpis" style="margin-bottom:20px">
       ${kpi('资产总数', rows.length, '台', '含监控与未监控')}
       ${kpi('月度成本', '$' + total.toFixed(1), '', '按年付折算')}
+      ${kpi('剩余价值', '$' + remainingTotal.toFixed(0), '', '未到期资产按剩余天数折算')}
       ${kpi('30 天内到期', rows.filter((r) => r.days > 0 && r.days <= 30).length, '台', '需续费')}
       ${kpi('未来 90 天事项', upcoming.length, '条', '到期与续费')}
     </div>
@@ -2470,7 +2473,7 @@ async function viewAssets() {
       </div>
       <div class="table-wrap"><table class="assets-table" data-page-size="20">
         <thead><tr><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
-          <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th><th class="num">操作</th></tr></thead>
+          <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th><th class="num">剩余价值</th><th class="num">操作</th></tr></thead>
         <tbody>${rows.map((r) => {
           const d2 = r.days;
           const cls = !d2 ? 'mute' : d2 <= 7 ? 'crit' : d2 <= 30 ? 'warn' : 'ok';
@@ -2483,12 +2486,13 @@ async function viewAssets() {
             <td class="num"><span class="badge ${cls}">${d2 ? d2 + ' 天' : '—'}</span></td>
             <td class="num mono">${r.price ? (r.currency === 'CNY' ? '¥' : '$') + r.price : '—'}</td>
             <td class="num mono">$${(r.monthly || 0).toFixed(1)}</td>
+            <td class="num mono">${r.remaining ? '$' + r.remaining.toFixed(1) : '—'}</td>
             <td class="num row-actions">
               <button class="btn tiny" data-asset-renew="${esc(r.id)}">续费</button>
               <button class="btn tiny" data-asset-edit="${esc(r.id)}">编辑</button>
             </td>
           </tr>`;
-        }).join('') || `<tr><td colspan="9"><div class="empty">${rowsAll.length ? '没有匹配的资产' : '台账为空'}</div></td></tr>`}</tbody>
+        }).join('') || `<tr><td colspan="10"><div class="empty">${rowsAll.length ? '没有匹配的资产' : '台账为空'}</div></td></tr>`}</tbody>
       </table></div>
     </section>
     <section class="section">
@@ -2580,8 +2584,9 @@ async function viewCompare() {
     <td class="num">${g.avgCpu.toFixed(1)}%</td>
     <td class="num">${g.avgMem.toFixed(1)}%</td>
     <td class="num mono">$${g.cost.toFixed(1)}</td>
+    <td class="num mono">${g.remaining ? '$' + g.remaining.toFixed(1) : '—'}</td>
     <td class="num mono">${rate(g.trafficIn)}/s</td>
-  </tr>`).join('') || `<tr><td colspan="6"><div class="empty">没有可聚合的节点</div></td></tr>`;
+  </tr>`).join('') || `<tr><td colspan="7"><div class="empty">没有可聚合的节点</div></td></tr>`;
 
   const nodeRows = rows.map((n) => {
     const quota = n.traffic ? n.traffic.quotaGb || 0 : 0;
@@ -2612,6 +2617,7 @@ async function viewCompare() {
       ${kpi('平均内存', (sum.avgMem || 0).toFixed(1), '%', `峰值 ${(sum.maxMem || 0).toFixed(1)}%`)}
       ${kpi('收藏节点', sum.favorites || 0, '台', '收藏优先展示')}
       ${kpi('月度成本', '$' + (sum.cost || 0).toFixed(1), '', '全部节点合计')}
+      ${kpi('剩余价值', '$' + (sum.remaining || 0).toFixed(0), '', '未到期资产按剩余天数折算')}
     </div>
     <section class="section">
       <div class="section-head">
@@ -2647,7 +2653,7 @@ async function viewCompare() {
         <span class="section-meta">仅在线节点参与均值</span>
       </div>
       <div class="table-wrap"><table class="assets-table">
-        <thead><tr><th>分组</th><th class="num">在线 / 总数</th><th class="num">平均 CPU</th><th class="num">平均内存</th><th class="num">月度成本</th><th class="num">实时下行</th></tr></thead>
+        <thead><tr><th>分组</th><th class="num">在线 / 总数</th><th class="num">平均 CPU</th><th class="num">平均内存</th><th class="num">月度成本</th><th class="num">剩余价值</th><th class="num">实时下行</th></tr></thead>
         <tbody>${groupRows}</tbody>
       </table></div>
     </section>`;
@@ -3148,6 +3154,85 @@ async function refreshHealthCard() {
   } catch (e) {
     // 轮询失败不覆盖页面：卡片保留上一次的数据，避免闪成错误态。
   }
+}
+
+// 能力矩阵：设置页尾部的静态自述。只陈述事实、与 README 功能清单同步维护，
+// 不从接口取数——它是文档，不是状态面板；口径与竞品对照页一致（● ◐ ○ –）。
+const CAP_MATRIX = [
+  ['采集与指标', [
+    ['基础资源指标（CPU / 内存 / Swap / 磁盘 / 负载 / TCP / 进程 / 运行时长 / 网络）', 'yes', '#/nodes', '节点详情 1h–365d 时序图'],
+    ['多挂载点 / 每网卡 / 磁盘 I/O 分项采集', 'yes', '#/nodes', '节点详情可展开'],
+    ['SSH 登录记录（Agent 读 wtmp，只报增量）', 'part', '#/nodes', '依赖节点 sshd 实际写入 wtmp'],
+    ['GPU / 温度 / 容器级指标', 'no', '', '未采集'],
+    ['统计网卡自动过滤（bond 从属 / veth / docker / cni）', 'yes', '', '网卡集合不可手动指定'],
+  ]],
+  ['服务探测', [
+    ['HTTP(S) / TCP / DNS / ICMP 四种探测', 'yes', '#/services', '异常自动置顶，同目标并排对比'],
+    ['证书到期 / 丢包率 / 抖动指标与阈值告警', 'yes', '#/alerts', '规则模板一键套用'],
+    ['探测由控制端统一发起', 'yes', '#/services', '节点侧探测刻意不做（Agent 单向边界）'],
+  ]],
+  ['告警与通知', [
+    ['资源 / 离线 / 流量配额 / 到期 / 延迟 / 丢包 / 抖动规则', 'yes', '#/alerts', '逐规则静默与全局免打扰'],
+    ['10 通知通道 + 本地插件', 'yes', '#/settings', 'Outbox 持久化重试，逐通道测试'],
+    ['IP 变更 / 后台登录 / 多台离线合并通知', 'yes', '#/settings', ''],
+  ]],
+  ['历史与容量', [
+    ['分层保留：24h 原始 / 7d 1m / 30d 5m / 365d 1h', 'yes', '#/nodes', '长范围自动聚合，不拉全量原始点'],
+    ['加密配置备份 + 自动调度', 'yes', '#/settings', 'AES-256-GCM'],
+  ]],
+  ['公开状态页', [
+    ['总开关 + 访问令牌 + 逐台隐藏 + 公开备注', 'yes', '#/statuspage', '关闭时匿名一律 404'],
+    ['24h 色块 / 历史趋势 / 地图 / 活动流 / 维护窗口 / 事件', 'yes', '#/statuspage', '板块可拖拽排序'],
+    ['主题包（公开页皮肤）', 'part', '#/settings', '脚本与面板同源执行，安装等同授予管理员权限'],
+  ]],
+  ['安全', [
+    ['Agent 只读（无 os/exec、无监听端口）', 'yes', '', 'go list -deps 可验证'],
+    ['上报签名（时间戳 + nonce + HMAC-SHA256，可强制）', 'yes', '#/settings', '强制开启后未签名节点被拒绝'],
+    ['Ed25519 发行验签 + Agent 签名自更新 + 自动回滚', 'yes', '#/settings', ''],
+    ['TOTP / 登录失败限速 / 管理操作审计', 'yes', '#/audit', ''],
+    ['Passkey / 安全入口 / 多用户', 'no', '', '未提供；多用户为刻意不做'],
+  ]],
+  ['接口与集成', [
+    ['作用域 API 令牌 / Prometheus /metrics / CSV 导出', 'yes', '#/settings', ''],
+    ['只读 MCP', 'no', '', '未提供'],
+  ]],
+  ['部署', [
+    ['单二进制零外部依赖 / Linux 四架构', 'yes', '', 'amd64 / arm64 / arm / 386'],
+    ['Docker（Dockerfile 自行构建）', 'yes', '', 'docker build --build-arg VERSION=vX.Y.Z'],
+    ['一键升级 / 回滚（验签 + 健康检查 + 失败自动回滚）', 'yes', '', 'deploy/rollcall-server-upgrade.sh'],
+  ]],
+];
+
+function capMatrixHTML() {
+  const sym = { yes: ['●', 'cap-yes'], part: ['◐', 'cap-part'], no: ['○', 'cap-no'], na: ['–', 'cap-na'] };
+  const body = CAP_MATRIX.map(([group, rows]) => {
+    const trs = rows.map(([name, st, link, desc]) => {
+      const s = sym[st] || sym.no;
+      const label = link ? `<a class="row-link" href="${esc(link)}">${esc(name)}</a>` : esc(name);
+      return `<tr><td class="strong">${label}</td>
+        <td class="num"><span class="cap-dot ${s[1]}" title="${st === 'yes' ? '具备' : st === 'part' ? '部分或有前提' : '未提供'}">${s[0]}</span></td>
+        <td class="cap-desc">${esc(desc || '—')}</td></tr>`;
+    }).join('');
+    return `<tr class="cap-group"><td colspan="3">${esc(group)}</td></tr>${trs}`;
+  }).join('');
+  return `
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">能力矩阵</h2>
+        <span class="section-meta">静态自述 · 与 README 功能清单同步维护</span>
+      </div>
+      <div class="panel panel-pad">
+        <div class="cap-legend">
+          <span><span class="cap-dot cap-yes">●</span> 具备</span>
+          <span><span class="cap-dot cap-part">◐</span> 部分或有前提</span>
+          <span><span class="cap-dot cap-no">○</span> 未提供</span>
+        </div>
+        <div class="table-wrap"><table class="assets-table">
+          <thead><tr><th>能力</th><th class="num">状态</th><th>说明 / 去哪看</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table></div>
+      </div>
+    </section>`;
 }
 
 async function viewSettings() {
@@ -3753,7 +3838,8 @@ async function viewSettings() {
           （Basic Auth 密码填管理令牌，用户名任意）；接口延迟、5xx 与 SSE 连接数均已输出。
         </p>
       </div>
-    </section>`;
+    </section>
+    ${capMatrixHTML()}`;
 
   // 实例健康轮询：每次进入设置页重置定时器，避免离开后堆积多个 interval。
   if (healthTimer) clearInterval(healthTimer);
