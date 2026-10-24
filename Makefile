@@ -67,9 +67,9 @@ rollsign:
 # 先清空 dist：否则上一轮/其它目标的旧产物会混进发布包。
 # 所有架构都由 cross_build 生成，避免手写多行时漏掉某个组合
 # （此前 rollsign 只出了 amd64，arm64 节点上无法签发清单）。
-# SHA256SUMS 必须逐个列出三类产物：写成 rollcall-* 会漏掉 rollsign-linux-*，
-# 而 rollsign 正是签发 Agent 更新清单的工具 —— 分发渠道被篡改时，
-# 最先该被校验和发现的恰恰是它。
+# SHA256SUMS 必须逐个列出全部产物：写成 rollcall-* 会漏掉 rollsign-linux-*
+# 与 rollcall-mcp-linux-*，而 rollsign 正是签发 Agent 更新清单的工具 ——
+# 分发渠道被篡改时，最先该被校验和发现的恰恰是它。
 linux:
 	rm -rf dist
 	mkdir -p dist
@@ -81,13 +81,17 @@ linux:
 	$(call cross_build,rollcall-agent,agent,arm64)
 	$(call cross_build,rollcall-agent,agent,arm)
 	$(call cross_build,rollcall-agent,agent,386)
+	$(call cross_build,rollcall-mcp,mcp,amd64)
+	$(call cross_build,rollcall-mcp,mcp,arm64)
+	$(call cross_build,rollcall-mcp,mcp,arm)
+	$(call cross_build,rollcall-mcp,mcp,386)
 	$(call cross_build,rollsign,rollsign,amd64)
 	$(call cross_build,rollsign,rollsign,arm64)
 	$(call cross_build,rollsign,rollsign,arm)
 	$(call cross_build,rollsign,rollsign,386)
 	# 先写临时文件再原子替换：`> SHA256SUMS` 会在 sha256sum 报错（产物缺失）
 	# 之前就把上一次的校验和截断，留下一个空文件却仍然继续往下走。
-	@cd dist && sha256sum rollcall-server-linux-* rollcall-agent-linux-* rollsign-linux-* > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS
+	@cd dist && sha256sum rollcall-server-linux-* rollcall-agent-linux-* rollcall-mcp-linux-* rollsign-linux-* > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS
 	@ls -lh dist/
 	@cat dist/SHA256SUMS
 

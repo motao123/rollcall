@@ -3194,7 +3194,7 @@ const CAP_MATRIX = [
   ]],
   ['接口与集成', [
     ['作用域 API 令牌 / Prometheus /metrics / CSV 导出', 'yes', '#/settings', ''],
-    ['只读 MCP', 'no', '', '未提供'],
+    ['只读 MCP 服务器（rollcall-mcp，stdio）', 'yes', '#/settings', '7 个只读工具，scopes=read 令牌'],
   ]],
   ['部署', [
     ['单二进制零外部依赖 / Linux 四架构', 'yes', '', 'amd64 / arm64 / arm / 386'],
