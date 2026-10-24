@@ -950,6 +950,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		// 成本只取决于价格，与是否登记到期日无关；
 		// 否则未填到期日的资产会在总览里凭空消失。
 		ov.MonthlyCost += monthly(v.Price, v.Currency, s.cnyRate)
+		// 剩余价值则相反：只对登记了到期日且未过期的资产累计。
+		ov.RemainingValue += remainingValue(v.Price, v.Currency, s.cnyRate, v.ExpireAt)
 		if v.ExpireAt != "" {
 			if days, ok := daysUntil(v.ExpireAt); ok && days >= 0 && days <= 30 {
 				ov.Expiring = append(ov.Expiring, v)
@@ -1103,28 +1105,31 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 	nodes := s.st.Nodes()
 	type row struct {
-		ID       string  `json:"id"`
-		Name     string  `json:"name"`
-		Provider string  `json:"provider"`
-		Region   string  `json:"region"`
-		ExpireAt string  `json:"expireAt"`
-		Days     int     `json:"days"`
-		Price    float64 `json:"price"`
-		Currency string  `json:"currency"`
-		Monthly  float64 `json:"monthly"`
-		OS       string  `json:"os"`
-		hasExp   bool
+		ID        string  `json:"id"`
+		Name      string  `json:"name"`
+		Provider  string  `json:"provider"`
+		Region    string  `json:"region"`
+		ExpireAt  string  `json:"expireAt"`
+		Days      int     `json:"days"`
+		Price     float64 `json:"price"`
+		Currency  string  `json:"currency"`
+		Monthly   float64 `json:"monthly"`
+		Remaining float64 `json:"remaining"`
+		OS        string  `json:"os"`
+		hasExp    bool
 	}
 	rows := make([]row, 0, len(nodes))
-	var monthSum float64
+	var monthSum, remainingSum float64
 	for _, n := range nodes {
 		d, hasExp := daysUntil(n.ExpireAt)
 		mv := monthly(n.Price, n.Currency, s.cnyRate)
+		rv := remainingValue(n.Price, n.Currency, s.cnyRate, n.ExpireAt)
 		monthSum += mv
+		remainingSum += rv
 		rows = append(rows, row{
 			ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
 			ExpireAt: n.ExpireAt, Days: d, Price: n.Price, Currency: n.Currency,
-			Monthly: mv, OS: s.st.Host(n.ID).OS, hasExp: hasExp,
+			Monthly: mv, Remaining: rv, OS: s.st.Host(n.ID).OS, hasExp: hasExp,
 		})
 	}
 	// 有到期日的排在前面，按剩余天数升序（已过期/今天到期的 Days<=0 最靠前）；
@@ -1138,7 +1143,7 @@ func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
 		}
 		return rows[i].Days < rows[j].Days
 	})
-	writeJSON(w, 200, map[string]any{"monthlyTotal": monthSum, "rows": rows})
+	writeJSON(w, 200, map[string]any{"monthlyTotal": monthSum, "remainingTotal": remainingSum, "rows": rows})
 }
 
 // handleStatus 是公开状态页数据（不含任何敏感信息）。
@@ -1601,6 +1606,17 @@ func monthly(price float64, cur string, cnyRate float64) float64 {
 		return price / 12 / cnyRate
 	}
 	return price / 12
+}
+
+// remainingValue 估算未到期资产的剩余价值（USD）：年付价 × 剩余天数 / 365。
+// 未登记到期日或已过期为 0；汇率口径与 monthly 一致，保证两列可相互印证
+// （剩余价值 ≈ 月摊 × 12 × 剩余天数 / 365）。
+func remainingValue(price float64, cur string, cnyRate float64, expireAt string) float64 {
+	days, ok := daysUntil(expireAt)
+	if !ok || days <= 0 {
+		return 0
+	}
+	return monthly(price, cur, cnyRate) * 12 * float64(days) / 365
 }
 
 func daysUntil(date string) (int, bool) {

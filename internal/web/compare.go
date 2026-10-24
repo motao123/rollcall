@@ -40,6 +40,7 @@ type groupAgg struct {
 	AvgCPU    float64 `json:"avgCpu"`
 	AvgMem    float64 `json:"avgMem"`
 	Cost      float64 `json:"cost"`
+	Remaining float64 `json:"remaining"`
 	TrafficIn uint64  `json:"trafficIn"`
 }
 
@@ -51,6 +52,7 @@ type compareSummary struct {
 	MaxCPUPct   float64    `json:"maxCpu"`
 	MaxMemPct   float64    `json:"maxMem"`
 	Cost        float64    `json:"cost"`
+	Remaining   float64    `json:"remaining"`
 	TrafficIn   uint64     `json:"trafficIn"`
 	Groups      []groupAgg `json:"groups"`
 	Favorites   int        `json:"favorites"`
@@ -121,6 +123,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		}
 		g.Nodes++
 		g.Cost += monthly(n.Price, n.Currency, s.cnyRate)
+		g.Remaining += remainingValue(n.Price, n.Currency, s.cnyRate, n.ExpireAt)
 		if state == model.NodeStateOnline {
 			onlineCnt++
 			sumCPU += m.CPUPct
@@ -168,9 +171,10 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	// ★ 成本口径必须与分组一致：分组对**全部节点**累加（成本是资产属性，
 	// 机器离线也照样付钱），这里若只算在线节点，页面上"分组成本之和"
-	// 就会大于"合计成本"，同一页两个数对不上。
+	// 就会大于"合计成本"，同一页两个数对不上。剩余价值同理。
 	for _, r := range rows {
 		sum.Cost += monthly(r.Price, r.Currency, s.cnyRate)
+		sum.Remaining += remainingValue(r.Price, r.Currency, s.cnyRate, r.ExpireAt)
 	}
 	for _, g := range grouped {
 		if g.Online > 0 {

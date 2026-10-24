@@ -845,18 +845,21 @@ type HistoryPoint struct {
 
 // Overview 是总览页的聚合数据。
 type Overview struct {
-	Nodes       int        `json:"nodes"`
-	Online      int        `json:"online"`
-	Stale       int        `json:"stale"`
-	Offline     int        `json:"offline"`
-	NoData      int        `json:"noData"`
-	ActiveAlert int        `json:"activeAlert"`
-	AvgCPU      float64    `json:"avgCpu"`
-	AvgMem      float64    `json:"avgMem"`
-	Services    int        `json:"services"`
-	SvcDown     int        `json:"svcDown"`
-	TrafficIn   uint64     `json:"trafficIn"`
-	TrafficOut  uint64     `json:"trafficOut"`
-	MonthlyCost float64    `json:"monthlyCost"`
-	Expiring    []NodeView `json:"expiring"` // 30 天内到期
+	Nodes       int     `json:"nodes"`
+	Online      int     `json:"online"`
+	Stale       int     `json:"stale"`
+	Offline     int     `json:"offline"`
+	NoData      int     `json:"noData"`
+	ActiveAlert int     `json:"activeAlert"`
+	AvgCPU      float64 `json:"avgCpu"`
+	AvgMem      float64 `json:"avgMem"`
+	Services    int     `json:"services"`
+	SvcDown     int     `json:"svcDown"`
+	TrafficIn   uint64  `json:"trafficIn"`
+	TrafficOut  uint64  `json:"trafficOut"`
+	MonthlyCost float64 `json:"monthlyCost"`
+	// RemainingValue 是未到期资产的剩余价值合计（USD）：年付价 × 剩余天数 / 365。
+	// 与 MonthlyCost 同口径（CNY 按 cnyRate 折算）；未登记到期日或已过期不计入。
+	RemainingValue float64    `json:"remainingValue"`
+	Expiring       []NodeView `json:"expiring"` // 30 天内到期
 }

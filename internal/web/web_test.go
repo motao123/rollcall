@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -950,6 +951,42 @@ func TestMonthlyUsesConfiguredRate(t *testing.T) {
 	}
 	if got := monthly(12, "USD", 7.2); got < 0.999 || got > 1.001 {
 		t.Errorf("USD 不应受汇率影响: %.4f", got)
+	}
+}
+
+func TestRemainingValue(t *testing.T) {
+	// 无到期日 / 已过期 / 今天到期 → 0
+	if got := remainingValue(120, "USD", 7.2, ""); got != 0 {
+		t.Errorf("未登记到期日应为 0: %.4f", got)
+	}
+	past := time.Now().AddDate(0, 0, -3).Format("2006-01-02")
+	if got := remainingValue(120, "USD", 7.2, past); got != 0 {
+		t.Errorf("已过期应为 0: %.4f", got)
+	}
+	today := time.Now().Format("2006-01-02")
+	if got := remainingValue(120, "USD", 7.2, today); got != 0 {
+		t.Errorf("今天到期（剩余 0 天）应为 0: %.4f", got)
+	}
+	// 年付 $120、还剩 365 天 → 剩余价值 ≈ 全价 $120
+	full := time.Now().AddDate(0, 0, 364).Format("2006-01-02")
+	if got := remainingValue(120, "USD", 7.2, full); got < 119 || got > 120 {
+		t.Errorf("剩 365 天应约等于全价: %.4f", got)
+	}
+	// 年付 ¥720（rate 7.2 → $100/年）、剩 182 天 ≈ $50
+	half := time.Now().AddDate(0, 0, 182).Format("2006-01-02")
+	if got := remainingValue(720, "CNY", 7.2, half); got < 49 || got > 51 {
+		t.Errorf("CNY 应按汇率折算后按天摊: %.4f", got)
+	}
+	// 与 monthly 口径一致：remaining = monthly × 12 × days / 365
+	//（天数取 daysUntil 的实际返回值，避免时刻/时区导致的 ±1 天让断言抖动）
+	d90 := time.Now().AddDate(0, 0, 89).Format("2006-01-02")
+	days, ok := daysUntil(d90)
+	if !ok || days <= 0 {
+		t.Fatalf("构造的未来日期无效: %s → %d", d90, days)
+	}
+	want := monthly(36, "USD", 7.2) * 12 * float64(days) / 365
+	if got := remainingValue(36, "USD", 7.2, d90); math.Abs(got-want) > 0.001 {
+		t.Errorf("口径应与 monthly 一致: got %.4f want %.4f", got, want)
 	}
 }
 
