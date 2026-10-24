@@ -114,11 +114,14 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          # 12 = server/agent/rollsign × amd64/arm64/arm/386。
+          # 16 = server/agent/mcp/rollsign × amd64/arm64/arm/386。
           # rollsign 是签发 Agent 更新清单的工具，少一条校验和就等于
           # 发布包里留了一个没人核对的二进制（Makefile 曾用 rollcall-*
           # 通配，正好把它漏掉）。
-          test "$(wc -l < SHA256SUMS)" -eq 12
+          # ★ 这里的计数必须与 Makefile linux 目标的产物清单同步改，
+          #   v1.21.0 加 rollcall-mcp 时漏改导致 tag CI 红而 main 绿
+          #   （该 job 只在 tag 上跑）。
+          test "$(wc -l < SHA256SUMS)" -eq 16
 
       - name: publish release
         env:
