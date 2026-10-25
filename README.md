@@ -7,14 +7,17 @@
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
 > ```bash
-> # ① 控制端：下载并校验（amd64，其他架构把 amd64 换掉即可）
-> V=v1.22.1; BASE="https://github.com/motao123/rollcall/releases/download/$V"
-> curl -fsSLO "$BASE/rollcall-server-linux-amd64" && curl -fsSLO "$BASE/SHA256SUMS"
+> # ① 控制端：下载并校验（amd64，其他架构把 amd64 换掉即可；版本号自动取最新 tag）
+> V=$(curl -s https://api.github.com/repos/motao123/rollcall/releases/latest | grep -oE '"tag_name": *"v[^"]*"' | cut -d'"' -f4)
+> BASE="https://github.com/motao123/rollcall/releases/download/$V"
+> curl -fsSLO "$BASE/rollcall-server-linux-amd64" && curl -fsSLO "$BASE/rollcall-agent-linux-amd64"
+> curl -fsSLO "$BASE/SHA256SUMS"
 > sha256sum -c --ignore-missing SHA256SUMS
-> # ② 安装并体验演示模式（正式部署的 systemd 单元与端口要求见「五」）
-> sudo install -d -m 0755 /opt/rollcall
+> # ② 安装并体验演示模式（-agent-dir 启用「一条命令接入」；正式部署的 systemd 单元见「五」）
+> sudo install -d -m 0755 /opt/rollcall/agent
 > sudo install -m 0755 rollcall-server-linux-amd64 /opt/rollcall/rollcall-server
-> /opt/rollcall/rollcall-server -demo -addr 127.0.0.1:19080
+> sudo install -m 0755 rollcall-agent-linux-amd64 /opt/rollcall/agent/rollcall-agent-linux-amd64
+> /opt/rollcall/rollcall-server -demo -addr 127.0.0.1:19080 -agent-dir /opt/rollcall/agent
 > # ③ 浏览器打开 http://127.0.0.1:19080 登录（密码见启动日志，或用 -admin-password 指定）
 > # ④ 面板「概览 → ＋ 接入节点」拿到一条安装命令，到目标 Linux 机器上执行
 > # ⑤ 回面板确认节点在线、指标在动
@@ -558,7 +561,8 @@ Agent 默认每 30 秒读取以下文件（`interval` 可调，最大 60 秒）�
 **方式 0：不装 Go，直接用发布包**（推荐，`v1.10.5` 起 CI 会随 tag 发布预编译二进制）
 
 ```bash
-VERSION=v1.14.0
+VERSION=$(curl -s https://api.github.com/repos/motao123/rollcall/releases/latest | grep -oE '"tag_name": *"v[^"]*"' | cut -d'"' -f4)
+# ↑ 自动取最新 tag；要装特定版本就手动指定，如 VERSION=v1.26.0
 ARCH=amd64          # amd64 / arm64 / arm / 386
 BASE="https://github.com/motao123/rollcall/releases/download/${VERSION}"
 

@@ -188,6 +188,16 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade /opt/
 active 状态会自动回滚并返回非 0。没有 systemd 的容器会重启同一低权限用户的后台进程
 （日志 `/var/log/rollcall-agent.log`），启动失败同样自动回滚 `.prev`。
 
+**同机演练（沙箱模式）**：想在已装 Agent 的机器（比如控制端本机）演练接入流程、
+又不想碰生产 Agent 时，加 `RC_PREFIX` 前缀——二进制/配置/systemd 单元样例/日志
+全部落在该目录下，不创建用户、不碰 systemd，结束时按输出里的清理命令删除即可：
+
+```bash
+curl -fsSL https://你的面板/agent/install.sh -o /tmp/install.sh
+RC_PREFIX=/tmp/rc-drill sudo -E sh /tmp/install.sh https://你的面板 <node-id> <token>
+# 沙箱模式与 --upgrade 互斥（升级对象是系统安装，语义不同）
+```
+
 手动回滚：
 
 ```bash

@@ -4547,6 +4547,7 @@ function showAgentConfig(node) {
 install -m 0755 rollcall-agent /usr/local/bin/rollcall-agent
 install -d -m 0700 /etc/rollcall
 # 将下面的 JSON 写入 /etc/rollcall/agent.json（权限 0600）
+# systemd 单元模板：curl -fsSLO https://raw.githubusercontent.com/motao123/rollcall/main/deploy/rollcall-agent.service
 systemctl enable --now rollcall-agent`;
 
   const dlg = document.createElement('div');
@@ -4558,6 +4559,7 @@ systemctl enable --now rollcall-agent`;
       <pre class="code" id="oneCmdText">${esc(oneCmd)}</pre>
       <button class="btn primary" id="copyCmd" type="button">复制命令</button>
     </div>
+    <p class="modal-sub" id="agentDirCheck" hidden></p>
     <p class="modal-sub" style="margin-top:10px">脚本会自动识别架构（amd64/arm64）；明文 HTTP 场景需显式加 --allow-insecure（上方命令已按当前地址自动补上）才会继续安装。约 30 秒后面板即可看到该节点。</p>
     ${insecure ? '<p class="modal-sub" style="color:var(--warn)">注意：控制端当前是明文 HTTP，节点令牌会在链路上明文传输。长期使用建议上 TLS 或保持隧道。</p>' : ''}
     <details style="margin-top:12px">
@@ -4575,6 +4577,19 @@ systemctl enable --now rollcall-agent`;
   const close = () => dlg.remove();
   dlg.querySelector('#dlgOk').onclick = close;
   dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  // 异步探测 Agent 分发是否启用：未配置 -agent-dir 时，上面这条命令会在
+  // 下载步失败。与其让用户跑完再读报错，弹窗直接给指引（含正确顺序）。
+  // 探测用任意合法 arch 即可——未启用时与 arch 无关地 404。
+  fetch(`${server}/agent/download.sha256?arch=amd64`, { cache: 'no-store' })
+    .then((r) => {
+      if (r.ok) return;
+      const p = dlg.querySelector('#agentDirCheck');
+      if (!p) return;
+      p.hidden = false;
+      p.style.color = 'var(--warn)';
+      p.textContent = '⚠ 服务端未启用 Agent 分发（启动参数 -agent-dir 未配置），上面的命令会下载失败。在服务端启动参数追加 -agent-dir <目录>、把 rollcall-agent-linux-<arch> 放进该目录并重启服务端后，这条命令即可使用；此前可先用下方「手动安装」。';
+    })
+    .catch(() => {});
   dlg.querySelector('#copyCmd').onclick = async (ev) => {
     try {
       await navigator.clipboard.writeText(oneCmd);
