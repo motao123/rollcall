@@ -67,7 +67,7 @@ func TestPublicStatusDisabledStays404(t *testing.T) {
 		c.Enabled = &off
 	})
 
-	for _, path := range []string{"/status", "/status.css", "/api/status", "/vendor/element-plus/index.css"} {
+	for _, path := range []string{"/status", "/status.css", "/api/status", "/vendor/vue/vue.global.prod.js"} {
 		if w := get(h, path, nil); w.Code != http.StatusNotFound {
 			t.Fatalf("%s 显式关闭后应 404，实际 %d", path, w.Code)
 		}

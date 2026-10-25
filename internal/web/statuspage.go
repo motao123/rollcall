@@ -4,7 +4,9 @@ package web
 //
 // 设计约束：
 //
-//   - 只加载同源静态资源（Vue、Element Plus、status.css/js），不请求第三方 CDN
+//   - 只加载同源静态资源（Vue、ep-shim.js、status.css/js），不请求第三方 CDN
+//   - Element Plus 已由 ep-shim.js 的同名轻量组件替代（v1.28.0 起，
+//     页面负载从 ~1.5MB 降到 ~200KB），对外仍暴露 window.ElementPlus 接口
 //   - 启用的主题包由 handleStatusPage 注入同源的 /themes/<name>/status.css|js
 //   - 只读，不暴露任何管理入口以外的后台链接
 //   - SSE 推送 + 10 秒轮询兜底，页面隐藏时暂停刷新
@@ -55,8 +57,6 @@ html.js-ok #jsfail{display:none}
   .skel-row{grid-template-columns:1fr}
 }
 </style>
-<link rel="stylesheet" href="/vendor/element-plus/index.css">
-<link rel="stylesheet" href="/vendor/element-plus/dark.css">
 <link rel="stylesheet" href="/status.css">
 </head>
 <body>
@@ -69,8 +69,7 @@ html.js-ok #jsfail{display:none}
   </div>
 </div>
 <script src="/vendor/vue/vue.global.prod.js"></script>
-<script src="/vendor/element-plus/index.full.min.js"></script>
-<script src="/vendor/element-plus/zh-cn.min.js"></script>
+<script src="/ep-shim.js"></script>
 <script src="/status.js"></script>
 </body>
 </html>`
