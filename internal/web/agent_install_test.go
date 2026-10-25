@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,7 +123,8 @@ func TestAgentInstallScriptIsSafeAndPublic(t *testing.T) {
 	}
 	// 升级分支必须在安装分支重写配置之前退出，避免覆盖 token/interval/update
 	upgradeExit := strings.Index(body, "exit 0\nfi\n\nmv -f \"$TMP\" \"$BIN\"")
-	configWrite := strings.Index(body, "cat > /etc/rollcall/agent.json")
+	// 配置写入已变量化（默认 CONFIG=/etc/rollcall/agent.json，沙箱模式换成前缀路径）
+	configWrite := strings.Index(body, `cat > "$CONFIG"`)
 	if upgradeExit < 0 || configWrite < 0 || upgradeExit > configWrite {
 		t.Fatal("升级分支必须先于配置写入退出")
 	}
@@ -269,5 +271,51 @@ func TestAgentDownloadServesConfiguredArchs(t *testing.T) {
 	srv2.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/download?arch=amd64", nil))
 	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "agent-dir") {
 		t.Fatalf("未配置目录应 404 并提示 -agent-dir，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAgentInstallScriptSandbox 验证 RC_PREFIX 沙箱模式的防护承诺：
+// 系统路径全部被前缀替换、不启用 systemd、useradd 被跳过。
+// 该模式让「在已装 Agent 的机器上演练接入」不再有覆盖生产的风险。
+func TestAgentInstallScriptSandbox(t *testing.T) {
+	srv := New(publicStore(t), nil, nil, Config{})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/install.sh", nil))
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		`case "${RC_PREFIX:-}"`, "SANDBOX=1",
+		// 沙箱下升级必须拒绝（升级对象是系统安装，语义不同）
+		"沙箱模式不支持 --upgrade",
+		// 沙箱分支绝不触碰系统 systemd / 用户创建
+		`[ "$SANDBOX" = "1" ] || [ ! -d /run/systemd/system ]`,
+		"沙箱不创建系统用户",
+		// 路径必须变量化（写死 /etc/... 的地方无法被前缀替换）
+		`cat > "$CONFIG"`, `cat > "$UNIT_FILE"`, `LOG=$LOG_FILE`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("脚本缺少沙箱模式要素 %q", want)
+		}
+	}
+}
+
+// TestAgentInstallScriptSyntax 用 sh -n 做语法回归：
+// 模板是 Go 字符串，转义错误（%% 漏写）只有真正交给 shell 才会暴露。
+func TestAgentInstallScriptSyntax(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("环境无 sh（非 POSIX），跳过语法检查")
+	}
+	srv := New(publicStore(t), nil, nil, Config{})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/agent/install.sh", nil))
+	dir := t.TempDir()
+	p := filepath.Join(dir, "install.sh")
+	if err := os.WriteFile(p, rec.Body.Bytes(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(sh, "-n", p).CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh 语法错误: %v\n%s", err, out)
 	}
 }

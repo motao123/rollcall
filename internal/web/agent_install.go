@@ -32,6 +32,7 @@ usage() {
     echo "用法:" >&2
     echo "  安装: sh install.sh [--allow-insecure] <server> <node-id> <token>" >&2
     echo "  升级: sh install.sh [--allow-insecure] --upgrade [二进制路径]" >&2
+    echo "  沙箱演练（不影响系统与已装 Agent）: RC_PREFIX=/abs/path sh install.sh ... <server> <node-id> <token>" >&2
     exit 2
 }
 
@@ -82,8 +83,32 @@ else
 fi
 
 CONFIG=/etc/rollcall/agent.json
+ETC_DIR=/etc/rollcall
+UNIT_FILE=/etc/systemd/system/rollcall-agent.service
+LOG_FILE=/var/log/rollcall-agent.log
+# 沙箱演练：RC_PREFIX 指向绝对路径时，二进制/配置/单元样例/日志全部落在
+# 前缀下，不创建用户、不碰 systemd、不影响已安装的 Agent——用于在控制端
+# 本机（或任何已有一台 Agent 的机器）安全地演练接入流程。
+SANDBOX=0
+case "${RC_PREFIX:-}" in
+    "") ;;
+    /*)
+        SANDBOX=1
+        mkdir -p -- "$RC_PREFIX" || { echo "无法创建 RC_PREFIX: $RC_PREFIX" >&2; exit 1; }
+        ETC_DIR=$RC_PREFIX/etc/rollcall
+        CONFIG=$ETC_DIR/agent.json
+        UNIT_FILE=$RC_PREFIX/etc/systemd/system/rollcall-agent.service
+        LOG_FILE=$RC_PREFIX/var/log/rollcall-agent.log
+        echo "◎ 沙箱模式（RC_PREFIX=$RC_PREFIX）：所有文件落在该前缀下，不改动系统配置" >&2
+        ;;
+    *) echo "RC_PREFIX 必须是以 / 开头的绝对路径" >&2; exit 1 ;;
+esac
 
 if [ "$UPGRADE" = "1" ]; then
+    if [ "$SANDBOX" = "1" ]; then
+        echo "沙箱模式不支持 --upgrade（升级对象是系统安装的 Agent）" >&2
+        exit 2
+    fi
     if [ ! -f "$CONFIG" ]; then
         echo "未找到 $CONFIG：该节点尚未安装 Agent，请先执行安装命令" >&2
         exit 1
@@ -168,10 +193,13 @@ if [ "$UPGRADE" = "1" ]; then
         exit 1
     fi
 else
-    BIN=/usr/local/bin/rollcall-agent
+    BIN=${RC_PREFIX:+$RC_PREFIX/}/usr/local/bin/rollcall-agent
 fi
 
 BIN_DIR=$(dirname "$BIN")
+if [ "$SANDBOX" = "1" ]; then
+    mkdir -p -- "$BIN_DIR"
+fi
 if [ ! -w "$BIN_DIR" ]; then
     echo "目录不可写: $BIN_DIR" >&2
     exit 1
@@ -235,7 +263,7 @@ agent_user_from_config() {
 }
 
 start_agent_bg() {
-    LOG=/var/log/rollcall-agent.log
+    LOG=$LOG_FILE
     : >> "$LOG"
     if [ -n "${RUN_AS:-}" ] && [ "$RUN_AS" != "root" ] \
         && command -v runuser >/dev/null 2>&1 && id -u "$RUN_AS" >/dev/null 2>&1; then
@@ -392,12 +420,17 @@ mv -f "$TMP" "$BIN"
 #   用户以为自己在跑最小权限，实际拿到的是 root 常驻进程。
 AGENT_USER=rollcall-agent
 AS_USER=""
-if id -u "$AGENT_USER" >/dev/null 2>&1; then
-    AS_USER=$AGENT_USER
-elif command -v useradd >/dev/null 2>&1; then
-    # useradd 在某些容器里存在但被限制；失败就退回 root 运行而不是中断安装。
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$AGENT_USER" 2>/dev/null || true
-    id -u "$AGENT_USER" >/dev/null 2>&1 && AS_USER=$AGENT_USER
+if [ "$SANDBOX" = "1" ]; then
+    # 沙箱不创建系统用户：演练环境以 root 跑在隔离前缀里，随前缀一起删除。
+    install -d -m 0700 "$ETC_DIR"
+elif [ -n "$AGENT_USER" ]; then
+    if id -u "$AGENT_USER" >/dev/null 2>&1; then
+        AS_USER=$AGENT_USER
+    elif command -v useradd >/dev/null 2>&1; then
+        # useradd 在某些容器里存在但被限制；失败就退回 root 运行而不是中断安装。
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$AGENT_USER" 2>/dev/null || true
+        id -u "$AGENT_USER" >/dev/null 2>&1 && AS_USER=$AGENT_USER
+    fi
 fi
 
 if [ -n "$AS_USER" ]; then
@@ -406,15 +439,17 @@ if [ -n "$AS_USER" ]; then
     AS_GROUP=$(id -gn "$AS_USER" 2>/dev/null || echo "$AS_USER")
     SVC_USER="User=$AS_USER
 Group=$AS_GROUP"
-    install -d -m 0750 -o root -g "$AS_GROUP" /etc/rollcall
+    install -d -m 0750 -o root -g "$AS_GROUP" "$ETC_DIR"
 else
-    echo "⚠ 未能创建低权限用户 $AGENT_USER（可能缺少 useradd），Agent 将以 root 运行" >&2
+    if [ "$SANDBOX" != "1" ]; then
+        echo "⚠ 未能创建低权限用户 $AGENT_USER（可能缺少 useradd），Agent 将以 root 运行" >&2
+    fi
     SVC_USER=""
-    install -d -m 0700 /etc/rollcall
+    [ "$SANDBOX" = "1" ] || install -d -m 0700 "$ETC_DIR"
 fi
 
 umask 077
-cat > /etc/rollcall/agent.json <<JSON
+cat > "$CONFIG" <<JSON
 {
   "server": "$SERVER_JSON",
   "nodeId": "$NODE_ID_JSON",
@@ -424,13 +459,13 @@ cat > /etc/rollcall/agent.json <<JSON
 }
 JSON
 if [ -n "$AS_USER" ]; then
-    chown root:"$AS_USER" /etc/rollcall/agent.json
-    chmod 0640 /etc/rollcall/agent.json
+    chown root:"$AS_USER" "$CONFIG"
+    chmod 0640 "$CONFIG"
 else
-    chmod 0600 /etc/rollcall/agent.json
+    chmod 0600 "$CONFIG"
 fi
 
-cat > /etc/systemd/system/rollcall-agent.service <<UNIT
+cat > "$UNIT_FILE" <<UNIT
 [Unit]
 Description=Rollcall Agent (read-only metrics reporter)
 Documentation=https://github.com/motao123/rollcall
@@ -440,7 +475,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 $SVC_USER
-ExecStart=$BIN -config /etc/rollcall/agent.json$INSECURE
+ExecStart=$BIN -config $CONFIG$INSECURE
 Restart=always
 RestartSec=10s
 ReadOnlyPaths=/proc
@@ -469,18 +504,27 @@ UNIT
 # 容器/LXC 里常没有可用的 systemd：退回直接后台运行，
 # 否则整条安装会因为 systemctl 不存在而失败。
 # 仅看 systemctl 是否存在不够：容器里常有客户端但没有 PID 1 的 systemd。
-if [ ! -d /run/systemd/system ] || ! command -v systemctl >/dev/null 2>&1; then
-    echo "→ 未检测到运行中的 systemd，改为后台常驻"
+# 沙箱模式同样走这里：不碰系统 systemd，进程随 RC_PREFIX 一起清理。
+if [ "$SANDBOX" = "1" ] || [ ! -d /run/systemd/system ] || ! command -v systemctl >/dev/null 2>&1; then
+    if [ "$SANDBOX" != "1" ]; then
+        echo "→ 未检测到运行中的 systemd，改为后台常驻"
+    fi
     RUN_AS=$AS_USER
     # 与 systemd 分支保持同样的最小权限：有专用用户就不要 root 常驻。
     stop_agent
     start_agent_bg
     sleep 2
     if [ -n "$(agent_pids)" ]; then
-        echo "✔ Agent 已在后台运行，约 30 秒内可在面板看到该节点"
-        echo "  日志: /var/log/rollcall-agent.log（无 systemd，开机自启需自行配置）"
+        if [ "$SANDBOX" = "1" ]; then
+            echo "✔ 沙箱 Agent 已在后台运行（root，日志 $LOG_FILE），约 30 秒内可在面板看到该节点"
+            echo "  systemd 单元样例（未启用）: $UNIT_FILE"
+            echo "  清理: pkill -f '$BIN' ; rm -rf '$RC_PREFIX'"
+        else
+            echo "✔ Agent 已在后台运行，约 30 秒内可在面板看到该节点"
+            echo "  日志: /var/log/rollcall-agent.log（无 systemd，开机自启需自行配置）"
+        fi
     else
-        echo "✘ Agent 启动失败，查看 /var/log/rollcall-agent.log" >&2
+        echo "✘ Agent 启动失败，查看 $LOG_FILE" >&2
         exit 1
     fi
     exit 0

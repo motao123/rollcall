@@ -3220,6 +3220,7 @@ const CAP_MATRIX = [
   ['采集与指标', [
     ['基础资源指标（CPU / 内存 / Swap / 磁盘 / 负载 / TCP / 进程 / 运行时长 / 网络）', 'yes', '#/nodes', '节点详情 1h–365d 时序图'],
     ['多挂载点 / 每网卡 / 磁盘 I/O 分项采集', 'yes', '#/nodes', '节点详情可展开'],
+    ['平台范围：仅 Linux 有指标采集', 'part', '', 'Windows/macOS 可接入但无数据（占位实现）'],
     ['SSH 登录记录（Agent 读 wtmp，只报增量）', 'part', '#/nodes', '依赖节点 sshd 实际写入 wtmp'],
     ['GPU / 温度 / 容器级指标', 'no', '', '未采集'],
     ['统计网卡自动过滤（bond 从属 / veth / docker / cni）', 'yes', '', '网卡集合不可手动指定'],
