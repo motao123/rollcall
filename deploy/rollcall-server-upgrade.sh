@@ -214,10 +214,18 @@ download() {
   src=$1
   dst=$2
   fetch_once() {
+    # https 目标加 -k：自签证书（IP 直连）场景必需；下载完整性由
+    # --sha256 与发行验签保证，不依赖传输层证书。
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL --retry 3 --connect-timeout 10 -o "$dst" "$1"
+      case "$1" in
+        https://*) curl -kfsSL --retry 3 --connect-timeout 10 -o "$dst" "$1" ;;
+        *) curl -fsSL --retry 3 --connect-timeout 10 -o "$dst" "$1" ;;
+      esac
     elif command -v wget >/dev/null 2>&1; then
-      wget -q -T 30 -O "$dst" "$1"
+      case "$1" in
+        https://*) wget -q -T 30 --no-check-certificate -O "$dst" "$1" ;;
+        *) wget -q -T 30 -O "$dst" "$1" ;;
+      esac
     else
       die "缺少 curl 或 wget，无法下载二进制"
     fi
@@ -242,12 +250,20 @@ health_ok() {
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
       body=
       fetched=0
+      # https 健康地址（自签证书场景）需 -k：升级脚本的职责是确认服务活着，
+      # 不是校验证书；正式 CA 证书的实例 -k 同样无害。
       if command -v curl >/dev/null 2>&1; then
-        if body=$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null); then fetched=1; fi
+        case "$HEALTH" in
+          https://*) body=$(curl -kfsS --max-time 3 "$HEALTH" 2>/dev/null) || body= ;;
+          *) body=$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null) || body= ;;
+        esac
+        [ -n "$body" ] && fetched=1
       elif command -v wget >/dev/null 2>&1; then
-        if body=$(wget -q -T 3 -O - "$HEALTH" 2>/dev/null); then fetched=1; fi
-      else
-        return 1
+        case "$HEALTH" in
+          https://*) body=$(wget -q -T 3 --no-check-certificate -O - "$HEALTH" 2>/dev/null) || body= ;;
+          *) body=$(wget -q -T 3 -O - "$HEALTH" 2>/dev/null) || body= ;;
+        esac
+        [ -n "$body" ] && fetched=1
       fi
       if [ "$fetched" = 1 ]; then
         # 严格取值再比对，而不是 grep 子串：`"version":"v1.14.1"` 是子串匹配，

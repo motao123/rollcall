@@ -42,10 +42,18 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 fetch_file() {
+    # 自签名证书场景（IP 直连、无域名）：https 目标跳过证书校验（-k），
+    # 链路仍是加密的； sha256 校验与身份逻辑不依赖下载通道的证书。
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1" -o "$2"
+        case "$1" in
+            https://*) curl -kfsSL "$1" -o "$2" ;;
+            *) curl -fsSL "$1" -o "$2" ;;
+        esac
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "$2" "$1"
+        case "$1" in
+            https://*) wget -q --no-check-certificate -O "$2" "$1" ;;
+            *) wget -q -O "$2" "$1" ;;
+        esac
     else
         echo "需要 curl 或 wget" >&2
         return 1
@@ -54,9 +62,15 @@ fetch_file() {
 
 fetch_text() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1"
+        case "$1" in
+            https://*) curl -kfsSL "$1" ;;
+            *) curl -fsSL "$1" ;;
+        esac
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O - "$1"
+        case "$1" in
+            https://*) wget -q --no-check-certificate -O - "$1" ;;
+            *) wget -q -O - "$1" ;;
+        esac
     else
         echo "需要 curl 或 wget" >&2
         return 1
@@ -451,12 +465,19 @@ else
 fi
 
 umask 077
+# https 主控默认写入 tlsSkipVerify：安装脚本对自签证书（IP 直连无域名）跳过
+# 校验才能下载，Agent 运行期同理；换用正式 CA 证书的实例可删掉这一行。
+TLS_FLAG=""
+case "$SERVER" in
+    https://*) TLS_FLAG='true' ;;
+esac
 cat > "$CONFIG" <<JSON
 {
   "server": "$SERVER_JSON",
   "nodeId": "$NODE_ID_JSON",
   "token": "$TOKEN_JSON",
   "interval": 30,
+  "tlsSkipVerify": ${TLS_FLAG:-false},
   "update": { "enabled": false }
 }
 JSON

@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -54,11 +55,14 @@ type updateConfig struct {
 }
 
 type config struct {
-	Server   string       `json:"server"` // 主控地址，如 https://rollcall.example.com
-	NodeID   string       `json:"nodeId"`
-	Token    string       `json:"token"`
-	Interval int          `json:"interval"` // 秒
-	Update   updateConfig `json:"update"`
+	Server   string `json:"server"` // 主控地址，如 https://rollcall.example.com
+	NodeID   string `json:"nodeId"`
+	Token    string `json:"token"`
+	Interval int    `json:"interval"` // 秒
+	// TLSSkipVerify 跳过主控证书校验：自签名证书（IP 直连、无域名）场景下启用，
+	// 链路仍是加密的，只是不验证服务端身份。明文 HTTP 不受此字段影响。
+	TLSSkipVerify bool         `json:"tlsSkipVerify,omitempty"`
+	Update        updateConfig `json:"update"`
 }
 
 func loadConfig(path string) (*config, error) {
@@ -277,6 +281,11 @@ func main() {
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+	// 自签名证书（无域名、IP 直连）场景：跳过证书校验但保留加密。
+	// 诚实地说，这只防窃听不防中间人；更严格的「装公钥做校验」留待有需求时实现。
+	if cfg.TLSSkipVerify {
+		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 
 	send := func() error {
