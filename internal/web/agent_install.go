@@ -449,7 +449,8 @@ else
 fi
 
 umask 077
-cat > "$CONFIG" <<JSON{
+cat > "$CONFIG" <<JSON
+{
   "server": "$SERVER_JSON",
   "nodeId": "$NODE_ID_JSON",
   "token": "$TOKEN_JSON",
