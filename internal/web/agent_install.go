@@ -449,8 +449,7 @@ else
 fi
 
 umask 077
-cat > "$CONFIG" <<JSON
-{
+cat > "$CONFIG" <<JSON{
   "server": "$SERVER_JSON",
   "nodeId": "$NODE_ID_JSON",
   "token": "$TOKEN_JSON",
@@ -465,6 +464,8 @@ else
     chmod 0600 "$CONFIG"
 fi
 
+# 沙箱前缀下的单元样例目录不存在（默认路径 /etc/systemd/system 总是存在，mkdir -p 无害）。
+mkdir -p -- "$(dirname -- "$UNIT_FILE")"
 cat > "$UNIT_FILE" <<UNIT
 [Unit]
 Description=Rollcall Agent (read-only metrics reporter)
