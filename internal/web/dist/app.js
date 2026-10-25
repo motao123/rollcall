@@ -699,9 +699,10 @@ function overviewKpisHTML(ov) {
       ${kpi('平均 CPU', ov.avgCpu.toFixed(1), '%', '在线节点均值')}
       ${kpi('平均内存', ov.avgMem.toFixed(1), '%', '在线节点均值')}
       ${kpi('服务探测', `${ov.services - ov.svcDown}/${ov.services}`, '', ov.svcDown > 0 ? `${ov.svcDown} 个不可用` : '全部可用')}
+      ${kpi('实时速率', '↓' + rate(ov.rateIn || 0) + '/s', '', '↑ ' + rate(ov.rateOut || 0) + '/s')}
+      ${kpi('本周期流量', bytes(ov.periodUsed || 0), '', (ov.periodQuota || 0) > 0 ? `${((ov.periodUsed || 0) / ov.periodQuota * 100).toFixed(1)}% / ${bytes(ov.periodQuota)}` : '未设配额')}
       ${kpi('月度成本', '$' + ov.monthlyCost.toFixed(1), '', `${expiring.length} 台 30 天内到期`)}
-      ${kpi('剩余价值', '$' + (ov.remainingValue || 0).toFixed(0), '', '未到期资产按剩余天数折算')}
-      ${kpi('累计流量', bytes(ov.trafficIn || 0), '↓', '↑ ' + bytes(ov.trafficOut || 0))}`;
+      ${kpi('剩余价值', '$' + (ov.remainingValue || 0).toFixed(0), '', '未到期资产按剩余天数折算')}`;
 }
 
 function alertItemInner(n) {
@@ -1030,6 +1031,16 @@ async function viewOverview() {
 }
 
 async function viewNodes() {
+  // 筛选条件入 URL（#/nodes?provider=..&group=..&state=..）：刷新/分享可还原，
+  // 也便于把「某分组当前离线的机器」这条链接发给未来的自己。
+  // 路由只取 path 段，带查询串不会误入节点详情。
+  const hq = location.hash.split('?')[1];
+  if (hq) {
+    const qp = new URLSearchParams(hq);
+    if (qp.has('provider')) state.nodeFilter.provider = qp.get('provider') || '';
+    if (qp.has('group')) state.nodeFilter.group = qp.get('group') || '';
+    if (qp.has('state')) state.nodeFilter.state = qp.get('state') || '';
+  }
   const nodes = state.data.nodes || await api('/api/nodes');
   state.data.nodes = nodes;
   const providers = [...new Set(nodes.map((n) => n.provider).filter(Boolean))].sort();
@@ -1040,6 +1051,19 @@ async function viewNodes() {
   if (f.group && !groups.includes(f.group)) f.group = '';
   const list = filteredNodes(nodes);
   const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
+  // 状态 chips：计数基于「仅按服务商/分组过滤」的集合（ facet 口径，
+  // 点进某个状态前就知道该状态有几台）；零数量的状态置灰不可点。
+  const stateBase = nodes.filter((n) => (!f.provider || n.provider === f.provider) && (!f.group || n.group === f.group));
+  const stateCount = (s) => stateBase.filter((n) => (n.state || (n.online ? 'online' : 'offline')) === s).length;
+  const stateChips = [
+    ['', '全部', stateBase.length],
+    ['online', '在线', stateCount('online')],
+    ['stale', '数据延迟', stateCount('stale')],
+    ['offline', '离线', stateCount('offline')],
+    ['no_data', '待接入', stateCount('no_data')],
+  ].map(([v, label, cnt]) =>
+    `<button type="button" class="state-chip${f.state === v ? ' on' : ''}" data-state-chip="${v}"${cnt === 0 && v !== '' ? ' disabled' : ''}>${label} <span class="mono">${cnt}</span></button>`
+  ).join('');
 
   $('#view').innerHTML = `
     <section class="section">
@@ -1050,13 +1074,7 @@ async function viewNodes() {
       <div class="filter-bar">
         <select id="filterProvider" aria-label="按服务商筛选">${opt('', '全部服务商', f.provider)}${providers.map((p) => opt(p, p, f.provider)).join('')}</select>
         <select id="filterGroup" aria-label="按分组筛选">${opt('', '全部分组', f.group)}${groups.map((g) => opt(g, g, f.group)).join('')}</select>
-        <select id="filterState" aria-label="按状态筛选">
-          ${opt('', '全部状态', f.state)}
-          ${opt('online', '在线', f.state)}
-          ${opt('stale', '数据延迟', f.state)}
-          ${opt('offline', '离线', f.state)}
-          ${opt('no_data', '待接入', f.state)}
-        </select>
+        <div class="state-chips" role="group" aria-label="按状态筛选">${stateChips}</div>
         <button class="btn sm" id="filterReset" type="button">重置筛选</button>
         ${(f.provider || f.group || f.state || state.search) ? `<span class="section-meta">已启用筛选</span>` : ''}
       </div>
@@ -1095,16 +1113,29 @@ async function viewNodes() {
   bindNodeClicks();
   const wiz2 = document.getElementById('wizBtn2');
   if (wiz2) wiz2.onclick = showAgentWizard;
+  // 筛选变化后把条件写回 URL（replaceState 不产生多余历史记录）。
+  const syncNodesHash = () => {
+    const ff = state.nodeFilter;
+    const qp = new URLSearchParams();
+    if (ff.provider) qp.set('provider', ff.provider);
+    if (ff.group) qp.set('group', ff.group);
+    if (ff.state) qp.set('state', ff.state);
+    const q = qp.toString();
+    history.replaceState(null, '', location.pathname + location.search + '#/nodes' + (q ? '?' + q : ''));
+  };
   const bindFilter = (id, key) => {
     const el = document.getElementById(id);
-    if (el) el.onchange = () => { state.nodeFilter[key] = el.value; viewNodes(); };
+    if (el) el.onchange = () => { state.nodeFilter[key] = el.value; syncNodesHash(); viewNodes(); };
   };
   bindFilter('filterProvider', 'provider');
   bindFilter('filterGroup', 'group');
-  bindFilter('filterState', 'state');
+  $$('[data-state-chip]').forEach((b) => {
+    b.onclick = () => { state.nodeFilter.state = b.dataset.stateChip || ''; syncNodesHash(); viewNodes(); };
+  });
   const reset = document.getElementById('filterReset');
   if (reset) reset.onclick = () => {
     state.nodeFilter = { provider: '', group: '', state: '' };
+    syncNodesHash();
     viewNodes();
   };
   $$('[data-node-edit]').forEach((b) => {
@@ -1386,9 +1417,24 @@ async function viewNodeDetail(id) {
       netVals.push(Math.max(0, d / dt));
     }
   }
+  // 磁盘 I/O 速率与网络同理，但聚合桶只落了网络增量、没有磁盘 I/O 增量，
+  // 因此只在原始区间（1h）可算；长范围明确说明而不是画一条假曲线。
+  const diskIoVals = [];
+  if (bucketSec === 0) {
+    for (let i = 1; i < pts.length; i++) {
+      const dt = (pts[i].ts - pts[i - 1].ts) || 1;
+      const d = ((pts[i].diskReadBytes || 0) + (pts[i].diskWriteBytes || 0))
+        - ((pts[i - 1].diskReadBytes || 0) + (pts[i - 1].diskWriteBytes || 0));
+      diskIoVals.push(Math.max(0, d / dt));
+    }
+  }
   const times = pts.map((p) => p.ts);
   const netTimes = bucketSec > 0 ? times : times.slice(1);
   const loadVals = pts.map((p) => p.load1);
+  // 图表脚注：窗口内均值与峰值。点太少不算，避免 1 个样本冒充"均值"。
+  const winStat = (vals, fmt) => (vals && vals.length >= 2
+    ? `<div class="chart-foot mono">均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)} · 峰值 ${fmt(Math.max(...vals))}</div>`
+    : '');
   const last = detail.latest || {};
   const traffic = detail.traffic || {};
   // 服务端已按节点配置的计费口径合成了 used（收发合计 / 只计单边 / 取较大者），
@@ -1448,26 +1494,38 @@ async function viewNodeDetail(id) {
           <div class="chart-head"><span class="chart-title">CPU 使用率</span>
             <span class="chart-val mono" style="color:${hasData && (last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—'}</span></div>
           ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%' })}
+          ${winStat(cpuVals, (v) => v.toFixed(1) + '%')}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">内存使用率</span>
             <span class="chart-val mono">${hasData ? `${pct(memUsed, memTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(memUsed)} / ${bytes(memTotal)}</span>` : '—'}</span></div>
           ${areaChart(memVals, 'var(--accent-2)', { times, label: '内存', fmt: (v) => v.toFixed(1) + '%' })}
+          ${winStat(memVals, (v) => v.toFixed(1) + '%')}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">磁盘使用率</span>
             <span class="chart-val mono">${hasData ? `${pct(diskUsed, diskTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(diskUsed)} / ${bytes(diskTotal)}</span>` : '—'}</span></div>
           ${areaChart(diskVals, 'var(--warn)', { times, label: '磁盘', fmt: (v) => v.toFixed(1) + '%' })}
+          ${winStat(diskVals, (v) => v.toFixed(1) + '%')}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">网络吞吐速率</span>
             <span class="chart-val" style="font-size:13px">${hasData ? `<span class="mono">↓${bytes(last.netRx)} ↑${bytes(last.netTx)}</span> <span style="color:var(--fg-3);font-weight:400;letter-spacing:0">累计</span>` : '—'}</span></div>
           ${areaChart(netVals, 'var(--ok)', { height: 110, times: netTimes, label: '速率', fmt: (v) => rate(v) + '/s' })}
+          ${winStat(netVals, (v) => rate(v) + '/s')}
+        </div>
+        <div class="chart-card">
+          <div class="chart-head"><span class="chart-title">磁盘 I/O 速率</span>
+            <span class="chart-val" style="font-size:13px">${hasData && (last.diskReadBytes || last.diskWriteBytes) ? `<span class="mono">读 ${bytes(last.diskReadBytes || 0)} · 写 ${bytes(last.diskWriteBytes || 0)}</span> <span style="color:var(--fg-3);font-weight:400;letter-spacing:0">累计</span>` : '—'}</span></div>
+          ${bucketSec === 0
+            ? areaChart(diskIoVals, 'var(--accent)', { height: 110, times: netTimes, label: '磁盘 I/O', fmt: (v) => rate(v) + '/s' }) + winStat(diskIoVals, (v) => rate(v) + '/s')
+            : '<div class="empty" style="padding:34px 0">磁盘 I/O 只保留 1 小时原始数据，长范围未聚合；切换到「1 小时」查看</div>'}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">1 分钟负载</span>
             <span class="chart-val mono">${hasData ? (last.load1 || 0).toFixed(2) : '—'}</span></div>
           ${areaChart(loadVals, 'var(--fg-2)', { height: 100, times, label: '负载', fmt: (v) => v.toFixed(2) })}
+          ${winStat(loadVals, (v) => v.toFixed(2))}
         </div>
       </div>
 

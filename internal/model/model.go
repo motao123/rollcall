@@ -804,6 +804,11 @@ type NodeView struct {
 
 	AgentVersion  string `json:"agentVersion,omitempty"`
 	AgentOutdated bool   `json:"agentOutdated,omitempty"`
+
+	// RateIn/RateOut 是最近两点的网卡速率（B/s）。nodeViews 在构造
+	// spark 的同一次序列读取里顺带求差，不额外访问历史。
+	RateIn  uint64 `json:"rateIn,omitempty"`
+	RateOut uint64 `json:"rateOut,omitempty"`
 }
 
 // NodeMeta 从台账条目复制视图所需的字段，调用方再补齐监控状态。
@@ -858,6 +863,14 @@ type Overview struct {
 	TrafficIn   uint64  `json:"trafficIn"`
 	TrafficOut  uint64  `json:"trafficOut"`
 	MonthlyCost float64 `json:"monthlyCost"`
+	// RateIn/RateOut 是各节点最近两点速率的合计（B/s），
+	// 与 TrafficIn/TrafficOut（累计计数器合计）是两种口径。
+	RateIn  uint64 `json:"rateIn"`
+	RateOut uint64 `json:"rateOut"`
+	// PeriodUsed 是各节点本计费周期用量（按各自口径合成的 Used）之和；
+	// PeriodQuota 是配额字节数之和（未设配额的节点贡献 0）。
+	PeriodUsed  uint64 `json:"periodUsed"`
+	PeriodQuota uint64 `json:"periodQuota"`
 	// RemainingValue 是未到期资产的剩余价值合计（USD）：年付价 × 剩余天数 / 365。
 	// 与 MonthlyCost 同口径（CNY 按 cnyRate 折算）；未登记到期日或已过期不计入。
 	RemainingValue float64    `json:"remainingValue"`

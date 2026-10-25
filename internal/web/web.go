@@ -915,6 +915,9 @@ func (s *Server) nodeViews(withExtras bool) []model.NodeView {
 				spark = append(spark, model.Point{T: p.TS, V: p.CPUPct})
 			}
 			v.Spark = spark
+			// 速率顺带从同一段序列求差（截断保留的是尾部，末两点即最近两点），
+			// 不为速率再做一次序列读取。
+			v.RateIn, v.RateOut = netRates(series)
 		}
 		out = append(out, v)
 	}
@@ -952,6 +955,15 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		ov.MonthlyCost += monthly(v.Price, v.Currency, s.cnyRate)
 		// 剩余价值则相反：只对登记了到期日且未过期的资产累计。
 		ov.RemainingValue += remainingValue(v.Price, v.Currency, s.cnyRate, v.ExpireAt)
+		// 英雄区：机群实时速率与本计费周期用量。速率来自 spark 同段序列的
+		// 末两点差分；周期用量用服务端按各节点口径合成的 Used 相加，
+		// 不在这里自作主张把收发相加（单边计费节点会翻倍）。
+		ov.RateIn += v.RateIn
+		ov.RateOut += v.RateOut
+		ov.PeriodUsed += v.Traffic.Used
+		if q := v.Traffic.QuotaGB; q > 0 {
+			ov.PeriodQuota += uint64(q * (1 << 30))
+		}
 		if v.ExpireAt != "" {
 			if days, ok := daysUntil(v.ExpireAt); ok && days >= 0 && days <= 30 {
 				ov.Expiring = append(ov.Expiring, v)

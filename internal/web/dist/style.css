@@ -1970,3 +1970,17 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
 .cap-na { color: var(--fg-3); }
 .cap-group td { background: var(--panel-2); font-weight: 600; font-size: 12px; color: var(--fg-2); letter-spacing: .02em; }
 .cap-desc { color: var(--fg-2); font-size: 12.5px; }
+
+/* ---------------- 节点页状态 chips 与图表脚注 ---------------- */
+.state-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.state-chip {
+  border: 1px solid var(--line-2); background: var(--panel); color: var(--fg-2);
+  border-radius: 999px; padding: 3.5px 11px; font-size: 12px; cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.state-chip .mono { color: var(--fg-3); font-size: 11px; margin-left: 2px; }
+.state-chip:hover:not(:disabled) { border-color: var(--accent); color: var(--fg); }
+.state-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.state-chip.on .mono { color: var(--accent); }
+.state-chip:disabled { opacity: .45; cursor: default; }
+.chart-foot { margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--line); font-size: 11px; color: var(--fg-3); }
