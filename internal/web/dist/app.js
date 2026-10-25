@@ -19,6 +19,7 @@ const state = {
   auditPage: 1,
   auditFilters: { range: '7d', action: '', q: '' },
   nodeFilter: { provider: '', group: '', state: '' },
+  alertPage: 1,
   data: {},
   panelLink: '',
   authRequired: false,
@@ -34,6 +35,8 @@ const state = {
 };
 
 const VALID_RANGES = ['1h', '6h', '24h', '7d', '30d', '365d'];
+// 概览「正在告警」分页：机群规模大时异常节点可能远超一屏。
+const ALERT_PAGE_SIZE = 10;
 
 /* ---------------- 工具 ---------------- */
 
@@ -133,6 +136,33 @@ function nodeState(n) {
 
 function hasNodeData(n) {
   return (n.state || (n.online ? 'online' : 'offline')) !== 'no_data';
+}
+
+// ISO 3166-1 alpha-2 → 地区旗帜 emoji（区域指示符拼字）。
+// country 未登记时返回空串，调用方无需再判空。
+function flagEmoji(code) {
+  if (!code || !/^[A-Za-z]{2}$/.test(code)) return '';
+  const cc = code.toUpperCase();
+  return String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+// OS 家族短标签：卡片/表格里代替完整发行版字符串（悬停可见全名）。
+// 顺序即优先级：先匹配具体发行版，兜底取首词。
+function osBadge(os) {
+  const s = (os || '').toLowerCase();
+  if (!s) return '';
+  const table = [
+    ['windows', 'Windows'], ['darwin|mac os|macos', 'macOS'],
+    ['debian', 'Debian'], ['ubuntu', 'Ubuntu'], ['centos', 'CentOS'],
+    ['rocky', 'Rocky'], ['almalinux|alma ', 'Alma'], ['fedora', 'Fedora'],
+    ['alpine', 'Alpine'], ['arch', 'Arch'], ['opensuse|suse', 'openSUSE'],
+    ['oracle', 'Oracle'], ['deepin', 'Deepin'], ['openwrt', 'OpenWrt'],
+    ['freebsd', 'FreeBSD'], ['nixos', 'NixOS'],
+  ];
+  for (const [re, label] of table) {
+    if (new RegExp(re).test(s)) return label;
+  }
+  return esc((os || '').split(/[ /]/)[0].slice(0, 10));
 }
 
 function clock(ts) {
@@ -623,13 +653,18 @@ function nodeCard(n) {
     ? `<span class="badge ${days < 0 ? 'crit' : days <= 7 ? 'crit' : 'warn'}" title="到期 ${esc(n.expireAt)}">${days < 0 ? '已过期' : days + ' 天'}</span>` : '';
   const agentBadge = n.agentOutdated
     ? `<span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : '';
+  const flag = flagEmoji(n.country);
+  const priceBadge = n.price
+    ? `<span class="badge" title="年付续费价">${n.currency === 'CNY' ? '¥' : '$'}${n.price}</span>` : '';
+  const osLabel = osBadge(n.host?.os);
 
   return `<article class="node-card ${cardCls} ${n.alerts > 0 ? 'alerting' : ''}" data-node="${esc(n.id)}">
     <div class="nc-head">
       <span class="dot ${st.tone}"></span>
       <span class="nc-name">${esc(n.name)}</span>
+      ${flag ? `<span class="nc-flag" title="${esc(n.country)}">${flag}</span>` : ''}
       <span class="nc-tag">${esc(n.provider || '—')}</span>
-      ${expireBadge}${agentBadge}
+      ${priceBadge}${expireBadge}${agentBadge}
       <span class="nc-status">${st.text}</span>
     </div>
     <div class="nc-bars">
@@ -639,6 +674,7 @@ function nodeCard(n) {
     </div>
     <div class="nc-spark">${sparkline(spark, st.tone === 'ok' ? 'var(--accent)' : 'var(--fg-3)')}</div>
     <div class="nc-foot">
+      ${osLabel ? `<span title="${esc(n.host?.os || '')}">${osLabel}</span><span class="sep">·</span>` : ''}
       <span>${esc(n.region || '—')}</span>
       <span class="sep">·</span>
       <span class="mono" title="累计入站">${hasData ? '↓' + bytes(n.latest.netRx) : '—'}</span>
@@ -770,11 +806,13 @@ function nodesRowCells(n) {
   const mem = hasData ? pct(n.latest.memUsed, n.latest.memTotal) : null;
   const disk = hasData ? pct(n.latest.diskUsed, n.latest.diskTotal) : null;
   const dash = '—';
+  const flag = flagEmoji(n.country);
+  const osLabel = osBadge(n.host?.os);
   return `<td data-cell="state"><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
             <td class="strong" data-cell="name">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
             <td data-cell="provider">${esc(n.provider || '—')}</td>
-            <td data-cell="region">${esc(n.region || '—')}</td>
-            <td class="os-cell" data-cell="os">${esc(n.host?.os || '—')}</td>
+            <td data-cell="region">${flag ? `<span title="${esc(n.country)}">${flag}</span> ` : ''}${esc(n.region || '—')}</td>
+            <td class="os-cell" data-cell="os">${osLabel ? `<span class="os-badge" title="${esc(n.host?.os || '')}">${osLabel}</span>` : ''}${esc(n.host?.os || '—')}</td>
             <td class="num mono${cpu > 85 ? ' text-crit' : ''}" data-cell="cpu">${cpu == null ? dash : cpu.toFixed(0) + '%'}</td>
             <td class="num mono" data-cell="mem">${mem == null ? dash : mem.toFixed(0) + '%'}</td>
             <td class="num mono${disk > 88 ? ' text-crit' : ''}" data-cell="disk">${disk == null ? dash : disk.toFixed(0) + '%'}</td>
@@ -851,9 +889,16 @@ function patchLive(ov, nodes) {
   for (let i = 0; i < rows.length; i++) if (rows[i].dataset.node !== order[i]) return false;
 
   const alerting = nodes.filter((n) => n.alerts > 0);
+  // 分页后 DOM 只呈现当前页切片：与切片比对而不是全量；
+  // 总数变化但当前页仍有效时，仅刷新计数行而不是整页重绘。
+  const alertPages = Math.max(1, Math.ceil(alerting.length / ALERT_PAGE_SIZE));
+  if (!Number.isInteger(state.alertPage) || state.alertPage < 1 || state.alertPage > alertPages) return false;
+  const pageSlice = alerting.slice((state.alertPage - 1) * ALERT_PAGE_SIZE, state.alertPage * ALERT_PAGE_SIZE);
   const alertEls = $$('.alert-item[data-node]');
-  if (alerting.length !== alertEls.length) return false;
-  for (let i = 0; i < alerting.length; i++) if (alertEls[i].dataset.node !== alerting[i].id) return false;
+  if (pageSlice.length !== alertEls.length) return false;
+  for (let i = 0; i < alertEls.length; i++) if (alertEls[i].dataset.node !== pageSlice[i].id) return false;
+  const alertMeta = $('#alertMeta');
+  if (alertMeta) alertMeta.textContent = `${alerting.length} 台节点异常${alertPages > 1 ? ` · 第 ${state.alertPage}/${alertPages} 页` : ''}`;
 
   const kpis = $('.kpis');
   if (!kpis) return false;
@@ -967,6 +1012,11 @@ async function viewOverview() {
   const providerRows = overviewGroups(nodes);
   const lists = providerRows.flatMap((r) => r.ns);
   const alerting = nodes.filter((n) => n.alerts > 0);
+  // 分页：页码越界（数据变化后）回到第 1 页，保证渲染的切片始终有效。
+  const alertPages = Math.max(1, Math.ceil(alerting.length / ALERT_PAGE_SIZE));
+  if (!Number.isInteger(state.alertPage) || state.alertPage < 1 || state.alertPage > alertPages) state.alertPage = 1;
+  const alertPageItems = alerting.slice((state.alertPage - 1) * ALERT_PAGE_SIZE, state.alertPage * ALERT_PAGE_SIZE);
+  const alertMetaText = `${alerting.length} 台节点异常${alertPages > 1 ? ` · 第 ${state.alertPage}/${alertPages} 页` : ''}`;
 
   $('#view').innerHTML = `
     <div class="kpis">${overviewKpisHTML(ov)}</div>
@@ -975,11 +1025,17 @@ async function viewOverview() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">正在告警</h2>
-        <span class="section-meta">${alerting.length} 台节点异常</span>
+        <span class="section-meta" id="alertMeta">${alertMetaText}</span>
       </div>
       <div class="panel">
-        ${alerting.map((n) => `
+        ${alertPageItems.map((n) => `
           <div class="alert-item" style="cursor:pointer" data-node="${esc(n.id)}">${alertItemInner(n)}</div>`).join('')}
+        ${alertPages > 1 ? `
+        <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+          <button class="btn tiny" id="alertPrev" type="button"${state.alertPage <= 1 ? ' disabled' : ''}>‹ 上一页</button>
+          <span class="section-meta">${state.alertPage} / ${alertPages}</span>
+          <button class="btn tiny" id="alertNext" type="button"${state.alertPage >= alertPages ? ' disabled' : ''}>下一页 ›</button>
+        </div>` : ''}
       </div>
     </section>` : ''}
 
@@ -1009,6 +1065,10 @@ async function viewOverview() {
 
   const wiz = $('#wizBtn');
   if (wiz) wiz.onclick = showAgentWizard;
+  const aprev = $('#alertPrev');
+  if (aprev) aprev.onclick = () => { if (state.alertPage > 1) { state.alertPage--; viewOverview(); } };
+  const anext = $('#alertNext');
+  if (anext) anext.onclick = () => { state.alertPage++; viewOverview(); };
   $$('[data-ov-range]').forEach((b) => {
     b.onclick = () => {
       if (state.ovRange === b.dataset.ovRange) return;
@@ -1064,6 +1124,10 @@ async function viewNodes() {
   ].map(([v, label, cnt]) =>
     `<button type="button" class="state-chip${f.state === v ? ' on' : ''}" data-state-chip="${v}"${cnt === 0 && v !== '' ? ' disabled' : ''}>${label} <span class="mono">${cnt}</span></button>`
   ).join('');
+  // 视图模式：表格 / 卡片。首次访问按屏幕宽度给默认（移动端卡片更易读），
+  // 之后记住选择。卡片模式没有复选框，批量操作条只在表格模式渲染。
+  const viewMode = localStorage.getItem('rollcall-nodes-view')
+    || (window.matchMedia('(max-width: 720px)').matches ? 'cards' : 'table');
 
   $('#view').innerHTML = `
     <section class="section">
@@ -1076,8 +1140,16 @@ async function viewNodes() {
         <select id="filterGroup" aria-label="按分组筛选">${opt('', '全部分组', f.group)}${groups.map((g) => opt(g, g, f.group)).join('')}</select>
         <div class="state-chips" role="group" aria-label="按状态筛选">${stateChips}</div>
         <button class="btn sm" id="filterReset" type="button">重置筛选</button>
+        <span class="state-chips" role="group" aria-label="视图模式">
+          <button type="button" class="state-chip${viewMode === 'table' ? ' on' : ''}" data-view-mode="table" title="表格视图（支持批量操作）">表格</button>
+          <button type="button" class="state-chip${viewMode === 'cards' ? ' on' : ''}" data-view-mode="cards" title="卡片视图（移动端推荐）">卡片</button>
+        </span>
         ${(f.provider || f.group || f.state || state.search) ? `<span class="section-meta">已启用筛选</span>` : ''}
       </div>
+      ${viewMode === 'cards'
+        ? `<div class="node-grid">${list.map(nodeCard).join('') || '<div class="empty" style="grid-column:1/-1">没有匹配的节点</div>'}</div>
+           <p class="field-hint" style="margin-top:8px">批量操作请切换到表格视图</p>`
+        : `
       <div id="batchBar" hidden class="batch-bar">
         <span style="font-size:12px;color:var(--fg-2)">已选 <b id="batchCount" class="mono">0</b> 台</span>
         <span style="flex:1"></span>
@@ -1108,7 +1180,7 @@ async function viewNodes() {
               <button class="btn tiny" data-node-agent="${esc(n.id)}">接入</button>
             </div></td>
           </tr>`).join('') || `<tr><td colspan="13"><div class="empty">没有匹配的节点</div></td></tr>`}</tbody>
-      </table></div>
+      </table></div>`}
     </section>`;
   bindNodeClicks();
   const wiz2 = document.getElementById('wizBtn2');
@@ -1131,6 +1203,12 @@ async function viewNodes() {
   bindFilter('filterGroup', 'group');
   $$('[data-state-chip]').forEach((b) => {
     b.onclick = () => { state.nodeFilter.state = b.dataset.stateChip || ''; syncNodesHash(); viewNodes(); };
+  });
+  $$('[data-view-mode]').forEach((b) => {
+    b.onclick = () => {
+      localStorage.setItem('rollcall-nodes-view', b.dataset.viewMode);
+      viewNodes();
+    };
   });
   const reset = document.getElementById('filterReset');
   if (reset) reset.onclick = () => {
@@ -1482,6 +1560,7 @@ async function viewNodeDetail(id) {
           ${[['1h', '1 小时'], ['6h', '6 小时'], ['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['365d', '365 天']]
             .map(([r, label]) => `<button class="${state.range === r ? 'on' : ''}" data-range="${r}">${label}</button>`).join('')}
         </div>
+        ${resolution !== 'raw' ? `<span class="section-meta" title="长范围不返回全部原始点">${({ '1m': '已按 1 分钟桶聚合，每点为桶内均值（网络为增量）', '5m': '已按 5 分钟桶聚合，每点为桶内均值（网络为增量）', '1h': '已按 1 小时桶聚合，每点为桶内均值（网络为增量）' })[resolution] || ''}</span>` : ''}
         <button class="btn sm" id="nodeCopyBtn" type="button">复制摘要</button>
         <button class="btn sm" id="nodeEditBtn" type="button">编辑资产</button>
         <button class="btn sm" id="nodeAgentBtn" type="button">接入/令牌</button>

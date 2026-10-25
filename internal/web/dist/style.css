@@ -1984,3 +1984,11 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
 .state-chip.on .mono { color: var(--accent); }
 .state-chip:disabled { opacity: .45; cursor: default; }
 .chart-foot { margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--line); font-size: 11px; color: var(--fg-3); }
+
+/* ---------------- 展示层第二批：旗帜 / OS 徽标 ---------------- */
+.nc-flag { font-size: 13px; line-height: 1; margin-left: -2px; }
+.os-badge {
+  display: inline-block; margin-right: 5px; padding: 1px 6px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--accent);
+  font-size: 10.5px; font-weight: 600; letter-spacing: .02em; vertical-align: 1px;
+}
