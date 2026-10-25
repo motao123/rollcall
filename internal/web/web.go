@@ -745,7 +745,10 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	// 服务端以自身时间校正，避免 Agent 时钟漂移污染时序
 	rep.Metrics.TS = time.Now().Unix()
-	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics))
+	// 网卡集合指纹（X-NIC-Set 头，v1.27.0 起的 Agent 才发；旧 Agent 无头=不比较）。
+	// 集合变化时重建流量基线并标记周期不完整，防止 WARP/多 WAN 切换的跳变被记成真实流量。
+	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics),
+		sanitizetext.Text(strings.TrimSpace(r.Header.Get("X-NIC-Set")), 32))
 
 	// 登录采集的可用性（请求头，旧 Agent 不发）。存下来是为了让面板能显示
 	// "最近写入 N 天前"，而不是让一个在这台机器上永远不触发的功能假装正常。
@@ -780,6 +783,8 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 //   - 负载为负数会污染图表纵轴。
 func sanitizeMetrics(m model.Metrics) model.Metrics {
 	m.CPUPct = clampRange(m.CPUPct, 0, 100)
+	m.StealPct = clampRange(m.StealPct, 0, 100)
+	m.IowaitPct = clampRange(m.IowaitPct, 0, 100)
 	m.Load1 = clampRange(m.Load1, 0, 1e6)
 	m.Load5 = clampRange(m.Load5, 0, 1e6)
 	m.Load15 = clampRange(m.Load15, 0, 1e6)

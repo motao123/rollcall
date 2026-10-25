@@ -161,6 +161,12 @@ type Store struct {
 	// 只在内存里：在途窗口是毫秒级，重启后不可能还有旧上报在路上。
 	dropped map[string]int64
 
+	// nicResetPending 记录"网卡集合刚变化、下一条指标要重建流量基线"的节点。
+	// 与 handleNICSetLocked（置位）和 updateTrafficLocked（消费）在同一个
+	// AddMetrics 临界区里完成，不落盘——节点上 NICSet 已更新，重启后下一次
+	// 上报对比的仍是新值，不存在跨重启丢失的窗口。
+	nicResetPending map[string]bool
+
 	// 历史分片（data/series/<id>.json.gz）的增量写状态。
 	// writeSeq 是全局单调写序号；seriesSeq[id] 记录该节点最后一次写入的序号，
 	// seriesSaved[id] 记录已成功落盘的序号。Save 只写 seq > saved 的节点 ——
@@ -995,7 +1001,7 @@ func (s *Store) FlushSeries() error {
 
 // ---------- 指标 ----------
 
-func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) {
+func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics, nicSet ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 节点刚被删除时丢弃在途上报：删除与上报是并发的，删完之后再写一次
@@ -1005,6 +1011,12 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 	// 等路径可以先有数据后建节点。
 	if _, dropped := s.dropped[nodeID]; dropped {
 		return
+	}
+	// 统计网卡集合指纹（v1.27.0 起的 Agent 经 X-NIC-Set 头带来）：
+	// 集合变化 = 累计计数器口径变化，updateTrafficLocked 据此跳过一次增量
+	// 并标记周期不完整。可变参数是为兼容历史回填/demo 播种等无指纹的调用方。
+	if len(nicSet) > 0 && nicSet[0] != "" {
+		s.handleNICSetLocked(nodeID, nicSet[0])
 	}
 	r := s.series[nodeID]
 	if r == nil {
@@ -1039,6 +1051,25 @@ func (s *Store) AddMetrics(nodeID string, host model.HostInfo, m model.Metrics) 
 	s.updateTrafficLocked(nodeID, m)
 }
 
+// handleNICSetLocked 对比节点上一次上报的网卡集合指纹：
+// 变化时置 pendingNICReset，让紧随其后的 updateTrafficLocked 跳过一次增量。
+// 必须与 AddMetrics 同锁：对比、置位、消费在同一个临界区里完成，没有崩溃窗口。
+// 首次上报（旧值为空）只记录不重置——第一次没有"口径变化"可言。
+func (s *Store) handleNICSetLocked(nodeID, fp string) {
+	n := s.nodes[nodeID]
+	if n == nil {
+		return
+	}
+	old := n.NICSet
+	n.NICSet = fp
+	if old != "" && old != fp {
+		if s.nicResetPending == nil {
+			s.nicResetPending = map[string]bool{}
+		}
+		s.nicResetPending[nodeID] = true
+	}
+}
+
 // updateTrafficLocked 在指标入库时累加流量周期用量。
 // m.TS 已被服务端校正为当前时间，因此重置日按服务端时区计算。
 func (s *Store) updateTrafficLocked(nodeID string, m model.Metrics) {
@@ -1052,6 +1083,20 @@ func (s *Store) updateTrafficLocked(nodeID string, m model.Metrics) {
 		s.traffic[nodeID] = &model.TrafficCycle{
 			Start: start, LastRx: m.NetRx, LastTx: m.NetTx,
 		}
+		return
+	}
+	// 网卡集合刚发生变化：新读数与旧基线不可比（换了一组网卡求和），
+	// 跳变部分绝不能记成真实流量。只重建基线、标记周期不完整，
+	// 让"校正本期"有机会把服务商面板上的真实用量补进来。
+	if s.nicResetPending[nodeID] {
+		delete(s.nicResetPending, nodeID)
+		if tc.Start == start {
+			tc.LastRx, tc.LastTx = m.NetRx, m.NetTx
+			tc.Incomplete = true
+			return
+		}
+		// 恰逢周期切换则随新周期一并重建，不完整标记不带进新周期
+		*tc = model.TrafficCycle{Start: start, LastRx: m.NetRx, LastTx: m.NetTx}
 		return
 	}
 	if tc.Start != start {
@@ -1109,6 +1154,7 @@ func (s *Store) TrafficUsage(nodeID string) model.TrafficUsage {
 	if tc := s.traffic[nodeID]; tc != nil {
 		out.UsedRx, out.UsedTx = tc.UsedRx, tc.UsedTx
 		out.CycleStart = tc.Start
+		out.Incomplete = tc.Incomplete
 	}
 	out.Used = model.TrafficUsed(out.Mode, out.UsedRx, out.UsedTx)
 	return out
@@ -1421,6 +1467,8 @@ func (s *Store) AdjustTrafficUsed(nodeID string, want uint64) (model.TrafficUsag
 	default: // sum
 		tc.UsedRx, tc.UsedTx = want, 0
 	}
+	// 人工校正 = 以服务商面板为准，"不完整"的疑虑就此消除。
+	tc.Incomplete = false
 	s.mu.Unlock()
 	s.RequestSave()
 	return s.TrafficUsage(nodeID), true

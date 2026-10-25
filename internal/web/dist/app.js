@@ -1631,6 +1631,7 @@ async function viewNodeDetail(id) {
             <div class="info-row"><span class="info-k">负载 1/5/15</span><span class="info-v mono">${hasData ? `${(last.load1 || 0).toFixed(2)} / ${(last.load5 || 0).toFixed(2)} / ${(last.load15 || 0).toFixed(2)}` : '—'}</span></div>
             <div class="info-row"><span class="info-k">运行时长</span><span class="info-v">${hasData ? dur(last.uptime) : '—'}</span></div>
             <div class="info-row"><span class="info-k">TCP 连接</span><span class="info-v mono">${hasData ? last.tcpConn || 0 : '—'}</span></div>
+            ${hasData && (last.stealPct > 0 || last.iowaitPct > 0) ? `<div class="info-row"><span class="info-k">CPU steal / iowait</span><span class="info-v mono" title="steal 高通常意味着宿主机超售把 CPU 时间片偷走了">${(last.stealPct || 0).toFixed(1)}% / ${(last.iowaitPct || 0).toFixed(1)}%</span></div>` : ''}
             <div class="info-row"><span class="info-k">进程数</span><span class="info-v mono">${hasData ? last.procs || 0 : '—'}</span></div>
             <div class="info-row"><span class="info-k">Agent 版本</span><span class="info-v mono">${esc(n.agentVersion || '—')}${detail.agentOutdated ? ' <span class="badge warn">可升级</span>' : ''}</span></div>
             <div class="info-row"><span class="info-k">上报来源</span><span class="info-v mono">${esc(n.lastIP || '—')}</span></div>
@@ -1675,6 +1676,7 @@ async function viewNodeDetail(id) {
             </div>
             <div class="meter"><i style="width:${Math.min(100, quotaPctVal).toFixed(1)}%;background:${quotaPctVal >= 100 ? 'var(--crit)' : quotaPctVal >= 90 ? 'var(--warn)' : 'var(--ok)'}"></i></div>
             <div class="field-hint" style="margin-top:6px">已用 ${quotaPctVal.toFixed(1)}% · 口径 ${esc(trafficMode)}${traffic.cycleStart ? ' · 周期起点 ' + clock(traffic.cycleStart) : ''}</div>
+            ${traffic.incomplete ? '<div class="field-hint" style="color:var(--warn);margin-top:4px">⚠ 本周期经历过网卡集合变更（如 WARP/多 WAN 切换），计数可能不准——用「校正本期」按服务商面板数字修正。</div>' : ''}
           ` : `
             <div class="field-hint">未设置月度配额。可在 <a href="#/settings">设置 → 节点管理 → 编辑</a> 中填写，超过阈值时由「流量配额使用率」规则告警。</div>
           `}

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -31,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -115,6 +117,22 @@ func newNonce() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// nicSetFingerprint 计算所统计网卡集合的指纹：对网卡名排序后取 SHA-256 前 16 位。
+// 只用名字不用计数器值——口径变化的判据是"哪些网卡参与求和"，不是它们的读数。
+// 空集合返回空串（无 NIC 数据的旧上报不值得比较）。
+func nicSetFingerprint(nics []model.NICInfo) string {
+	if len(nics) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(nics))
+	for _, n := range nics {
+		names = append(names, n.Name)
+	}
+	sort.Strings(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, ",")))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func main() {
@@ -304,6 +322,12 @@ func main() {
 		// 用请求头而不是 JSON 字段：旧服务端启用了 DisallowUnknownFields，
 		// 加字段会让先升级 Agent 的节点整份上报被拒。
 		req.Header.Set("X-Agent-Version", version.Version)
+		// 统计网卡集合的指纹（沿用登录状态头的模式）：集合变化说明累计计数器的
+		// 口径变了（WARP/多 WAN 切换、网卡热插拔），服务端据此重建流量基线，
+		// 防止切换瞬间的大跳变被记成真实流量。旧服务端会忽略这个头。
+		if fp := nicSetFingerprint(m.NICs); fp != "" {
+			req.Header.Set("X-NIC-Set", fp)
+		}
 
 		resp, err := client.Do(req)
 		if err != nil {

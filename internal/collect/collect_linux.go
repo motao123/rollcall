@@ -47,11 +47,13 @@ import (
 
 // Collector 持有上一次 CPU 采样，用于计算区间使用率。
 type Collector struct {
-	cpuMu    sync.Mutex
-	prevIdle uint64
-	prevTot  uint64
-	hostOnce sync.Once
-	host     model.HostInfo
+	cpuMu      sync.Mutex
+	prevIdle   uint64
+	prevTot    uint64
+	prevSteal  uint64
+	prevIowait uint64
+	hostOnce   sync.Once
+	host       model.HostInfo
 }
 
 func New() *Collector { return &Collector{} }
@@ -211,15 +213,24 @@ func (c *Collector) Collect() model.Metrics {
 	// 读取与基线更新必须同锁完成，否则并发 Collect 可能让较旧的样本
 	// 覆盖较新的基线，算出错误的区间使用率。
 	c.cpuMu.Lock()
-	if idle, tot, ok := readCPU(); ok {
+	if idle, tot, steal, iowait, ok := readCPU(); ok {
 		if c.prevTot > 0 && tot > c.prevTot {
 			dTot := float64(tot - c.prevTot)
 			dIdle := float64(idle - c.prevIdle)
 			if dTot > 0 {
 				m.CPUPct = clamp((dTot-dIdle)/dTot*100, 0, 100)
+				// steal 是被宿主机拿走的时间片：VPS 上高 steal 意味着邻居超售，
+				// 这是「机器变卡但自己进程不忙」的直接证据。
+				if tot > c.prevSteal {
+					m.StealPct = clamp(float64(steal-c.prevSteal)/dTot*100, 0, 100)
+				}
+				if tot > c.prevIowait {
+					m.IowaitPct = clamp(float64(iowait-c.prevIowait)/dTot*100, 0, 100)
+				}
 			}
 		}
 		c.prevIdle, c.prevTot = idle, tot
+		c.prevSteal, c.prevIowait = steal, iowait
 	}
 	c.cpuMu.Unlock()
 
@@ -299,21 +310,22 @@ func clamp(v, lo, hi float64) float64 {
 	return v
 }
 
-// readCPU 返回 (idle 累计, total 累计)。
-func readCPU() (uint64, uint64, bool) {
+// readCPU 返回 (idle 累计, total 累计, steal 累计, iowait 累计)。
+// steal/iowait 在旧内核/某些容器里可能缺列，此时返回 0，上层按"无变化"跳过。
+func readCPU() (uint64, uint64, uint64, uint64, bool) {
 	f, err := os.Open("/proc/stat")
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	if !sc.Scan() {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	// cpu  user nice system idle iowait irq softirq steal guest guest_nice
 	fields := strings.Fields(sc.Text())
 	if len(fields) < 5 || fields[0] != "cpu" {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	var vals []uint64
 	for _, s := range fields[1:] {
@@ -335,7 +347,14 @@ func readCPU() (uint64, uint64, bool) {
 	if len(vals) > 9 {
 		total -= vals[9]
 	}
-	return idle, total, true
+	var steal, iowait uint64
+	if len(vals) > 7 {
+		steal = vals[7]
+	}
+	if len(vals) > 4 {
+		iowait = vals[4]
+	}
+	return idle, total, steal, iowait, true
 }
 
 func readMemInfo() map[string]uint64 {

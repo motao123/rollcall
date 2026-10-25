@@ -50,6 +50,10 @@ type Node struct {
 	// ClockSkew 是 Agent 自报时间与服务端时间的差值（秒，Agent − 服务端）。
 	// 只在收到签名上报时更新：未签名的上报里那个 ts 本身就不受信任。
 	ClockSkew int64 `json:"clockSkew,omitempty"`
+	// NICSet 是最近一次上报所统计网卡集合的指纹（Agent 计算，经请求头带来）。
+	// 集合变化意味着累计计数器的口径变了（WARP/多 WAN 切换、网卡热插拔），
+	// 服务端据此重建流量基线并标记周期不完整，防止跳变被记成真实流量。
+	NICSet string `json:"nicSet,omitempty"`
 	// LastLogin 是最近一次被记录的交互式登录（由上报写入，台账 API 不可改）。
 	// 同时用于通知去重：同一节点同一 (ts,user,host) 只推一次。
 	LastLogin *LoginEvent `json:"lastLogin,omitempty"`
@@ -99,10 +103,14 @@ type Metrics struct {
 	Uptime    uint64  `json:"uptime"` // 秒
 	Procs     int     `json:"procs"`
 	// DiskReadBytes / DiskWriteBytes 是累计磁盘 I/O 字节数。
-	DiskReadBytes  uint64      `json:"diskReadBytes,omitempty"`
-	DiskWriteBytes uint64      `json:"diskWriteBytes,omitempty"`
-	Mounts         []MountInfo `json:"mounts,omitempty"`
-	NICs           []NICInfo   `json:"nics,omitempty"`
+	DiskReadBytes  uint64 `json:"diskReadBytes,omitempty"`
+	DiskWriteBytes uint64 `json:"diskWriteBytes,omitempty"`
+	// StealPct / IowaitPct 是区间占比（0–100）。steal 高通常意味着宿主机
+	// 超售把 CPU 时间片偷走了；两者只在原始区间有值（聚合桶未落盘）。
+	StealPct  float64     `json:"stealPct,omitempty"`
+	IowaitPct float64     `json:"iowaitPct,omitempty"`
+	Mounts    []MountInfo `json:"mounts,omitempty"`
+	NICs      []NICInfo   `json:"nics,omitempty"`
 }
 
 // NICInfo 是单块网卡的累计流量。
@@ -121,6 +129,9 @@ type TrafficCycle struct {
 	LastTx uint64 `json:"lastTx"`
 	UsedRx uint64 `json:"usedRx"`
 	UsedTx uint64 `json:"usedTx"`
+	// Incomplete 表示本周期经历过"计数口径变化"（网卡集合变更 / 计数器
+	// 异常归零），用量数字可能与服务商面板对不上；「校正本期」可修正并清除。
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 // TrafficUsage 是节点当前流量周期的展示数据。
@@ -133,7 +144,10 @@ type TrafficUsage struct {
 	// Mode 是生效的流量口径（已归一化，空值不会出现）；
 	// Used 是按该口径合成的计费用量，前端与告警都应使用它而不是自己相加。
 	Mode string `json:"mode"`
-	Used uint64 `json:"used"`
+	// Incomplete 表示本周期经历过计数口径变化（网卡集合变更等），
+	// 用量可能不准；前端据此提示可用「校正本期」修正。
+	Used       uint64 `json:"used"`
+	Incomplete bool   `json:"incomplete,omitempty"`
 }
 
 // 流量口径取值。不同商家计费方式不同：有的收发相加，有的只算单边，
