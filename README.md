@@ -2,7 +2,26 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.22.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.22.1**（`./rollcall-server -version` 可查）。
+
+> **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
+>
+> ```bash
+> # ① 控制端：下载并校验（amd64，其他架构把 amd64 换掉即可）
+> V=v1.22.1; BASE="https://github.com/motao123/rollcall/releases/download/$V"
+> curl -fsSLO "$BASE/rollcall-server-linux-amd64" && curl -fsSLO "$BASE/SHA256SUMS"
+> sha256sum -c --ignore-missing SHA256SUMS
+> # ② 安装并体验演示模式（正式部署的 systemd 单元与端口要求见「五」）
+> sudo install -d -m 0755 /opt/rollcall
+> sudo install -m 0755 rollcall-server-linux-amd64 /opt/rollcall/rollcall-server
+> /opt/rollcall/rollcall-server -demo -addr 127.0.0.1:19080
+> # ③ 浏览器打开 http://127.0.0.1:19080 登录（密码见启动日志，或用 -admin-password 指定）
+> # ④ 面板「概览 → ＋ 接入节点」拿到一条安装命令，到目标 Linux 机器上执行
+> # ⑤ 回面板确认节点在线、指标在动
+> ```
+>
+> 注意：Agent 目前**仅 Linux 有指标采集**（其他平台可连接但无数据）；对外提供服务请先配好
+> HTTPS（见「八、安全设计要点」的三种方式）。
 
 **目录**：[为什么做](#一为什么做这个项目) · [核心功能](#二核心功能) · [数据采集](#三数据采集与展示) ·
 [界面设计](#四界面设计) · [快速开始](#五快速开始) · [更新与升级](#六更新与升级) ·
@@ -544,6 +563,8 @@ curl -fsSLO "$BASE/rollcall-server-linux-$ARCH"
 curl -fsSLO "$BASE/rollcall-agent-linux-$ARCH"
 curl -fsSLO "$BASE/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS      # 必须先校验再用
+chmod +x "rollcall-server-linux-$ARCH" "rollcall-agent-linux-$ARCH"
+# ↑ GitHub 资产没有执行位：想先 ./rollcall-server-linux-$ARCH -version 确认就得先 chmod
 
 sudo install -d -m 0755 /opt/rollcall
 sudo install -m 0755 "rollcall-server-linux-$ARCH" /opt/rollcall/rollcall-server
@@ -552,7 +573,7 @@ sudo install -m 0755 "rollcall-agent-linux-$ARCH" /usr/local/bin/rollcall-agent
 ```
 
 发布包由 CI 用 `make linux` 构建（`CGO_ENABLED=0 -trimpath -buildvcs=false`，静态链接，无 glibc 版本要求），
-`SHA256SUMS` 覆盖全部 12 个产物（server / agent / rollsign × 4 架构）。
+`SHA256SUMS` 覆盖全部 16 个产物（server / agent / mcp / rollsign × 4 架构，`v1.21.0` 起）。
 `v1.10.5` 之前的 tag 没有发布资产，只能走下面的源码构建。
 
 **方式 1：从源码构建**
@@ -819,6 +840,37 @@ curl -fsSL https://你的面板/agent/install.sh | sudo sh -s -- --upgrade
 > 3. 仅限可信内网：显式加 `-allow-insecure` 接受明文 HTTP（不推荐）。
 >
 > `-allow-public` 仅为兼容旧部署保留，已不再影响启动。
+
+反代最小配置（可直接粘贴）。⚠ 面板的实时刷新走 **SSE**（`/api/stream`），
+nginx 默认缓冲会把它攒住不吐，表现为「实时」角标停滞——两份配置都已是关闭缓冲的写法；
+同时记得给服务端配 `-trusted-proxies`，否则日志与失败限速会把所有访客算成同一个 IP：
+
+```caddy
+# Caddyfile —— 自动签发/续期证书，最省事（my.rollcall.example.com 换成你的域名）
+my.rollcall.example.com {
+    reverse_proxy 127.0.0.1:19080
+    # Caddy 对 SSE 默认流式透传，无需额外配置
+}
+```
+
+```nginx
+# /etc/nginx/sites-available/rollcall（证书用 certbot 签）
+server {
+    listen 443 ssl;
+    server_name my.rollcall.example.com;
+    ssl_certificate     /etc/letsencrypt/live/my.rollcall.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/my.rollcall.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:19080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;   # 服务端据此生成正确的安装命令
+        proxy_buffering off;                          # ★ SSE 必需：否则实时刷新停滞
+        proxy_read_timeout 1h;                        # SSE 长连接别被默认 60s 砍断
+    }
+}
+```
 
 完整参数：
 
@@ -1490,6 +1542,28 @@ certificate_days_remaining,uptime_percent_24h}`
 ---
 
 ## 十二、实际部署验证
+
+### v1.22.1（2026-10-25，入门体验批次）
+
+来源：一次终端用户视角的全流程审查（匿名克隆 → 发布包下载 → 源码构建 → 隔离部署 →
+Agent 接入 → 面板验证），从零到首台节点上报实测 < 3 分钟。本版修复审查发现的问题：
+
+- **install.sh 沙箱模式**：`RC_PREFIX=/abs/path sh install.sh …` 把二进制/配置/
+  systemd 单元样例/日志全部落在前缀下，不创建用户、不碰 systemd——在控制端本机
+  （或任何已装 Agent 的机器）演练接入不再有覆盖生产的风险；沙箱进程给出明确清理命令，
+  `--upgrade` 与沙箱互斥。生产服务器上用 RC_PREFIX 实机演练验证通过
+- **仓库卫生**：误提交的 `agent.exe`（9.3MB）移出跟踪，`.gitignore` 收敛为 `*.exe`——
+  匿名克隆从 8.7MB 降到「纯源码」体积
+- **README**：顶部新增「最短路径 5 步」（约 3 分钟）；方式 0 补 `chmod +x`
+  （GitHub 资产无执行位，先跑 `-version` 会撞 Permission denied）；
+  补 Caddy/nginx 反代最小配置——**含 SSE 必需的 `proxy_buffering off`**（nginx 默认
+  缓冲会把 `/api/stream` 攒住，面板实时刷新停滞且极难自查）与
+  `-trusted-proxies` 配套说明；产物数 12→16 的过期描述修正；
+  明确「Agent 仅 Linux 有指标采集」的预期（能力矩阵同步加行）
+- **新增 `SECURITY.md`**：漏洞报告走 GitHub Security Advisories，写明设计边界
+  （Agent 只读属特性非漏洞），旧版本只合修严重问题
+- 测试：install.sh 新增沙箱要素断言与 `sh -n` 语法回归（模板转义错误只有交给
+  shell 才会暴露）；23 包全绿
 
 ### v1.22.0（2026-10-25）
 
