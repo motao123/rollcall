@@ -213,14 +213,26 @@ hash_file() {
 download() {
   src=$1
   dst=$2
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 --connect-timeout 10 -o "$dst" "$src" ||
-      die "下载失败: $src"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -T 30 -O "$dst" "$src" || die "下载失败: $src"
-  else
-    die "缺少 curl 或 wget，无法下载二进制"
+  fetch_once() {
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL --retry 3 --connect-timeout 10 -o "$dst" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -T 30 -O "$dst" "$1"
+    else
+      die "缺少 curl 或 wget，无法下载二进制"
+    fi
+  }
+  if fetch_once "$src"; then
+    return 0
   fi
+  # GitHub 直连失败且配置了镜像前缀时回退重试一次。
+  # 镜像内容不可信没关系：--sha256 校验与发行验签都在下载之后执行。
+  if [ -n "$MIRROR" ]; then
+    case "$MIRROR" in */) ;; *) MIRROR="$MIRROR/" ;; esac
+    echo "[rollcall-upgrade] 直连下载失败，尝试镜像: $MIRROR"
+    fetch_once "${MIRROR}${src}" || true
+  fi
+  [ -s "$dst" ] || die "下载失败（含镜像回退）: $src"
 }
 
 health_ok() {
@@ -401,6 +413,7 @@ cmd=
 file=
 url=
 sha=
+MIRROR=${ROLLCALL_MIRROR:-}
 while [ $# -gt 0 ]; do
   case "$1" in
     upgrade | rollback) cmd=$1 ;;
@@ -413,6 +426,11 @@ while [ $# -gt 0 ]; do
     --signature) shift; SIGNATURE=${1:-} ;;
     --pubkey) shift; PUBKEY=${1:-}; PUBKEY_EXPLICIT=1 ;;
     --rollsign) shift; ROLLSIGN=${1:-} ;;
+    # 镜像前缀：GitHub 直连不通时的回退下载通道，形如 https://gh.example.com/
+    # 下载地址会变成 <mirror><原完整 URL>（ghproxy 类约定）。也可以用环境变量
+    # ROLLCALL_MIRROR 设置。镜像只影响下载来源；--sha256 与 --signature
+    # 仍然校验发布方的值，镜像被篡改时升级会在校验/验签处中止。
+    --mirror) shift; MIRROR=${1:-} ;;
     --allow-unsigned) ALLOW_UNSIGNED=1 ;;
     -h | --help | help) usage; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;

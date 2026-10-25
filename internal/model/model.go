@@ -24,6 +24,9 @@ type Node struct {
 	// 留空表示不在地图上展示。
 	Country  string `json:"country,omitempty"`
 	Favorite bool   `json:"favorite,omitempty"`
+	// AlertExempt 是台账级告警豁免：经常计划重启/迁移中的机器开了它，
+	// 任何节点指标规则都不再评估该节点，既有活跃告警以「节点告警豁免」为由关闭。
+	AlertExempt bool `json:"alertExempt,omitempty"`
 	// Tags 是自由标签，用于筛选与公开状态页分组展示。
 	Tags []string `json:"tags,omitempty"`
 	// TrafficQuotaGB 是每个流量周期的配额（GB，0 表示不限制）。
@@ -779,20 +782,22 @@ const (
 // %+v 调试输出或未来的 msgpack/protobuf 编码路径，上报令牌就会随视图外泄。
 // 结构性隔离比标签约束可靠。
 type NodeView struct {
-	ID       string       `json:"id"`
-	Name     string       `json:"name"`
-	Provider string       `json:"provider"`
-	Region   string       `json:"region"`
-	Group    string       `json:"group"`
-	Note     string       `json:"note"`
-	ExpireAt string       `json:"expireAt"`
-	Price    float64      `json:"price"`
-	Currency string       `json:"currency"`
-	Weight   int          `json:"weight"`
-	Country  string       `json:"country,omitempty"`
-	Favorite bool         `json:"favorite,omitempty"`
-	Traffic  TrafficUsage `json:"traffic"`
-	Tags     []string     `json:"tags,omitempty"`
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Provider string  `json:"provider"`
+	Region   string  `json:"region"`
+	Group    string  `json:"group"`
+	Note     string  `json:"note"`
+	ExpireAt string  `json:"expireAt"`
+	Price    float64 `json:"price"`
+	Currency string  `json:"currency"`
+	Weight   int     `json:"weight"`
+	Country  string  `json:"country,omitempty"`
+	Favorite bool    `json:"favorite,omitempty"`
+	// AlertExempt 台账级告警豁免（节点编辑/批量操作设置）。
+	AlertExempt bool         `json:"alertExempt,omitempty"`
+	Traffic     TrafficUsage `json:"traffic"`
+	Tags        []string     `json:"tags,omitempty"`
 
 	Host     HostInfo `json:"host"`
 	Latest   Metrics  `json:"latest"`
@@ -820,7 +825,8 @@ func NodeMeta(n *Node) NodeView {
 		ID: n.ID, Name: n.Name, Provider: n.Provider, Region: n.Region,
 		Group: n.Group, Note: n.Note, ExpireAt: n.ExpireAt,
 		Price: n.Price, Currency: n.Currency, Weight: n.Weight,
-		Country: n.Country, Favorite: n.Favorite, Tags: append([]string(nil), n.Tags...),
+		Country: n.Country, Favorite: n.Favorite, AlertExempt: n.AlertExempt,
+		Tags: append([]string(nil), n.Tags...),
 	}
 }
 

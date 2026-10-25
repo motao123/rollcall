@@ -193,6 +193,7 @@ func (s *Server) applyNotifyConfig(cfg *notify.Config) {
 		return
 	}
 	s.engine.SetRepeat(cfg.RepeatInterval)
+	s.engine.SetOfflineGrace(cfg.OfflineGraceSec)
 	s.engine.SetLink(s.panelLink)
 	if s.outbox != nil {
 		s.engine.SetNotifier(func(m notify.Message) { s.outbox.Enqueue(m) })
@@ -1891,6 +1892,7 @@ func (s *Server) handleAdminNodeByID(w http.ResponseWriter, r *http.Request) {
 		updated.Weight = in.Weight
 		updated.Country = in.Country
 		updated.Favorite = in.Favorite
+		updated.AlertExempt = in.AlertExempt
 		updated.Tags = in.Tags
 		updated.TrafficQuotaGB = in.TrafficQuotaGB
 		updated.TrafficResetDay = in.TrafficResetDay

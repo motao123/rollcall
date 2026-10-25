@@ -1160,6 +1160,7 @@ async function viewNodes() {
         <button class="btn tiny" data-batch="currency">改币种</button>
         <button class="btn tiny" data-batch="weight">改权重</button>
         <button class="btn tiny" data-batch="favorite">改收藏</button>
+        <button class="btn tiny" data-batch="exempt">告警豁免</button>
         <button class="btn tiny" data-batch="traffic">改流量</button>
         <button class="btn tiny" data-batch="tags">改标签</button>
         <button class="btn tiny" data-batch="upgrade">加入升级清单</button>
@@ -1293,6 +1294,7 @@ function bindBatchOps(list) {
       if (action === 'traffic') { openBatchTrafficDialog(ids, reload); return; }
       if (action === 'tags') { openBatchTagsDialog(ids, reload); return; }
       if (action === 'favorite') { openBatchFavoriteDialog(ids, reload); return; }
+      if (action === 'exempt') { openBatchExemptDialog(ids, reload); return; }
       if (action === 'weight') {
         const v = await modalPrompt('修改排序权重', '排序权重（-1000–1000，数字越小越靠前）', {
           type: 'number', value: '0', min: -1000, max: 1000,
@@ -1450,6 +1452,14 @@ function openBatchFavoriteDialog(ids, after) {
       { v: '1', t: '设为收藏（对比页优先展示）' }, { v: '0', t: '取消收藏' },
     ])}`,
   after, (f) => ({ favorite: f.favorite.value === '1' }));
+}
+
+function openBatchExemptDialog(ids, after) {
+  batchDialog(ids, '批量设置告警豁免', `
+    ${selectField('豁免状态', 'exempt', '1', [
+      { v: '1', t: '开启豁免（不再评估任何指标规则，既有告警关闭）' }, { v: '0', t: '关闭豁免（恢复正常评估）' },
+    ])}`,
+  after, (f) => ({ alertExempt: f.exempt.value === '1' }));
 }
 
 async function viewNodeDetail(id) {
@@ -3642,6 +3652,8 @@ async function viewSettings() {
             [{ v: 'info', t: '信息及以上' }, { v: 'warn', t: '警告及以上' }, { v: 'critical', t: '仅严重' }])}
           ${field('重复提醒间隔（秒）', 'nRepeat', cfg.repeatInterval || 0,
             { type: 'number', hint: '0 = 只通知一次，不重复' })}
+          ${field('离线宽限下限（秒）', 'nOfflineGrace', cfg.offlineGraceSec || 0,
+            { type: 'number', hint: '0 = 不干预；「节点失联」规则至少持续这么久才告警（规则设得更长以规则为准）' })}
         </div>
         <div class="sub-title" style="margin:16px 0 10px">降噪、摘要与到期提醒</div>
         <div class="form-grid">
@@ -4442,6 +4454,7 @@ async function viewSettings() {
       reportWeekly: c('reportWeekly'),
       reportMonthly: c('reportMonthly'),
       reportHour: Number(v('reportHour')),
+      offlineGraceSec: Math.max(0, Number(v('nOfflineGrace')) || 0),
       channels: chState,
     };
     const r = await adminApi('/api/admin/settings', { method: 'POST', body: JSON.stringify(body) });
@@ -5267,6 +5280,7 @@ function showNodeEdit(n, after) {
       ${field('标签', 'tags', (n.tags || []).join(', '), { placeholder: '例如：cn2, 高防, 备机', hint: '逗号分隔，最多 8 个；公开页开启「节点标签」后可见' })}
       ${field('排序权重', 'weight', n.weight, { type: 'number', placeholder: '0' })}
       ${checkbox('收藏（对比页优先展示）', 'favorite', !!n.favorite)}
+      ${checkbox('告警豁免（不再评估该节点的任何指标规则）', 'alertExempt', !!n.alertExempt)}
       <div class="form-actions">
         <button class="btn" type="button" id="editCancel">取消</button>
         <button class="btn primary" type="submit">保存</button>
@@ -5292,6 +5306,7 @@ function showNodeEdit(n, after) {
           trafficMode: d.trafficMode || 'sum',
           tags: splitTags(d.tags),
           note: d.note, weight: Number(d.weight) || 0, favorite: !!d.favorite,
+          alertExempt: !!d.alertExempt,
         }),
       });
       close();

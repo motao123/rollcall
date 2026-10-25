@@ -27,10 +27,12 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	var req struct {
 		IDs      []string `json:"ids"`
-		Action   string   `json:"action"` // group | provider | region | expire | currency | weight | favorite | traffic | tags | delete
+		Action   string   `json:"action"` // group | provider | region | expire | currency | weight | favorite | exempt | traffic | tags | delete
 		Value    string   `json:"value"`
 		Weight   *int     `json:"weight,omitempty"`
 		Favorite *bool    `json:"favorite,omitempty"`
+		// exempt 是台账级告警豁免开关（true=不再评估该节点的任何指标规则）。
+		AlertExempt *bool `json:"alertExempt,omitempty"`
 		// tags 相关：TagMode 决定追加、移除还是整体替换。
 		Tags    []string `json:"tags,omitempty"`
 		TagMode string   `json:"tagMode,omitempty"`
@@ -108,6 +110,11 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "favorite 参数缺失")
 			return
 		}
+	case "exempt":
+		if req.AlertExempt == nil {
+			fail(w, 400, "alertExempt 参数缺失")
+			return
+		}
 	case "traffic":
 		if req.TrafficQuotaGB == nil || *req.TrafficQuotaGB < 0 || *req.TrafficQuotaGB > 1000000 {
 			fail(w, 400, "trafficQuotaGb 必须在 0–1000000 之间")
@@ -168,6 +175,8 @@ func (s *Server) handleAdminNodesBatch(w http.ResponseWriter, r *http.Request) {
 				n.Weight = *req.Weight
 			case "favorite":
 				n.Favorite = *req.Favorite
+			case "exempt":
+				n.AlertExempt = *req.AlertExempt
 			case "traffic":
 				n.TrafficQuotaGB = *req.TrafficQuotaGB
 				n.TrafficResetDay = *req.TrafficResetDay

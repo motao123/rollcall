@@ -58,6 +58,9 @@ type Config struct {
 	ReportWeek  bool   `json:"reportWeekly"`  // 每周运行报告
 	ReportMonth bool   `json:"reportMonthly"` // 每月运行报告
 	ReportHour  int    `json:"reportHour"`    // 报告发送小时（本地时区）
+	// OfflineGraceSec 是离线类规则的全局宽限下限（秒）：只抬高不缩短，
+	// 规则自身 Duration 更长时以规则为准；0=不干预（保持每规则现状）。
+	OfflineGraceSec int `json:"offlineGraceSec"`
 }
 
 // Message 是一条待投递的通知。
@@ -197,6 +200,13 @@ func (c *Config) normalize() {
 	if c.RepeatInterval > 7*86400 {
 		c.RepeatInterval = 7 * 86400
 	}
+	// 离线宽限下限：上限对齐最长规则时长（7 天），负数视为关闭。
+	if c.OfflineGraceSec < 0 {
+		c.OfflineGraceSec = 0
+	}
+	if c.OfflineGraceSec > 7*86400 {
+		c.OfflineGraceSec = 7 * 86400
+	}
 	// 免打扰：-1 关闭；起止相同视为关闭（旧配置两个字段都是 0）。
 	if c.QuietStart < 0 {
 		c.QuietStart = -1
@@ -288,20 +298,21 @@ func (c *Config) Validate() error {
 // Redacted 返回脱敏副本（敏感字段以掩码替换），用于下发前端。
 func (c *Config) Redacted() *Config {
 	cp := &Config{
-		Enabled:        c.Enabled,
-		MinSeverity:    c.MinSeverity,
-		RepeatInterval: c.RepeatInterval,
-		QuietStart:     c.QuietStart,
-		QuietEnd:       c.QuietEnd,
-		DigestMins:     c.DigestMins,
-		TitleFormat:    c.TitleFormat,
-		BodyFormat:     c.BodyFormat,
-		ExpiryDays:     c.ExpiryDays,
-		ReportDaily:    c.ReportDaily,
-		ReportWeek:     c.ReportWeek,
-		ReportMonth:    c.ReportMonth,
-		ReportHour:     c.ReportHour,
-		Channels:       make([]ChannelConfig, 0, len(c.Channels)),
+		Enabled:         c.Enabled,
+		MinSeverity:     c.MinSeverity,
+		RepeatInterval:  c.RepeatInterval,
+		QuietStart:      c.QuietStart,
+		QuietEnd:        c.QuietEnd,
+		DigestMins:      c.DigestMins,
+		TitleFormat:     c.TitleFormat,
+		BodyFormat:      c.BodyFormat,
+		ExpiryDays:      c.ExpiryDays,
+		ReportDaily:     c.ReportDaily,
+		ReportWeek:      c.ReportWeek,
+		ReportMonth:     c.ReportMonth,
+		ReportHour:      c.ReportHour,
+		OfflineGraceSec: c.OfflineGraceSec,
+		Channels:        make([]ChannelConfig, 0, len(c.Channels)),
 	}
 	for _, ch := range c.Channels {
 		sk := secretKeys(ch.Type)

@@ -42,9 +42,11 @@ type Engine struct {
 	// 机房整体掉线时原来是"每台一条、每 30 秒最多 8 条"，能连刷好几分钟。
 	batching bool
 	batch    []batchItem
-	repeat   int          // 重复通知间隔（秒），0=不重复
-	link     string       // 面板地址，拼进通知
-	clk      func() int64 // 取当前 Unix 秒，测试可替换
+	repeat   int // 重复通知间隔（秒），0=不重复
+	// offlineGrace 是离线类规则的全局宽限下限（秒），0=不干预。
+	offlineGrace int64
+	link         string       // 面板地址，拼进通知
+	clk          func() int64 // 取当前 Unix 秒，测试可替换
 }
 
 // batchItem 是一条待合并的离线/恢复通知。
@@ -152,6 +154,18 @@ func (e *Engine) SetRepeat(sec int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.repeat = sec
+}
+
+// SetOfflineGrace 设置离线类规则的全局宽限下限（秒）。
+// 只抬高不缩短：规则自己的 Duration 更长时以规则为准。
+// 0 表示不干预（保持每规则 Duration 的现状）。
+func (e *Engine) SetOfflineGrace(sec int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if sec < 0 {
+		sec = 0
+	}
+	e.offlineGrace = int64(sec)
 }
 
 // SetLink 设置通知里附带的面板地址。
@@ -315,6 +329,11 @@ func (e *Engine) requiredDuration(rule *model.AlertRule, key string, now int64, 
 		return need
 	}
 	e.mu.Lock()
+	// 全局离线宽限下限：只抬高不缩短，规则设得更长时以规则为准。
+	// 与 flap 状态同锁读取，避免与 SetOfflineGrace 竞争。
+	if e.offlineGrace > need {
+		need = e.offlineGrace
+	}
 	rec, ok := e.recAt[key]
 	e.mu.Unlock()
 	if !ok || now-rec >= flapWindow {
@@ -482,6 +501,30 @@ func (e *Engine) emitMessage(m notify.Message) {
 }
 
 // Evaluate 执行一轮评估。
+// closeNodeRule 关闭某节点在某规则下的活跃告警并清空引擎状态，
+// 用于计划维护、台账级豁免与规则范围调整三类"不再评估"的收尾。
+// 三处必须走同一条路径：漏清 since/active 的话，恢复评估后同一条
+// 告警会被判成"已经持续很久"而立即触发。
+func (e *Engine) closeNodeRule(rule *model.AlertRule, n *model.Node, key, reason string) {
+	e.mu.Lock()
+	prev := e.active[key]
+	delete(e.since, key)
+	delete(e.active, key)
+	delete(e.lastAt, key)
+	delete(e.recAt, key)
+	e.mu.Unlock()
+	if e.st.ResolveAlert(rule.ID, n.ID) {
+		if prev == nil {
+			prev = &model.Alert{
+				RuleID: rule.ID, RuleName: rule.Name,
+				NodeID: n.ID, NodeName: n.Name,
+				Severity: rule.Severity,
+			}
+		}
+		e.recoverClosedLocked([]*model.Alert{prev}, reason, "")
+	}
+}
+
 func (e *Engine) Evaluate() {
 	e.evalMu.Lock()
 	defer e.evalMu.Unlock()
@@ -536,48 +579,19 @@ func (e *Engine) Evaluate() {
 				m = maintGlobal
 			}
 			if m != nil {
-				// 计划维护：关掉该节点在此规则下的活跃告警并清空引擎状态。
-				// 这里必须走与"规则范围调整"相同的收尾路径，否则 since/active
-				// 会残留，窗口结束后同一条告警被判成"已经持续很久"而立即触发。
-				e.mu.Lock()
-				prev := e.active[key]
-				delete(e.since, key)
-				delete(e.active, key)
-				delete(e.lastAt, key)
-				delete(e.recAt, key)
-				e.mu.Unlock()
-				if e.st.ResolveAlert(rule.ID, n.ID) {
-					if prev == nil {
-						prev = &model.Alert{
-							RuleID: rule.ID, RuleName: rule.Name,
-							NodeID: n.ID, NodeName: n.Name,
-							Severity: rule.Severity,
-						}
-					}
-					e.recoverClosedLocked([]*model.Alert{prev}, maintenanceReason(m), "")
-				}
+				e.closeNodeRule(rule, n, key, maintenanceReason(m))
+				continue
+			}
+			// 台账级豁免：与计划维护同一收尾路径。经常计划重启/迁移中的
+			// 机器开着豁免，关掉后这里的清理保证恢复评估时不误判"已持续很久"。
+			if n.AlertExempt {
+				e.closeNodeRule(rule, n, key, "节点告警豁免")
 				continue
 			}
 			if !ruleApplies(rule, n) {
 				// 规则改为定向后，原先命中但已不在范围内的节点需要关闭告警，
 				// 否则会留下永远无人恢复的「进行中」条目。
-				e.mu.Lock()
-				prev := e.active[key]
-				delete(e.since, key)
-				delete(e.active, key)
-				delete(e.lastAt, key)
-				delete(e.recAt, key)
-				e.mu.Unlock()
-				if e.st.ResolveAlert(rule.ID, n.ID) {
-					if prev == nil {
-						prev = &model.Alert{
-							RuleID: rule.ID, RuleName: rule.Name,
-							NodeID: n.ID, NodeName: n.Name,
-							Severity: rule.Severity,
-						}
-					}
-					e.recoverClosedLocked([]*model.Alert{prev}, "规则范围已调整", "")
-				}
+				e.closeNodeRule(rule, n, key, "规则范围已调整")
 				continue
 			}
 			seen[key] = struct{}{}
