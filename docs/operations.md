@@ -16,6 +16,7 @@
 | Agent 配置 | `/etc/rollcall/agent.json` | `root:rollcall-agent 0640` |
 | Agent 单元 | `/etc/systemd/system/rollcall-agent.service` | 以 `rollcall-agent` 用户运行 |
 | Agent 分发目录 | `/opt/rollcall/agent` | 仅启用 `-agent-dir` 时存在；含 amd64/arm64/arm/386 二进制，供一键安装与升级下载 |
+| TLS 证书（v1.29.0+） | `/etc/rollcall/tls/` | 自签证书（10 年，SAN 含面板 IP/127.0.0.1/localhost），属主 `rollcall` 0640/0600；经 `/etc/systemd/system/rollcall-server.service.d/tls.conf` drop-in 启用内置 TLS。回滚 = 删除 drop-in + `daemon-reload` + restart。Agent 侧 agent.json 已切 https 并带 `tlsSkipVerify: true`（切换前明文配置备份为 `agent.json.http-bak`） |
 
 ### 容量基线
 
