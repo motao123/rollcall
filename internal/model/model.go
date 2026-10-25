@@ -609,9 +609,17 @@ func NormalizeSections(in []string) []string {
 
 // DefaultStatusPage 返回默认配置。
 // 默认只公开"对外可说"的聚合指标，主机指纹类字段一律关闭。
+//
+// Enabled 默认开启（v1.25.0 起的产品决策）：状态页是探针的核心卖点，
+// 装好就该能看到，而不是先撞一个 404 再去翻文档找开关。脱敏保证
+// （无 IP/价格/到期日/主机指纹）不受此影响；不想公开的实例用
+// 「状态页 → 总开关」显式关闭，或配访问令牌变成私享链接。
+// 显式关闭过的配置（enabled=false）升级后保持关闭。
 func DefaultStatusPage() StatusPage {
+	on := true
 	return StatusPage{
-		Title: "服务状态",
+		Enabled: &on,
+		Title:   "服务状态",
 		Visibility: StatusVisibility{
 			Metrics: true, Load: true, Uptime: true,
 			Traffic: true, Procs: false, TCPConn: false, Swap: false,

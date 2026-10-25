@@ -57,20 +57,44 @@ func get(h http.Handler, path string, headers map[string]string, cookies ...*htt
 	return w
 }
 
-// TestPublicStatusClosedByDefault 覆盖最关键的一条：没有显式打开就是 404。
-// 公开页会暴露节点名（通常等于服务商 + 地区）与在线状态，默认必须是关的。
-func TestPublicStatusClosedByDefault(t *testing.T) {
-	h, _ := gateEnv(t, nil)
+// TestPublicStatusDisabledStays404 覆盖显式关闭的语义：管理员关掉总开关后
+// 依然是一律 404（不回 403，避免向扫描器暴露"这里确实有个页面"）。
+// v1.25.0 起默认开启（见 DefaultStatusPage），默认路径由
+// TestPublicStatusOpenByDefault 覆盖。
+func TestPublicStatusDisabledStays404(t *testing.T) {
+	h, _ := gateEnv(t, func(c *model.StatusPage) {
+		off := false
+		c.Enabled = &off
+	})
 
 	for _, path := range []string{"/status", "/status.css", "/api/status", "/vendor/element-plus/index.css"} {
 		if w := get(h, path, nil); w.Code != http.StatusNotFound {
-			t.Fatalf("%s 默认应 404，实际 %d", path, w.Code)
+			t.Fatalf("%s 显式关闭后应 404，实际 %d", path, w.Code)
 		}
 	}
 	// API 路径要回 JSON，前端才不会解析 HTML 报错
 	w := get(h, "/api/status", nil)
 	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Fatalf("API 404 应回 JSON，实际 %q", ct)
+	}
+}
+
+// TestPublicStatusOpenByDefault v1.25.0 产品决策：状态页默认开启。
+// 装好即可看到（脱敏保证不变：无 IP/价格/到期日/主机指纹）；
+// 不想公开的实例显式关闭（上面的测试）或配令牌。
+func TestPublicStatusOpenByDefault(t *testing.T) {
+	h, _ := gateEnv(t, nil) // 不做任何配置：默认值生效
+
+	for _, path := range []string{"/status", "/status.css", "/api/status"} {
+		if w := get(h, path, nil); w.Code != http.StatusOK {
+			t.Fatalf("%s 默认应 200（v1.25.0 起默认开启），实际 %d", path, w.Code)
+		}
+	}
+	// 公开 API 必须仍是脱敏形状（enablePublicStatus 的既有测试覆盖字段级，
+	// 这里确认默认路径与显式开启走的是同一条放行逻辑）。
+	w := get(h, "/api/status", nil)
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("公开 API 应回 JSON，实际 %q", ct)
 	}
 }
 

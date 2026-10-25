@@ -14,11 +14,11 @@ const publicStatusCookie = "rollcall_st"
 // publicGate 给公开页及其全部资源套上"总开关 + 访问令牌"。
 //
 // 两层门槛的意义不同：
-//   - Enabled 是总开关。公开页会暴露节点名（通常等于"服务商 + 地区"）、
-//     在线状态与可用率，等于资产清单，默认必须是关的。
+//   - Enabled 是总开关。v1.25.0 起默认开启（产品决策：探针装好就该有
+//     状态页，脱敏保证不变）；显式关闭后对匿名一律 404。
 //   - Token 是"知道链接才进得来"，不是账号体系；为空表示不校验。
 //
-// 未开放时一律返回 404 而不是 403：403 等于告诉扫描器"这里确实有个页面"。
+// 关闭时一律返回 404 而不是 403：403 等于告诉扫描器"这里确实有个页面"。
 func (s *Server) publicGate(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.st.StatusPage()
