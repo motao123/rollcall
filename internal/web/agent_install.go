@@ -264,6 +264,8 @@ agent_user_from_config() {
 
 start_agent_bg() {
     LOG=$LOG_FILE
+    # 沙箱前缀下的日志目录不存在（默认 /var/log 总是存在，mkdir -p 无害）。
+    mkdir -p -- "$(dirname -- "$LOG")"
     : >> "$LOG"
     if [ -n "${RUN_AS:-}" ] && [ "$RUN_AS" != "root" ] \
         && command -v runuser >/dev/null 2>&1 && id -u "$RUN_AS" >/dev/null 2>&1; then
