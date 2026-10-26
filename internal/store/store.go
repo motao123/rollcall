@@ -836,6 +836,29 @@ func (s *Store) UpsertNode(n *model.Node) {
 	s.RequestSave()
 }
 
+// UpsertNodes 批量写入节点，整批只落盘一次。
+//
+// 逐条 UpsertNode 会为每个节点各写一次快照：导入 40 台就是 40 次全量 gzip，
+// 而它们本就该是一次操作。语义与 UpsertNode 相同（撤销墓碑、补建序列）。
+func (s *Store) UpsertNodes(nodes []*model.Node) {
+	if len(nodes) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for _, n := range nodes {
+		delete(s.dropped, n.ID)
+		if _, ok := s.nodes[n.ID]; !ok {
+			if s.series[n.ID] == nil {
+				s.series[n.ID] = NewRing(RingSize)
+			}
+		}
+		s.nodes[n.ID] = n
+	}
+	s.mu.Unlock()
+	// 与单条一致：新建节点立刻落盘，否则崩溃会连同刚生成的令牌一起丢。
+	s.RequestSave()
+}
+
 // UpdateNode 在持锁状态下按字段更新单个节点。
 //
 // 批量操作若先 Node() 取副本、改完再 UpsertNode() 整条写回，会把两次

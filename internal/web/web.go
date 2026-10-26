@@ -333,6 +333,8 @@ func (s *Server) routes(static http.Handler) []route {
 		// 管理写操作与运营数据导出：管理令牌或面板会话
 		{"/api/admin/nodes", authAdmin, http.HandlerFunc(s.handleAdminNodes)},
 		{"/api/admin/nodes/batch", authAdmin, http.HandlerFunc(s.handleAdminNodesBatch)},
+		// 批量建节点（迁移用）：单条失败不打断整批，响应带每台的接入命令。
+		{"/api/admin/nodes/import", authAdmin, http.HandlerFunc(s.handleAdminNodesImport)},
 		{"/api/admin/nodes/", authAdmin, http.HandlerFunc(s.handleAdminNodeByID)},
 		{"/api/admin/agent-upgrades", authAdmin, http.HandlerFunc(s.handleAdminAgentUpgrades)},
 		{"/api/admin/agent-upgrades/", authAdmin, http.HandlerFunc(s.handleAdminAgentUpgradeByID)},

@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -707,6 +709,34 @@ func (s *Server) handleAgentChecksum(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = io.WriteString(w, hex.EncodeToString(h.Sum(nil))+"\n")
+}
+
+// agentInstallCommand 拼出一行接入命令（与面板「节点接入」展示的一致）。
+//
+// 放在服务端而不是只在前端拼：批量导入的响应里要直接给出每台机器的命令，
+// 两处各写一份迟早跑偏（例如漏了 --allow-insecure，命令会直接拒绝执行）。
+func (s *Server) agentInstallCommand(base, nodeID, token string) string {
+	flag := ""
+	if strings.HasPrefix(base, "http://") && !isLoopbackBase(base) {
+		flag = "--allow-insecure "
+	}
+	return fmt.Sprintf("curl -fsSL %s/agent/install.sh | sh -s -- %s%s %s %s",
+		base, flag, base, nodeID, token)
+}
+
+// isLoopbackBase 判断控制端地址是否是回环（回环上的明文 HTTP 不要求
+// --allow-insecure：链路不出本机）。
+func isLoopbackBase(base string) bool {
+	u, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // handleAgentTLSPin 返回本实例 TLS 证书的 SHA-256 指纹（小写十六进制）。

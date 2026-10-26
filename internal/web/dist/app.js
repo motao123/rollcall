@@ -3583,6 +3583,21 @@ async function viewSettings() {
         即可只替换二进制、保留现有配置（需服务端启用 <code>-agent-dir</code>）。
       </p>
       <details class="panel panel-pad">
+        <summary class="sum">⇪ 批量导入（迁移用）</summary>
+        <p class="field-hint" style="margin:8px 0">
+          一行一台，逗号或制表符分隔：<code>名称,服务商,地区,国家,分组</code>（后四项可留空）。
+          重名或格式不对的行会被跳过并逐行列出，不会打断整批。导入后每台都会生成一行接入命令。
+        </p>
+        <form id="nodeImportForm">
+          <label class="field">
+            <span class="field-label">节点列表</span>
+            <textarea name="list" rows="5" placeholder="香港-01,racknerd,圣何塞,US,prod
+东京-02,绿云,东京,JP,prod"></textarea>
+          </label>
+          <div class="form-actions"><button class="btn primary" type="submit">导入并生成接入命令</button></div>
+        </form>
+      </details>
+      <details class="panel panel-pad">
         <summary class="sum">＋ 新增节点</summary>
         <form id="nodeForm" class="form-grid">
           ${field('名称', 'name', '', { required: true, placeholder: '例如 prod-01', hint: '会显示在公开状态页，勿填主机名/IP' })}
@@ -4280,6 +4295,29 @@ async function viewSettings() {
     };
   });
 
+  $('#nodeImportForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const raw = (e.target.querySelector('textarea[name=list]').value || '');
+    const rows = raw.split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('#'));
+    if (!rows.length) { toast('没有可导入的行', 'err'); return; }
+    // 列序固定：名称,服务商,地区,国家,分组；多余列忽略。
+    const nodes = rows.map((line) => {
+      const c = line.split(/[,\t]/).map((x) => x.trim());
+      return { name: c[0] || '', provider: c[1] || '', region: c[2] || '',
+        country: (c[3] || '').toUpperCase(), group: c[4] || '' };
+    });
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/nodes/import', { method: 'POST', body: JSON.stringify({ nodes }) });
+      showImportResult(r);
+    } catch (err) {
+      toast('导入失败：' + err.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
   $('#nodeForm').onsubmit = async (e) => {
     e.preventDefault();
     const d = formData(e.target);
@@ -4531,6 +4569,41 @@ function agentServerURL() {
 }
 
 // showAgentConfig 展示（或轮换后重新展示）节点接入指引
+// showImportResult 展示批量导入结果：每台的接入命令 + 被跳过的行。
+// 用弹窗而不是页面内嵌块：导入后要刷新节点列表，内嵌块会被重渲染清掉；
+// 而这批命令正是用户接下来要逐台粘贴的东西，不能刷一下就没。
+function showImportResult(r) {
+  const created = r.created || [];
+  const skipped = r.skipped || [];
+  const cmds = created.map((c) => `# ${c.name}
+${c.command}`).join('\n');
+  const dlg = document.createElement('div');
+  dlg.className = 'modal-mask';
+  dlg.innerHTML = `<div class="modal" style="max-width:720px">
+    <div class="modal-title">批量导入结果</div>
+    <p class="modal-sub">已创建 <b>${created.length}</b> 个节点${skipped.length ? `，跳过 <b>${skipped.length}</b> 行` : ''}。
+      把下面的命令逐条贴到对应服务器的 root shell（每台一条，已含该节点自己的令牌）。</p>
+    ${created.length ? `<pre class="code" style="max-height:240px;overflow:auto">${esc(cmds)}</pre>
+      <div class="form-actions" style="justify-content:flex-start">
+        <button class="btn tiny" id="copyImportCmds" type="button">复制全部命令</button>
+      </div>` : ''}
+    ${skipped.length ? `<p class="modal-sub" style="color:var(--warn)">跳过的行：<br>${skipped
+      .map((x) => `第 ${x.index + 1} 行 ${esc(x.name || '(空)')} — ${esc(x.reason)}`).join('<br>')}</p>` : ''}
+    <div class="form-actions"><button class="btn primary" id="importDone" type="button">完成</button></div>
+  </div>`;
+  document.body.appendChild(dlg);
+  const close = () => { dlg.remove(); viewSettings(); };
+  dlg.querySelector('#importDone').onclick = close;
+  dlg.onclick = (e) => { if (e.target === dlg) close(); };
+  const cb = dlg.querySelector('#copyImportCmds');
+  if (cb) {
+    cb.onclick = async () => {
+      await navigator.clipboard.writeText(cmds);
+      toast('已复制 ' + created.length + ' 条命令');
+    };
+  }
+}
+
 function showAgentConfig(node) {
   const server = agentServerURL();
   let host = '';
