@@ -47,6 +47,7 @@ func main() {
 	resetAdminPassword := flag.Bool("reset-admin-password", false, "用 -admin-password/ROLLCALL_ADMIN_PASSWORD 重置管理员密码，并使旧会话失效")
 	basicAuth := flag.String("auth", "", "兼容用 Basic Auth，格式 user:password（面板 UI 不再使用，留空则不启用）")
 	panelLink := flag.String("panel-link", "", "面板对外地址（拼进告警通知，可留空）")
+	tzName := flag.String("timezone", "", "时区（IANA 名，如 Asia/Shanghai）；留空则跟随系统 TZ")
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 HTTPS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
 	allowPublic := flag.Bool("allow-public", false, "已废弃：面板账号登录默认启用，该开关不再影响启动")
@@ -74,6 +75,13 @@ func main() {
 		fmt.Printf("rollcall-server %s\n", version.Version)
 		return
 	}
+	// 时区必须最先确定：日报/免打扰/流量周期/到期提醒都按 time.Local 计算。
+	// 服务器（尤其容器）默认 UTC 时，"每天 9 点"会在另一个时刻触发，
+	// 而界面上看不出来 —— 所以这里显式打一行日志并显示在设置页。
+	if _, err := applyTimezone(*tzName); err != nil {
+		log.Fatalf("%v", err)
+	}
+	log.Printf("时区: %s（当前 %s）", time.Local, time.Now().Format("2006-01-02 15:04 MST"))
 	if *probeEvery <= 0 {
 		log.Fatal("-probe-interval 必须大于 0")
 	}

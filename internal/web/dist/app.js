@@ -22,6 +22,7 @@ const state = {
   alertPage: 1,
   data: {},
   panelLink: '',
+  timezone: '',
   authRequired: false,
   authenticated: false,
   user: null,
@@ -3432,6 +3433,7 @@ async function viewSettings() {
     chans = st.channels || [];
     defs = st.defs || [];
     state.panelLink = st.panelLink || '';
+    state.timezone = st.timezone || '';
     state.serverVersion = st.version || '';
   } catch (e) {
     if (e.status === 401) return;
@@ -3604,6 +3606,12 @@ async function viewSettings() {
           <div class="form-actions"><button class="btn primary" type="submit">保存地址</button></div>
         </form>
         <p class="field-hint" id="panelLinkHint" style="margin:6px 0 0"></p>
+        <p class="field-hint" style="margin:8px 0 0">
+          服务器时区：<code>${esc(state.timezone || '跟随系统')}</code>
+          —— 日报/周报的发送时刻、免打扰窗口、流量周期的每月起始日都按它算。
+          服务器（尤其容器）默认是 <code>UTC</code>：此时「每天 9 点」会在另一个时刻触发。
+          用启动参数 <code>-timezone Asia/Shanghai</code> 或环境变量 <code>TZ</code> 指定。
+        </p>
       </details>
       <details class="panel panel-pad">
         <summary class="sum">⇪ 批量导入（迁移用）</summary>

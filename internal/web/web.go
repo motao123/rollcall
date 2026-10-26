@@ -2155,7 +2155,10 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			"channels":  cfg.EnabledChannels(),
 			"defs":      notify.Defs(),
 			"panelLink": s.PanelLink(),
-			"version":   version.Version,
+			// 时区：日报/免打扰/流量周期都按它算。显示出来是因为服务器是 UTC 时
+			// 用户看不出"9 点日报"其实在另一个时刻触发。
+			"timezone": time.Local.String(),
+			"version":  version.Version,
 		}
 		if warn != "" {
 			out["warning"] = warn
