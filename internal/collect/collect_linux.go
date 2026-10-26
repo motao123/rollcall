@@ -425,18 +425,23 @@ func readNetDev() (rx, tx uint64, nics []model.NICInfo) {
 }
 
 // readTempC 返回 hwmon 传感器的最高温度（℃）；找不到任何有效读数时返回 0。
+func readTempC() float64 {
+	return readTempCFrom("/sys/class/hwmon")
+}
+
+// readTempCFrom 是 readTempC 的可测形态：从指定目录读 hwmon。
 //
 // 只认 >0 的读数：部分虚拟化环境会暴露恒为 0 的传感器文件，
 // 那种"0℃"不是数据，混进来会把真实温度永远压成 0。
 // 取最大值而不是平均值：温度告警关心的是"最热的那一点"。
-func readTempC() float64 {
-	entries, err := os.ReadDir("/sys/class/hwmon")
+func readTempCFrom(hwmonDir string) float64 {
+	entries, err := os.ReadDir(hwmonDir)
 	if err != nil {
 		return 0
 	}
 	var maxC float64
 	for _, e := range entries {
-		inputs, _ := filepath.Glob("/sys/class/hwmon/" + e.Name() + "/temp*_input")
+		inputs, _ := filepath.Glob(hwmonDir + "/" + e.Name() + "/temp*_input")
 		for _, p := range inputs {
 			b, err := os.ReadFile(p)
 			if err != nil {
