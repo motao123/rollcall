@@ -1,0 +1,3 @@
+# 前端资源强制 LF：go:embed 嵌原始字节，CRLF 会改变二进制 digest
+#（v1.35.3 本地构建曾因此与 CI 不一致）
+internal/web/dist/** text eol=lf
