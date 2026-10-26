@@ -1,5 +1,8 @@
 # 构建产物：仅仓库根目录下的 dist/（make linux 的交叉编译输出）。
 # ⚠ 必须写成 /dist/ 用前导斜杠锚定根目录。
+
+# 本地签名构建工作目录（rollsign 签名用，产物走 Release，不入库）
+/build-*/
 #   若写成 dist/，会连 internal/web/dist/ 一起忽略 ——
 #   那是被 go:embed 嵌入的前端源码（app.js / index.html / style.css / status.js），
 #   漏跟踪会导致克隆仓库后无法编译：
