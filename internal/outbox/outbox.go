@@ -10,6 +10,7 @@ package outbox
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,6 +168,7 @@ func (m *Manager) Enqueue(msg notify.Message) bool {
 		NodeName:      msg.NodeName,
 		Severity:      msg.Severity,
 		Resolved:      msg.Resolved,
+		Channels:      msg.ChannelIDs,
 		Title:         msg.Title,
 		Body:          msg.Body,
 		Value:         msg.Value,
@@ -434,18 +436,19 @@ func (m *Manager) work(job *model.NotifyJob) {
 
 func jobMessage(job *model.NotifyJob) notify.Message {
 	return notify.Message{
-		Title:    job.Title,
-		Body:     job.Body,
-		Severity: job.Severity,
-		NodeName: job.NodeName,
-		NodeID:   job.NodeID,
-		RuleID:   job.RuleID,
-		RuleName: job.RuleName,
-		AlertID:  job.AlertID,
-		Value:    job.Value,
-		Resolved: job.Resolved,
-		TS:       job.EventTS,
-		Link:     job.Link,
+		ChannelIDs: job.Channels,
+		Title:      job.Title,
+		Body:       job.Body,
+		Severity:   job.Severity,
+		NodeName:   job.NodeName,
+		NodeID:     job.NodeID,
+		RuleID:     job.RuleID,
+		RuleName:   job.RuleName,
+		AlertID:    job.AlertID,
+		Value:      job.Value,
+		Resolved:   job.Resolved,
+		TS:         job.EventTS,
+		Link:       job.Link,
 	}
 }
 
@@ -583,14 +586,40 @@ func digestMessage(jobs []*model.NotifyJob) notify.Message {
 		nodeLabel = fmt.Sprintf("%s 等 %d 个节点", names[0], len(names))
 	}
 	return notify.Message{
-		Title:    fmt.Sprintf("%d 条告警汇总", len(jobs)),
-		Body:     strings.TrimRight(b.String(), "\n"),
-		Severity: sev,
-		NodeName: nodeLabel,
-		RuleName: "聚合摘要",
-		TS:       time.Now().Unix(),
-		Link:     link,
+		ChannelIDs: digestChannels(jobs),
+		Title:      fmt.Sprintf("%d 条告警汇总", len(jobs)),
+		Body:       strings.TrimRight(b.String(), "\n"),
+		Severity:   sev,
+		NodeName:   nodeLabel,
+		RuleName:   "聚合摘要",
+		TS:         time.Now().Unix(),
+		Link:       link,
 	}
+}
+
+// digestChannels 求摘要的目标渠道集合。
+//
+// 只要有一条告警没限定渠道，摘要就必须发给全部渠道 —— 否则那条告警
+// 会被"摘要"这个容器一起投到一个它本不该去的地方（或反过来漏掉）。
+func digestChannels(jobs []*model.NotifyJob) []string {
+	seen := make(map[string]struct{}, 4)
+	for _, j := range jobs {
+		if len(j.Channels) == 0 {
+			return nil
+		}
+		for _, id := range j.Channels {
+			seen[id] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resultSummary 汇总逐通道结果。任一通道成功即视为已送达，

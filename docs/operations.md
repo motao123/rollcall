@@ -1045,6 +1045,67 @@ curl -s  http://127.0.0.1:19080/status | grep data-theme-pack
 
 ---
 
+### 7.10 时区（v1.33.1+）
+
+日报/周报的发送时刻、免打扰窗口、流量周期的每月起始日、到期提醒的「当天」
+全部按**服务端时区**计算，而服务器（尤其容器）默认是 UTC。
+
+```bash
+# 设置页会显示当前生效时区，形如 Local (UTC+0) / Asia/Shanghai (UTC+8)
+systemctl show rollcall-server -p Environment | tr ' ' '\n' | grep TZ
+# 显式指定（推荐写进 drop-in，而不是依赖宿主机）
+# /etc/systemd/system/rollcall-server.service.d/timezone.conf
+#   [Service]
+#   Environment=TZ=Asia/Shanghai
+```
+
+也可以给进程传 `-timezone Asia/Shanghai`（非法 IANA 名会**启动即失败**，不会静默回落）。
+时区数据库是内嵌的（`time/tzdata`），distroless 镜像里同样可用。
+
+**★ 切换时区会重算流量周期。** 周期起点是「本月 resetDay 00:00（本地时区）」，
+时区一变 `Start` 就变，而写入路径把「`Start` 不同」当作新周期 → **本期用量清零**。
+
+已积累用量时要保住数字，按下面顺序做（会停服务约 10 秒）：
+
+```bash
+STATE=/opt/rollcall/data/state.json
+systemctl stop rollcall-server
+cp -p "$STATE" "/root/rollcall-state-pre-tz-$(date -u +%Y%m%d%H%M%S).json.gz"
+# 见 docs/scripts/repin-traffic-tz.py：把每个周期的起点按新时区平移（UTC+8 比 UTC 早 8 小时）
+python3 docs/scripts/repin-traffic-tz.py "$STATE" -28800
+chown rollcall:rollcall "$STATE"; chmod 600 "$STATE"
+systemctl daemon-reload && systemctl start rollcall-server
+```
+
+平移后核对：`Start` 应等于新的「本月 resetDay 00:00（UTC+8）」，且用量不回退。
+**不这么做也能启动**，只是本期用量从 0 重新累计 —— 这不是故障，是周期语义。
+
+### 7.11 通知按规则分发 + 令牌读审计（v1.34.0+）
+
+**规则级渠道选择**：告警规则编辑弹窗里新增「通知渠道（可多选，留空=全部）」，
+对应 `AlertRule.Channels`（存的是渠道 ID，不是名字）。
+
+- 留空 = 发送到全部启用渠道（与旧行为一致）
+- 只发选中的渠道；被停用的渠道即使被选中也不投递
+- **渠道被删/停用后的回退**：若规则指定的渠道全部不可用，改为发送全部启用渠道，
+  并在正文追加一行「⚠ …已不存在或已停用，本次改为发送全部渠道」；
+  部分不可用时只跳过缺失的，同样在正文列出。**告警不会因为配置漂移而静默消失**
+- 渠道 ID 打错在保存时就 400（不会等到告警发出的那一刻才发现）
+- 离线告警合并成一条时，只有「同一规则」的合并才沿用该规则的渠道；
+  跨规则合并（无法确定发给谁）一律走全部渠道 —— 漏报比多发严重
+
+**令牌读访问审计**：审计页出现的 `api.read` 记录就是它。
+
+- 只记录**作用域令牌**（`Authorization: Bearer rct_...`）发起的 GET/HEAD，
+  浏览器会话与匿名请求不记 —— 否则面板每几秒的轮询会把审计刷满
+- 同一令牌在同一路由上 **5 分钟内只记一条**（一次 MCP 会话不会刷出几十条）
+- 记录主体=令牌名、来源 IP、方法、路径（**不含查询串**：公开页的 `?t=` 就是访问令牌）、
+  状态码与耗时
+- 令牌台账同时记录 `lastUsedIp`（最近一次使用的来源地址，每分钟最多更新一次）
+
+这让「`rollcall-mcp` 被用来查了什么、从哪台机器查的」变得可回答 —— 在此之前
+审计只看写操作，令牌读数据是完全不可见的。
+
 ## 9. 故障排查
 
 | 现象 | 排查方向 |

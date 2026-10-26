@@ -97,3 +97,89 @@ Nezha 那种写法在那台机器上会装不上。
 2. **延迟平滑**（`avg_ping_count` 的等价物）：已在中位数方案里，一并做。
 3. 游客封面页（`cover`）：公开状态页已有，是否要"未授权也看得到一页概览"待定，
    优先级低 —— 我们的公开页默认就开着，卖点已经覆盖。
+
+## 六、把数据库摊开看：它到底有哪些功能
+
+看 `sqlite.db` 的表结构比看界面可靠。以下是实机读到的表与行数（主控在跑 32 台）：
+
+| 表 | 行数 | 说明 |
+|---|---|---|
+| `servers` | 32 | 节点台账 |
+| `services` | 6 | 服务探测 |
+| `service_histories` | **10 789 694** | 探测历史（这是 2.2 GB 的来源） |
+| `transfers` | 248 | 按月流量记录（32 台 × 约 8 个月） |
+| `alert_rules` | 0 | 未启用 |
+| `notifications` / `notification_groups` / `notification_group_notifications` | 0 | 通知渠道与**通知组** |
+| `api_tokens` | 0 | API 令牌 |
+| `crons` | 0 | 定时任务（向 Agent 下发） |
+| `ddns` | 0 | DDNS 配置 |
+| `nats` | 0 | NAT/隧道信息展示 |
+| `nz_waf` | 0 | IP 封禁表（WAF） |
+| `jwt_sessions` | 0 | 会话 |
+| `oauth2_binds` | 0 | 第三方登录绑定 |
+| **`mcp_audit_logs`** | 0 | **MCP 工具调用审计** |
+| `users` | 1 | 用户（带 `role` 与 `token_version`） |
+
+### 几个字段值得单独说
+
+`servers`：`note`（内部备注）、`public_note`（公开备注）、`display_index`（手工排序）、
+`hide_for_guest`（对游客隐藏）、`enable_d_dns` / `ddns_profiles_raw`。
+
+`services`：`skip_servers_raw`（**跳过哪些节点**，说明它的探测是从 Agent 侧发起的）、
+`duration`、`notification_group_id`（**按服务选通知组**）、`cover`（公开页是否展示）、
+`enable_trigger_task` + `fail_trigger_tasks_raw`（**失败时触发定时任务**）、
+`min_latency` / `max_latency` / `latency_notify`（延迟上下限告警）。
+
+`api_tokens`：`scopes_csv`、**`servers_csv`（按服务器限定范围）**、
+`expires_at`、`last_used_at`、**`last_used_ip`**。
+
+`mcp_audit_logs`：`tool` / `server_id` / `args_hash` / `args_peek` /
+`outcome` / `error_code` / `duration_ms` / `ip`。
+
+## 七、这一轮照它补的（v1.34.0）
+
+| 项 | 它怎么做 | 我们怎么做 | 为什么 |
+|---|---|---|---|
+| **规则级通知路由** | `services.notification_group_id` + 通知组表 | `AlertRule.Channels`（渠道 ID 列表），空=全部 | 我们有多个渠道时，"磁盘告警发给谁、登录告警发给谁"只能全局一刀切 |
+| **MCP/令牌访问审计** | `mcp_audit_logs` 全字段落库 | 令牌的**读**访问记入现有审计（`api.read`），5 分钟内同令牌同路径合并 | MCP 是"用令牌调只读 API"，审计做在令牌鉴权处能同时覆盖 MCP 和任何脚本 |
+| **令牌最近来源** | `api_tokens.last_used_ip` | `APIToken.LastUsedIP` | 令牌泄露时"从哪儿被用"比"什么时候"更好定位 |
+
+实现时踩到一处**自己的漏洞**：引擎有三条投递路径（`send` / `emit` / `emitMerged`），
+只在 `send` 接线时，**离线类告警（走批量路径）会静默丢失渠道选择** —— 而离线恰恰是最常见的告警。
+端到端测试当场抓到了它（`TestAlertCarriesRuleChannels` 报 `实际 []`）。
+
+### 明确不抄
+
+- **`crons` + `fail_trigger_tasks`**：失败时向 Agent 下发命令 = 服务端变成指令下发通道，
+  与本项目"Agent 只读、服务端不下发"的边界冲突（见 README 的安全模型）。
+- **`custom_code`**：任意 HTML/JS 注入，等价于给后台开 XSS 口子。
+- **`agent_secret` 全局密钥**：泄露一台即可伪造任意节点。
+- **`nz_waf` 的 IP 封禁表**：我们的登录限速是内存态、按 IP+路由分桶，够用；
+  另做持久封禁表意味着要处理"误封自己"的救援路径，收益不成比例。
+- **`ddns`**：节点 IP 变更我们已经推送通知（10 分钟冷却、跨 /24 抬到 critical），
+  自动改 DNS 是另一件事，且要引入第三方凭据。
+
+### 还在评估
+
+- **`display_index`（手工排序）**：对 40 台以上的台账有意义，等节点数再涨。
+- **`hiddenForGuest` 的细粒度**：我们只有"公开页隐藏节点"整节点开关，它是按节点标记。
+- **`oauth2_binds`**：单人使用价值低，且引入外部身份源。
+- **`users.role` 多用户**：同上，暂不做。
+
+## 八、一个可以直接借用的"用法"（不是代码）
+
+它那 6 个服务全是 `type=3`（TCP），目标是 `hb-cu-v4.ip.zstaticcdn.com:80`、
+`bj-cm-v4...`、`bj-ct-v4...` —— **用各省运营商的 CDN 节点当探测目标**，
+量的是"控制端到各省各运营商的线路质量"，而不是"某个业务是否在线"。
+
+我们的 TCP 探测可以直接这么用（`target` 填 `host:port`）：
+
+```
+北京联通 bj-cu-v4.ip.zstaticcdn.com:80
+北京移动 bj-cm-v4.ip.zstaticcdn.com:80
+北京电信 bj-ct-v4.ip.zstaticcdn.com:80
+湖北联通 hb-cu-v4.ip.zstaticcdn.com:80
+```
+
+配上 `latency` / `jitter` / `loss` 规则，就能回答"这台机器回国内哪条线路变差了"。
+注意：这类目标**只测通不通与延迟**，不代表任何业务健康度，别和服务可用性混在一个面板里看。

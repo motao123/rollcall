@@ -203,7 +203,7 @@ func (s *Server) matchAPIToken(r *http.Request) (*model.APIToken, bool) {
 	if !strings.HasPrefix(raw, APITokenPrefix) {
 		return nil, false
 	}
-	t, ok := s.st.MatchAPIToken(hashAPIToken(raw), time.Now().Unix())
+	t, ok := s.st.MatchAPIToken(hashAPIToken(raw), time.Now().Unix(), clientIP(r, s.trustedProxies))
 	if !ok {
 		return nil, false
 	}

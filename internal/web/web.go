@@ -56,8 +56,10 @@ type Server struct {
 	panelLink   string
 	cnyRate     float64
 	limiter     *authFailureLimiter
-	outbox      *outbox.Manager
-	notifyErr   error
+	// tokenAudit 是令牌读访问审计的去重表（见 token_audit.go）。
+	tokenAudit *tokenReadAuditor
+	outbox     *outbox.Manager
+	notifyErr  error
 
 	// opNotifyMu/opNotifyAt 是运营类通知的去重窗口（IP 变更等）。
 	opNotifyMu sync.Mutex
@@ -168,6 +170,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		user: cfg.User, userPath: cfg.UserPath, sessions: cfg.Sessions,
 		cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
+		tokenAudit:     newTokenReadAuditor(),
 		agentDir:       cfg.AgentDir,
 		certPin:        cfg.CertPin,
 		trustedProxies: trusted,
@@ -2151,10 +2154,13 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			log.Printf("通知配置解析失败，返回空白配置: %v", err)
 		}
 		out := map[string]any{
-			"notify":    cfg.Redacted(),
-			"channels":  cfg.EnabledChannels(),
-			"defs":      notify.Defs(),
-			"panelLink": s.PanelLink(),
+			"notify":   cfg.Redacted(),
+			"channels": cfg.EnabledChannels(),
+			// 规则编辑要按 ID 选渠道；只给 id/名称/类型/启用态，
+			// 不带 options（里面是 webhook 地址、机器人 token 之类的凭据）。
+			"channelList": channelChoices(cfg),
+			"defs":        notify.Defs(),
+			"panelLink":   s.PanelLink(),
 			// 时区：日报/免打扰/流量周期都按它算。显示出来是因为服务器是 UTC 时
 			// 用户看不出"9 点日报"其实在另一个时刻触发。
 			"timezone": time.Local.String(),
@@ -2367,6 +2373,8 @@ func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
 				Hint: "仅作用于 HTTPS 服务；常用阈值 7–30"},
 		},
 		"services": svcOpts,
+		// 规则可以限定通知渠道；这里给出可选项（不含 channel 的 options 凭据）。
+		"channelList": s.ruleChannelChoices(),
 		"severities": []map[string]string{
 			{"value": "critical", "label": "严重"},
 			{"value": "warn", "label": "警告"},
@@ -2403,6 +2411,7 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			NodeIDs    []string `json:"nodeIds"`
 			Groups     []string `json:"groups"`
 			ServiceIDs []string `json:"serviceIds"`
+			Channels   []string `json:"channels"`
 		}
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
@@ -2452,6 +2461,12 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		channels := normalizeScope(req.Channels)
+		if msg := s.validateRuleChannels(channels); msg != "" {
+			fail(w, 400, msg)
+			return
+		}
+
 		rule := &model.AlertRule{
 			ID:         req.ID,
 			Name:       strings.TrimSpace(req.Name),
@@ -2464,6 +2479,7 @@ func (s *Server) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 			NodeIDs:    normalizeScope(req.NodeIDs),
 			Groups:     normalizeScope(req.Groups),
 			ServiceIDs: normalizeScope(req.ServiceIDs),
+			Channels:   channels,
 		}
 		if req.Enabled != nil {
 			rule.Enabled = *req.Enabled
@@ -2515,6 +2531,7 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 			NodeIDs    *[]string `json:"nodeIds"`
 			Groups     *[]string `json:"groups"`
 			ServiceIDs *[]string `json:"serviceIds"`
+			Channels   *[]string `json:"channels"`
 		}
 		dec := json.NewDecoder(body)
 		dec.DisallowUnknownFields()
@@ -2592,6 +2609,14 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 		if req.ServiceIDs != nil {
 			updated.ServiceIDs = normalizeScope(*req.ServiceIDs)
 		}
+		if req.Channels != nil {
+			chans := normalizeScope(*req.Channels)
+			if msg := s.validateRuleChannels(chans); msg != "" {
+				fail(w, 400, msg)
+				return
+			}
+			updated.Channels = chans
+		}
 		if updated.Metric == "offline" || updated.Metric == "service_down" {
 			updated.Threshold = 0
 			updated.Op = "gt"
@@ -2637,6 +2662,62 @@ func (s *Server) ruleByID(id string) (*model.AlertRule, bool) {
 }
 
 // normalizeScope 清理规则定向范围：去空白、去重、丢弃空值。
+// ruleChannelChoices 读取已保存的通知配置并给出可选渠道。
+func (s *Server) ruleChannelChoices() []map[string]any {
+	cfg, err := notify.Parse(s.st.GetSetting("notify"))
+	if err != nil || cfg == nil {
+		return []map[string]any{}
+	}
+	return channelChoices(cfg)
+}
+
+// channelChoices 是给"规则选择渠道"用的精简列表。
+func channelChoices(cfg *notify.Config) []map[string]any {
+	out := make([]map[string]any, 0, len(cfg.Channels))
+	for _, ch := range cfg.Channels {
+		name := ch.Name
+		if name == "" {
+			name = ch.Type
+		}
+		out = append(out, map[string]any{
+			"id":      ch.ID,
+			"name":    name,
+			"type":    ch.Type,
+			"enabled": ch.Enabled,
+		})
+	}
+	return out
+}
+
+// validateRuleChannels 校验规则引用的通知渠道 ID 是否存在。
+//
+// 在编辑时校验，是因为"渠道 ID 打错"只会在告警真的发出那一刻暴露，
+// 而那时人已经离开设置页了。已保存的通知配置损坏时放行 —— 不能因为
+// 通知配置坏了就连规则都改不了。
+func (s *Server) validateRuleChannels(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	cfg, err := notify.Parse(s.st.GetSetting("notify"))
+	if err != nil || cfg == nil {
+		return ""
+	}
+	known := make(map[string]struct{}, len(cfg.Channels))
+	for _, ch := range cfg.Channels {
+		known[ch.ID] = struct{}{}
+	}
+	var bad []string
+	for _, id := range ids {
+		if _, ok := known[id]; !ok {
+			bad = append(bad, id)
+		}
+	}
+	if len(bad) > 0 {
+		return "未知的通知渠道：" + strings.Join(bad, ", ") + "（先到「设置 → 通知」里添加渠道）"
+	}
+	return ""
+}
+
 func normalizeScope(values []string) []string {
 	if len(values) == 0 {
 		return nil

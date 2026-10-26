@@ -178,7 +178,7 @@ func TestSavePersistsAllSections(t *testing.T) {
 	if s2.GetSetting("notify") != `{"enabled":true}` {
 		t.Errorf("settings 丢失: %q", s2.GetSetting("notify"))
 	}
-	if _, ok := s2.MatchAPIToken("hash-secret", 2000); !ok {
+	if _, ok := s2.MatchAPIToken("hash-secret", 2000, "10.0.0.1"); !ok {
 		t.Error("重启后 API 令牌无法匹配")
 	}
 	toks := s2.APITokens()

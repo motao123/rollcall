@@ -142,7 +142,7 @@ func TestAPITokenLifecycle(t *testing.T) {
 		t.Fatalf("令牌列表不应泄露摘要或受入参影响: %+v", list)
 	}
 
-	got, ok := st.MatchAPIToken("hash-1", now)
+	got, ok := st.MatchAPIToken("hash-1", now, "10.0.0.1")
 	if !ok || got.ID != "tk1" {
 		t.Fatalf("有效令牌应匹配: %+v ok=%v", got, ok)
 	}
@@ -152,7 +152,7 @@ func TestAPITokenLifecycle(t *testing.T) {
 	if got.LastUsedAt != now {
 		t.Errorf("最近使用时间未更新: %d", got.LastUsedAt)
 	}
-	if _, ok := st.MatchAPIToken("wrong", now); ok {
+	if _, ok := st.MatchAPIToken("wrong", now, "10.0.0.1"); ok {
 		t.Error("错误摘要不应匹配")
 	}
 
@@ -161,7 +161,7 @@ func TestAPITokenLifecycle(t *testing.T) {
 		ID: "tk2", Hash: "hash-2", Scopes: []string{"admin"},
 		CreatedAt: now, ExpiresAt: now - 1,
 	})
-	if _, ok := st.MatchAPIToken("hash-2", now); ok {
+	if _, ok := st.MatchAPIToken("hash-2", now, "10.0.0.1"); ok {
 		t.Error("过期令牌不应匹配")
 	}
 
@@ -174,7 +174,7 @@ func TestAPITokenLifecycle(t *testing.T) {
 	if !st.DeleteAPIToken("tk1") || st.DeleteAPIToken("tk1") {
 		t.Error("删除语义应为首次成功、再次失败")
 	}
-	if _, ok := st.MatchAPIToken("hash-1", now); ok {
+	if _, ok := st.MatchAPIToken("hash-1", now, "10.0.0.1"); ok {
 		t.Error("删除后令牌不应再匹配")
 	}
 }

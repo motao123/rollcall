@@ -2327,6 +2327,25 @@ function openRuleDialog(rule, meta, nodes) {
   const scopedSvc = r.serviceIds || [];
   const svcOptions = services.map((s) =>
     `<option value="${esc(s.id)}"${scopedSvc.includes(s.id) ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+  // 通知渠道：按 ID 选。留空=全部启用渠道，与旧行为一致。
+  const chanList = meta.channelList || [];
+  const scopedChan = r.channels || [];
+  const knownChan = new Set(chanList.map((c) => c.id));
+  const chanOptions = chanList.map((c) =>
+    `<option value="${esc(c.id)}"${scopedChan.includes(c.id) ? ' selected' : ''}>${esc(c.name)}（${esc(c.type)}${c.enabled ? '' : '，已停用'}）</option>`)
+    .concat(scopedChan.filter((id) => !knownChan.has(id)).map((id) =>
+      `<option value="${esc(id)}" selected>${esc(id)}（渠道已不存在）</option>`)).join('');
+  const chanField = chanList.length
+    ? `<label class="field" id="chanScope">
+        <span class="field-label">通知渠道（可多选，留空=全部）</span>
+        <select name="channels" multiple size="4">${chanOptions}</select>
+        <span class="field-hint">只发到选中的渠道；渠道在「设置 → 通知」里配置</span>
+      </label>`
+    : `<label class="field" id="chanScope">
+        <span class="field-label">通知渠道</span>
+        <span class="field-hint">还没有配置通知渠道，规则将发送到全部渠道（当前为空）。
+          先到「设置 → 通知」添加 Telegram / 企业微信 / Webhook 等渠道。</span>
+      </label>`;
 
   const dlg = document.createElement('div');
   dlg.className = 'modal-mask';
@@ -2365,6 +2384,7 @@ function openRuleDialog(rule, meta, nodes) {
         <select name="serviceIds" multiple size="4">${svcOptions}</select>
         <span class="field-hint">仅服务类指标生效；服务未配置时保持为空</span>
       </label>
+      ${chanField}
       ${checkbox('启用该规则', 'enabled', r.enabled)}
       <div class="form-actions">
         <button class="btn primary" type="submit">${editing ? '保存修改' : '创建规则'}</button>
@@ -2435,6 +2455,8 @@ function openRuleDialog(rule, meta, nodes) {
       groups: String(d.groups || '').split(',').map((s) => s.trim()).filter(Boolean),
       serviceIds: svcSel ? Array.from(svcSel.selectedOptions).map((o) => o.value) : [],
     };
+    const chanSel = e.target.querySelector('[name=channels]');
+    if (chanSel) payload.channels = Array.from(chanSel.selectedOptions).map((o) => o.value);
     if (!noVal) payload.threshold = Number(d.threshold) || 0;
 
     const btn = e.target.querySelector('button[type=submit]');
@@ -3480,8 +3502,11 @@ async function viewSettings() {
     <td class="${(tk.paths && tk.paths.length) ? 'mono' : ''}" style="font-size:11.5px">${(tk.paths && tk.paths.length) ? tk.paths.map((p) => esc(p)).join('<br>') : '<span class="text-faint">全部</span>'}</td>
     <td class="mono" style="font-size:11.5px">${clock(tk.createdAt)}</td>
     <td style="font-size:11.5px">${tk.expiresAt ? `<span class="mono">${clock(tk.expiresAt)}</span>` : '永不过期'}</td>
+    <td style="font-size:11.5px">${tk.lastUsedAt
+      ? `<span class="mono">${clock(tk.lastUsedAt)}</span>${tk.lastUsedIp ? `<br><span class="text-faint mono">${esc(tk.lastUsedIp)}</span>` : ''}`
+      : '<span class="text-faint">从未使用</span>'}</td>
     <td class="num"><button class="btn tiny danger" data-del-token="${esc(tk.id)}">删除</button></td>
-  </tr>`).join('') || `<tr><td colspan="7"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
+  </tr>`).join('') || `<tr><td colspan="8"><div class="empty">尚未创建 API 令牌</div></td></tr>`;
   const packList = Array.isArray(themePacks.packs) ? themePacks.packs : [];
   const packOpts = [{ v: '', t: '内置（默认）' }].concat(
     packList.filter((p) => !p.error).map((p) => ({
@@ -3849,7 +3874,7 @@ async function viewSettings() {
           <code>/api/overview</code>、<code>/api/nodes/n1</code> 等前缀（留空=全部）。
         </p>
         <div class="table-wrap"><table class="queue-table" data-page-size="15">
-          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>路径限定</th><th>创建时间</th><th>过期时间</th><th class="num">操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>路径限定</th><th>创建时间</th><th>过期时间</th><th>最近使用</th><th class="num">操作</th></tr></thead>
           <tbody>${tokenRows}</tbody>
         </table></div>
       </div>

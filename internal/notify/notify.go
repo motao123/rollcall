@@ -16,6 +16,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -77,6 +78,8 @@ type Message struct {
 	Resolved bool    `json:"resolved"`
 	TS       int64   `json:"ts"`
 	Link     string  `json:"link"`
+	// ChannelIDs 限定投递目标（ChannelConfig.ID）。空=全部启用渠道。
+	ChannelIDs []string `json:"channelIds,omitempty"`
 }
 
 // Result 是单通道投递结果。
@@ -490,7 +493,10 @@ var httpClient = &http.Client{
 	},
 }
 
-// Send 向所有启用的通道投递，返回逐通道结果。
+// Send 向目标通道投递，返回逐通道结果。
+//
+// 目标由 Message.ChannelIDs 决定（规则级渠道选择）；为空时发给全部启用通道，
+// 与旧行为一致。
 func Send(cfg *Config, m Message) []Result {
 	if cfg == nil || !cfg.Enabled {
 		return []Result{{Channel: "all", Type: "-", OK: false, Error: "通知未启用"}}
@@ -500,12 +506,18 @@ func Send(cfg *Config, m Message) []Result {
 			Error: fmt.Sprintf("严重度 %s 低于阈值 %s，已跳过", m.Severity, cfg.MinSeverity)}}
 	}
 
+	chans, note := cfg.routeChannels(m.ChannelIDs)
+	if len(chans) == 0 {
+		return []Result{{Channel: "all", Type: "-", OK: false, Error: "没有启用的通道"}}
+	}
+	if note != "" {
+		// 说明写进正文：收件人要知道"为什么发到了这里"，
+		// 否则渠道配错时会一直以为是别人转发的。
+		m.Body = strings.TrimSpace(m.Body) + "\n\n" + note
+	}
 	subject, body := renderWith(cfg, m)
 	var out []Result
-	for _, ch := range cfg.Channels {
-		if !ch.Enabled {
-			continue
-		}
+	for _, ch := range chans {
 		name := displayName(ch)
 		if miss := missingRequired(ch); miss != "" {
 			out = append(out, Result{Channel: name, Type: ch.Type, OK: false,
@@ -519,6 +531,54 @@ func Send(cfg *Config, m Message) []Result {
 		out = append(out, Result{Channel: "all", Type: "-", OK: false, Error: "没有启用的通道"})
 	}
 	return out
+}
+
+// routeChannels 决定这条消息投给哪些通道。
+//
+// 第二个返回值是"需要告诉收件人"的说明，只在配置有问题时非空：
+//   - 规则指定的渠道全部不可用 → 回退为全部启用渠道（告警不能静默消失）
+//   - 部分不可用 → 跳过缺失的，并列出它们（配置漂移要能被看见）
+func (c *Config) routeChannels(ids []string) ([]ChannelConfig, string) {
+	enabled := make([]ChannelConfig, 0, len(c.Channels))
+	for _, ch := range c.Channels {
+		if ch.Enabled {
+			enabled = append(enabled, ch)
+		}
+	}
+	if len(ids) == 0 {
+		return enabled, ""
+	}
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			want[id] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return enabled, ""
+	}
+	out := make([]ChannelConfig, 0, len(want))
+	hit := make(map[string]bool, len(want))
+	for _, ch := range enabled {
+		if _, ok := want[ch.ID]; ok {
+			out = append(out, ch)
+			hit[ch.ID] = true
+		}
+	}
+	if len(out) == 0 {
+		return enabled, "⚠ 这条告警的规则指定了通知渠道，但那些渠道已不存在或已停用，本次改为发送全部渠道。"
+	}
+	var missing []string
+	for id := range want {
+		if !hit[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return out, fmt.Sprintf("⚠ 规则指定的部分通知渠道不可用（%s），本次已跳过。", strings.Join(missing, ", "))
+	}
+	return out, ""
 }
 
 func errStr(e error) string {

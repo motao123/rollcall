@@ -411,6 +411,7 @@ func (s *Server) withAuthGuard(h http.Handler, routeOf func(*http.Request) (auth
 		}
 		s.recordHTTP(route, r.Method, rec.status, start)
 		s.auditAdminMutation(r, rec.status)
+		s.auditTokenRead(r, route, rec.status, time.Since(start))
 		switch {
 		case rec.status == http.StatusUnauthorized:
 			s.limiter.fail(scope)

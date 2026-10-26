@@ -319,6 +319,12 @@ type AlertRule struct {
 	// ServiceIDs 只对服务类指标（service_down / latency / loss / jitter /
 	// cert_days）生效；为空表示全部服务。
 	ServiceIDs []string `json:"serviceIds,omitempty"`
+	// Channels 限定这条规则的通知渠道（NotifyConfig.Channels 里的 ID）。
+	//
+	// 为空表示"全部启用渠道"（与旧行为一致）。有值时不存在的 ID 会被忽略，
+	// 若全部不可用则回退为全部渠道并在正文里说明 —— 告警宁可发错地方，
+	// 也不能因为配置被删就静默消失。
+	Channels []string `json:"channels,omitempty"`
 }
 
 // Alert 是一条告警实例。
@@ -362,7 +368,10 @@ type APIToken struct {
 	Paths      []string `json:"paths,omitempty"` // 允许的 API 路径前缀；空表示不限
 	CreatedAt  int64    `json:"createdAt"`
 	LastUsedAt int64    `json:"lastUsedAt,omitempty"`
-	ExpiresAt  int64    `json:"expiresAt,omitempty"`
+	// LastUsedIP 是最近一次使用该令牌的来源地址。
+	// 令牌泄露时，"它从哪儿被用的"往往比"什么时候"更能定位问题。
+	LastUsedIP string `json:"lastUsedIp,omitempty"`
+	ExpiresAt  int64  `json:"expiresAt,omitempty"`
 }
 
 // HasScope 判断令牌是否包含指定权限。
@@ -430,25 +439,27 @@ const (
 // 任务先落内存队列并由 Outbox 异步投递，重启后未完成任务会继续重试，
 // 避免同步发送时的并发丢弃与进程退出丢通知。
 type NotifyJob struct {
-	ID            string  `json:"id"`
-	AlertID       string  `json:"alertId,omitempty"`
-	RuleID        string  `json:"ruleId"`
-	RuleName      string  `json:"ruleName"`
-	NodeID        string  `json:"nodeId"`
-	NodeName      string  `json:"nodeName"`
-	Severity      string  `json:"severity"`
-	Resolved      bool    `json:"resolved"`
-	Title         string  `json:"title"`
-	Body          string  `json:"body"`
-	Value         float64 `json:"value"`
-	Link          string  `json:"link"`
-	EventTS       int64   `json:"eventTs"`
-	CreatedAt     int64   `json:"createdAt"`
-	Attempts      int     `json:"attempts"`
-	NextAttemptAt int64   `json:"nextAttemptAt"`
-	LastError     string  `json:"lastError,omitempty"`
-	Status        string  `json:"status"`
-	SentAt        int64   `json:"sentAt,omitempty"`
+	ID       string `json:"id"`
+	AlertID  string `json:"alertId,omitempty"`
+	RuleID   string `json:"ruleId"`
+	RuleName string `json:"ruleName"`
+	NodeID   string `json:"nodeId"`
+	NodeName string `json:"nodeName"`
+	Severity string `json:"severity"`
+	Resolved bool   `json:"resolved"`
+	// Channels 是本次投递的目标渠道 ID（空=全部启用渠道）。
+	Channels      []string `json:"channels,omitempty"`
+	Title         string   `json:"title"`
+	Body          string   `json:"body"`
+	Value         float64  `json:"value"`
+	Link          string   `json:"link"`
+	EventTS       int64    `json:"eventTs"`
+	CreatedAt     int64    `json:"createdAt"`
+	Attempts      int      `json:"attempts"`
+	NextAttemptAt int64    `json:"nextAttemptAt"`
+	LastError     string   `json:"lastError,omitempty"`
+	Status        string   `json:"status"`
+	SentAt        int64    `json:"sentAt,omitempty"`
 	// FinishedAt 是任务进入终态（sent/failed/suppressed）的时间。
 	// 只有 SentAt 时，失败与静默的任务没有时间戳，面板无法回答
 	// 「什么时候失败的」，而调用方一直在传这个时间。

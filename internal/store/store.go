@@ -998,6 +998,10 @@ func cloneRule(r *model.AlertRule) model.AlertRule {
 	if r.ServiceIDs != nil {
 		cp.ServiceIDs = append([]string(nil), r.ServiceIDs...)
 	}
+	// Channels 同属引用字段：漏拷贝会在快照遍历时与写入共享底层数组。
+	if r.Channels != nil {
+		cp.Channels = append([]string(nil), r.Channels...)
+	}
 	return cp
 }
 
@@ -1348,8 +1352,8 @@ func (s *Store) DeleteAPIToken(id string) bool {
 	return true
 }
 
-// MatchAPIToken 按摘要查找令牌并更新最近使用时间。
-func (s *Store) MatchAPIToken(hash string, now int64) (*model.APIToken, bool) {
+// MatchAPIToken 按摘要查找令牌并更新最近使用时间与来源地址。
+func (s *Store) MatchAPIToken(hash string, now int64, ip string) (*model.APIToken, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.apiTokens {
@@ -1363,6 +1367,7 @@ func (s *Store) MatchAPIToken(hash string, now int64) (*model.APIToken, bool) {
 		// 先更新时间再复制，确保调用方拿到的也是本次使用后的状态。
 		if now-t.LastUsedAt >= 60 {
 			t.LastUsedAt = now
+			t.LastUsedIP = ip
 			s.RequestSave()
 		}
 		cp := *t
@@ -1742,6 +1747,19 @@ func (s *Store) Rules() []*model.AlertRule {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// Rule 读取单条规则。告警投递时用它解析目标渠道：规则可能在告警存续期间
+// 被改过，按当前配置分发比按开告警那一刻的配置更符合运维预期。
+func (s *Store) Rule(id string) (*model.AlertRule, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.rules[id]
+	if !ok {
+		return nil, false
+	}
+	cp := cloneRule(v)
+	return &cp, true
 }
 
 func (s *Store) Alerts(limit int) []*model.Alert {

@@ -205,19 +205,22 @@ func (e *Engine) send(a *model.Alert, resolved bool) {
 		e.mu.Unlock()
 	}
 
+	chans := e.ruleChannels(a.RuleID)
+
 	fn(notify.Message{
-		Title:    a.RuleName,
-		Severity: a.Severity,
-		NodeName: a.NodeName,
-		NodeID:   a.NodeID,
-		RuleID:   a.RuleID,
-		RuleName: a.RuleName,
-		AlertID:  a.ID,
-		Value:    a.Value,
-		Resolved: resolved,
-		TS:       ts,
-		Link:     link,
-		Body:     a.Message,
+		Title:      a.RuleName,
+		Severity:   a.Severity,
+		NodeName:   a.NodeName,
+		NodeID:     a.NodeID,
+		RuleID:     a.RuleID,
+		RuleName:   a.RuleName,
+		AlertID:    a.ID,
+		Value:      a.Value,
+		Resolved:   resolved,
+		TS:         ts,
+		Link:       link,
+		Body:       a.Message,
+		ChannelIDs: chans,
 	})
 }
 
@@ -460,34 +463,55 @@ func (e *Engine) emitMerged(items []batchItem, resolved bool) {
 		verb = "恢复"
 	}
 	body := fmt.Sprintf("%s %s（同一轮检测）", strings.Join(names, "、"), verb)
+	// 合并通知只在"同一条规则"时才沿用该规则的渠道：跨规则的合并
+	// （ruleID 已置空）无处可依，只能发给全部渠道 —— 漏报比多发严重。
+	chans := e.ruleChannels(ruleID)
 	e.emitMessage(notify.Message{
-		Title:    title,
-		Body:     body,
-		Severity: sev,
-		RuleID:   ruleID,
-		RuleName: ruleName,
-		Resolved: resolved,
-		TS:       items[0].ts,
-		Link:     items[0].link,
+		Title:      title,
+		Body:       body,
+		Severity:   sev,
+		RuleID:     ruleID,
+		RuleName:   ruleName,
+		Resolved:   resolved,
+		TS:         items[0].ts,
+		Link:       items[0].link,
+		ChannelIDs: chans,
 	})
 }
 
 // emit 按单条告警的原始形态投递（与合并前的行为一致）。
 func (e *Engine) emit(a *model.Alert, resolved bool, ts int64, link string) {
 	e.emitMessage(notify.Message{
-		Title:    a.RuleName,
-		Severity: a.Severity,
-		NodeName: a.NodeName,
-		NodeID:   a.NodeID,
-		RuleID:   a.RuleID,
-		RuleName: a.RuleName,
-		AlertID:  a.ID,
-		Value:    a.Value,
-		Resolved: resolved,
-		TS:       ts,
-		Link:     link,
-		Body:     a.Message,
+		Title:      a.RuleName,
+		Severity:   a.Severity,
+		NodeName:   a.NodeName,
+		NodeID:     a.NodeID,
+		RuleID:     a.RuleID,
+		RuleName:   a.RuleName,
+		AlertID:    a.ID,
+		Value:      a.Value,
+		Resolved:   resolved,
+		TS:         ts,
+		Link:       link,
+		Body:       a.Message,
+		ChannelIDs: e.ruleChannels(a.RuleID),
 	})
+}
+
+// ruleChannels 解析规则当前配置的通知渠道。
+//
+// 三处投递路径（send / emit / emitMerged）都必须走这里 —— 只在其中一处
+// 接线的话，离线类告警会静默丢失渠道选择，而这类告警恰恰最常见。
+// 规则已删除时返回空（=全部启用渠道）：恢复通知也不能凭空消失。
+func (e *Engine) ruleChannels(ruleID string) []string {
+	if ruleID == "" || e.st == nil {
+		return nil
+	}
+	r, ok := e.st.Rule(ruleID)
+	if !ok {
+		return nil
+	}
+	return r.Channels
 }
 
 func (e *Engine) emitMessage(m notify.Message) {
