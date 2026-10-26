@@ -189,3 +189,36 @@ func TestNodesImportCommandUsesInsecureFlagOnlyForPublicHTTP(t *testing.T) {
 		}
 	}
 }
+
+// TestNodesImportPrefersPanelLink 确认命令里的地址优先取「面板对外地址」。
+//
+// 从回环地址调 API（自动化、curl）时 Host 是 127.0.0.1，直接用它会把
+// 「贴到别的服务器执行」的命令拼成连不上的地址。
+func TestNodesImportPrefersPanelLink(t *testing.T) {
+	srv := New(store.New(t.TempDir()), nil, nil, Config{
+		AdminToken: "test-admin-token-1234567890",
+		PanelLink:  "https://panel.example.com:19080/",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/nodes/import",
+		strings.NewReader(`{"nodes":[{"name":"链接测试"}]}`))
+	req.Header.Set("X-Admin-Token", "test-admin-token-1234567890")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("应 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	var r importResp
+	if err := json.Unmarshal(w.Body.Bytes(), &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Created) != 1 {
+		t.Fatalf("应创建 1 条，实际 %d", len(r.Created))
+	}
+	cmd := r.Created[0].Command
+	if !strings.Contains(cmd, "https://panel.example.com:19080/agent/install.sh") {
+		t.Fatalf("命令应使用面板对外地址（且不重复斜杠）: %s", cmd)
+	}
+	if strings.Contains(cmd, "127.0.0.1") {
+		t.Fatalf("不应回落到请求 Host: %s", cmd)
+	}
+}
