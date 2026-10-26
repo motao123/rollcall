@@ -2158,7 +2158,10 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			// 时区：日报/免打扰/流量周期都按它算。显示出来是因为服务器是 UTC 时
 			// 用户看不出"9 点日报"其实在另一个时刻触发。
 			"timezone": time.Local.String(),
-			"version":  version.Version,
+			// 名称可能是 "Local"（TZ 未设置时的占位），单看它无法判断到底是哪个时区；
+			// 带上当前偏移，前端就能显示 "Local (UTC+0)" 这种一眼能懂的形式。
+			"timezoneOffsetMin": func() int { _, off := time.Now().Zone(); return off / 60 }(),
+			"version":           version.Version,
 		}
 		if warn != "" {
 			out["warning"] = warn

@@ -23,6 +23,7 @@ const state = {
   data: {},
   panelLink: '',
   timezone: '',
+  timezoneOffsetMin: null,
   authRequired: false,
   authenticated: false,
   user: null,
@@ -3434,6 +3435,7 @@ async function viewSettings() {
     defs = st.defs || [];
     state.panelLink = st.panelLink || '';
     state.timezone = st.timezone || '';
+    state.timezoneOffsetMin = (st.timezoneOffsetMin === undefined ? null : st.timezoneOffsetMin);
     state.serverVersion = st.version || '';
   } catch (e) {
     if (e.status === 401) return;
@@ -3607,7 +3609,7 @@ async function viewSettings() {
         </form>
         <p class="field-hint" id="panelLinkHint" style="margin:6px 0 0"></p>
         <p class="field-hint" style="margin:8px 0 0">
-          服务器时区：<code>${esc(state.timezone || '跟随系统')}</code>
+          服务器时区：<code>${esc(timezoneLabel())}</code>
           —— 日报/周报的发送时刻、免打扰窗口、流量周期的每月起始日都按它算。
           服务器（尤其容器）默认是 <code>UTC</code>：此时「每天 9 点」会在另一个时刻触发。
           用启动参数 <code>-timezone Asia/Shanghai</code> 或环境变量 <code>TZ</code> 指定。
@@ -4624,6 +4626,20 @@ function agentServerURL() {
 // showImportResult 展示批量导入结果：每台的接入命令 + 被跳过的行。
 // 用弹窗而不是页面内嵌块：导入后要刷新节点列表，内嵌块会被重渲染清掉；
 // 而这批命令正是用户接下来要逐台粘贴的东西，不能刷一下就没。
+// timezoneLabel 把服务器时区显示成一眼能懂的形式。
+// time.Local.String() 在 TZ 未设置时是 "Local"，单看它无法判断实际时区，
+// 所以带上偏移："Local (UTC+0)" / "Asia/Shanghai (UTC+8)"。
+function timezoneLabel() {
+  const name = state.timezone || '跟随系统';
+  const off = state.timezoneOffsetMin;
+  if (off === null || off === undefined) return name;
+  const sign = off < 0 ? '-' : '+';
+  const abs = Math.abs(off);
+  const h = Math.floor(abs / 60);
+  const m = abs % 60;
+  return `${name} (UTC${sign}${h}${m ? ':' + String(m).padStart(2, '0') : ''})`;
+}
+
 function showImportResult(r) {
   const created = r.created || [];
   const skipped = r.skipped || [];
