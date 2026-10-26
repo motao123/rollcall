@@ -276,6 +276,30 @@ func main() {
 	host := c.Host()
 	log.Printf("节点 %s（%s / %s，%d 核）→ %s", cfg.NodeID, host.Hostname, host.OS, host.Cores, cfg.Server)
 
+	// 客户端与 TLS 配置在首次采集之前构造：配置错误（例如指纹写错）应当
+	// 立刻暴露，而不是先睡一个上报周期再报错 —— 运维看到的应该是
+	// 「启动失败」而不是「半小时后节点掉线」。
+	// 上报接口不需要重定向：拒绝跟随可确保 X-Node-Token 绝不会被转发到其他主机。
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	// 自签名证书（无域名、IP 直连）场景：跳过证书校验但保留加密。
+	// 配了 serverCertPin 时改为校验指纹 —— 那才是既加密又认身份的姿态。
+	// 构造失败（指纹写错）必须直接退出：静默退化会让你以为在固定指纹。
+	tlsCfg, err := agentwire.ClientTLSConfig(cfg.TLSSkipVerify, cfg.ServerCertPin)
+	if err != nil {
+		log.Fatalf("TLS 配置无效: %v", err)
+	}
+	if tlsCfg != nil {
+		client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+		if cfg.ServerCertPin != "" {
+			log.Printf("已启用服务端证书指纹校验（%s…）", firstN(cfg.ServerCertPin, 16))
+		}
+	}
+
 	// 首次采集用于建立 CPU 基线；-once 不应让验证脚本干等一个完整上报周期
 	c.Collect()
 	if *once {
@@ -287,28 +311,6 @@ func main() {
 	// 登录事件采集只需一次初始化：水位保存在进程内，重启后重新建立
 	// （首次 Poll 只记录当前最新时间，不会把历史登录当成新事件）。
 	loginWatcher := logins.NewWatcher()
-
-	// 上报接口不需要重定向：拒绝跟随可确保 X-Node-Token 绝不会被转发到其他主机
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	// 自签名证书（无域名、IP 直连）场景：跳过证书校验但保留加密。
-	// 配了 serverCertPin 时改为校验指纹 —— 那才是既加密又认身份的姿态。
-	// 构造失败（指纹写错）必须直接退出：静默退化会让你以为在固定指纹，
-	// 实际仍在盲信任何证书。
-	tlsCfg, err := agentwire.ClientTLSConfig(cfg.TLSSkipVerify, cfg.ServerCertPin)
-	if err != nil {
-		log.Fatalf("TLS 配置无效: %v", err)
-	}
-	if tlsCfg != nil {
-		client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
-		if cfg.ServerCertPin != "" {
-			log.Printf("已启用服务端证书指纹校验（%s…）", firstN(cfg.ServerCertPin, 16))
-		}
-	}
 
 	send := func() error {
 		// 非 Linux 构建没有 /proc 采集实现，Collect 只能返回全零。
