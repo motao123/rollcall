@@ -188,6 +188,12 @@ func (s *Store) ImportConfig(raw []byte) error {
 	defer s.mu.Unlock()
 
 	s.nodes = nodes
+	// ★ 导入的节点必须撤销墓碑：本进程内删过同一个 ID 时，墓碑会让
+	// AddMetrics 直接丢弃上报（200 但仍不写数据），表现为"节点回来了但永远没数据"。
+	// 备份恢复正是最常走的路径（误删 → 导入自动备份）。
+	for id := range nodes {
+		delete(s.dropped, id)
+	}
 	s.services = services
 	s.rules = rules
 	s.notifySilent = silences

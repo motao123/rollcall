@@ -724,13 +724,18 @@ func (e *Engine) Evaluate() {
 			if m == nil {
 				m = maintGlobal
 			}
-			if !sv.Enabled || !applies || m != nil {
+			// 台账级豁免必须同时覆盖服务类规则：用户勾「告警豁免」的语义是
+			// 「这台机器上什么都别报」，只豁免指标却继续报探测失败，
+			// 与设置项的描述直接矛盾（也正好打脸"把机器摘出告警"的用法）。
+			if !sv.Enabled || !applies || m != nil || n.AlertExempt {
 				reason := "规则范围已调整"
-				if !sv.Enabled {
+				switch {
+				case !sv.Enabled:
 					reason = "服务已停用"
-				}
-				if m != nil {
+				case m != nil:
 					reason = maintenanceReason(m)
+				case n.AlertExempt:
+					reason = "节点告警豁免"
 				}
 				e.mu.Lock()
 				prev := e.active[key]

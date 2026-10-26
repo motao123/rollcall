@@ -149,7 +149,10 @@ func (m *Manager) Enqueue(msg notify.Message) bool {
 		if end, quiet := cfg.QuietWindow(time.Now()); quiet {
 			next = end.Unix()
 		}
-		if cfg.DigestMins > 0 {
+		// ★ 只有告警（RuleID 非空）参与摘要。运行报告、到期提醒这类
+		// 内容是整段 Body，合进摘要后正文会被丢掉（摘要只拼标题一行），
+		// 而且任务随即被标成已送达，等于永久丢失。
+		if cfg.DigestMins > 0 && msg.RuleID != "" {
 			if slot := nextDigestSlot(time.Now(), cfg.DigestMins); slot > next {
 				next = slot
 			}
@@ -331,7 +334,8 @@ func (m *Manager) dispatch() {
 	for _, j := range jobs {
 		// 同一轮领取到的多条非紧急告警合并为一条摘要，
 		// 避免一次故障引发几十个通道消息刷屏。
-		if cfg != nil && cfg.DigestMins > 0 && !j.Resolved && j.Severity != "critical" {
+		// RuleID 为空的是报告/到期提醒等正文类消息，不参与摘要（见 Enqueue 注释）。
+		if cfg != nil && cfg.DigestMins > 0 && j.RuleID != "" && !j.Resolved && j.Severity != "critical" {
 			if _, _, silenced := m.st.SilenceFor(j.RuleID, now); !silenced {
 				digest = append(digest, j)
 				continue

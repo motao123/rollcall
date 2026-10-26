@@ -216,15 +216,26 @@ func (c *Collector) Collect() model.Metrics {
 	if idle, tot, steal, iowait, ok := readCPU(); ok {
 		if c.prevTot > 0 && tot > c.prevTot {
 			dTot := float64(tot - c.prevTot)
-			dIdle := float64(idle - c.prevIdle)
+			// idle 含 iowait，内核允许它回退：回退时这一轮按 0 计，
+			// 宁可少报一点 CPU，也不要算出一个负数再下溢成天文数字。
+			dIdle := float64(0)
+			if idle >= c.prevIdle {
+				dIdle = float64(idle - c.prevIdle)
+			}
 			if dTot > 0 {
 				m.CPUPct = clamp((dTot-dIdle)/dTot*100, 0, 100)
 				// steal 是被宿主机拿走的时间片：VPS 上高 steal 意味着邻居超售，
 				// 这是「机器变卡但自己进程不忙」的直接证据。
-				if tot > c.prevSteal {
+				//
+				// ★ 三个计数器各自比自己上一轮的值。原来这里写成 `tot > c.prevSteal`
+				// （拿累计总 jiffies 比上一轮的 steal），恒为真等于没防护：
+				// 内核允许 iowait 回退（idle 里含 iowait，会跟着回退），vCPU 迁移/热插拔
+				// 也会让 steal 回退。回退时无符号相减下溢成 1.8e19，
+				// 结果 CPU 曲线瞬间归零、iowait/steal 被 clamp 成 100，还喂给告警。
+				if steal >= c.prevSteal {
 					m.StealPct = clamp(float64(steal-c.prevSteal)/dTot*100, 0, 100)
 				}
-				if tot > c.prevIowait {
+				if iowait >= c.prevIowait {
 					m.IowaitPct = clamp(float64(iowait-c.prevIowait)/dTot*100, 0, 100)
 				}
 			}

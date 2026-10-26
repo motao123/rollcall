@@ -896,6 +896,15 @@ func (s *Store) DeleteNode(id string) bool {
 	delete(s.expirySent, id)
 	delete(s.seriesSeq, id)
 	delete(s.seriesSaved, id)
+	// 探测目标跟着节点走：留着的话它会继续被定时探测（对外发请求），
+	// 而服务类告警又因为"节点不存在"永远打不开 —— 成为一块不报警的盲区，
+	// 且用户在界面上已经找不到这些服务了。
+	for sid, sv := range s.services {
+		if sv.NodeID == id {
+			delete(s.services, sid)
+			delete(s.svcRes, sid)
+		}
+	}
 	// 墓碑：拦住删除瞬间仍在途的那次上报（见 AddMetrics）。
 	s.markDroppedLocked(id)
 	if _, ok := s.history[id]; ok {
@@ -1127,11 +1136,26 @@ func (s *Store) updateTrafficLocked(nodeID string, m model.Metrics) {
 		*tc = model.TrafficCycle{Start: start, LastRx: m.NetRx, LastTx: m.NetTx}
 		return
 	}
-	if m.TS < tc.Start || (tc.LastRx > m.NetRx && tc.LastTx > m.NetTx) {
-		// 同一周期内的异常：时钟回拨，或计数器归零（Agent 重启 / 网卡重载）。
-		// ★ 必须保留本周期已累计的用量，只重置基线 ——
-		// 原来这里整体重建结构体，等于把本周期已经跑掉的流量抹掉。
+	if tc.NeedBaseline {
+		// 人工补录时还没有真实读数：这一条上报只用来建立基线，
+		// 否则会把「开机以来的累计流量」当成这次增量。
 		tc.LastRx, tc.LastTx = m.NetRx, m.NetTx
+		tc.NeedBaseline = false
+		return
+	}
+	if m.TS < tc.Start {
+		// 时钟回拨：读数仍然有效，只是时间戳异常。重建基线即可，
+		// 不能标 Incomplete —— 那段流量并没有丢。
+		tc.LastRx, tc.LastTx = m.NetRx, m.NetTx
+		return
+	}
+	if tc.LastRx > m.NetRx && tc.LastTx > m.NetTx {
+		// 计数器归零（Agent 所在机器/容器重启、网卡重载）：这两个计数器
+		// 的差额对应真实流量，但已经拿不到，属于"账目缺口"。
+		// ★ 必须保留本周期已累计的用量，只重置基线；同时标 Incomplete，
+		// 让面板提示「请校正本期」，而不是把一个已知不可信的数字当准的。
+		tc.LastRx, tc.LastTx = m.NetRx, m.NetTx
+		tc.Incomplete = true
 		return
 	}
 	if m.NetRx >= tc.LastRx {
@@ -1475,8 +1499,13 @@ func (s *Store) AdjustTrafficUsed(nodeID string, want uint64) (model.TrafficUsag
 	}
 	tc := s.traffic[nodeID]
 	if tc == nil {
-		// 还没有本周期记录：先建一个空周期，基线留 0，下一次上报会补上。
-		tc = &model.TrafficCycle{Start: trafficCycleStart(time.Now(), n.TrafficResetDay)}
+		// 还没有本周期记录（节点还没上报过）：先建一个空周期。
+		// ★ 必须标 NeedBaseline：此刻拿不到真实计数器，LastRx/LastTx 只能是 0，
+		// 不标的话下一次上报会把整机累计流量当成本期增量。
+		tc = &model.TrafficCycle{
+			Start:        trafficCycleStart(time.Now(), n.TrafficResetDay),
+			NeedBaseline: true,
+		}
 		s.traffic[nodeID] = tc
 	}
 	// 按口径把 want 落到收发两个计数器上，保证 TrafficUsage.Used 恰好等于 want。
@@ -1851,6 +1880,7 @@ func (s *Store) resolveAlert(ruleID, nodeID, serviceID string) bool {
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
 	resolved := false
+	var closedIDs []string
 	for _, a := range s.alerts {
 		if a.RuleID != ruleID || a.ServiceID != serviceID || a.ResolvedAt != 0 {
 			continue
@@ -1860,13 +1890,46 @@ func (s *Store) resolveAlert(ruleID, nodeID, serviceID string) bool {
 			continue
 		}
 		a.ResolvedAt = now
+		closedIDs = append(closedIDs, a.ID)
 		resolved = true
 	}
 	if resolved {
+		// ★ 恢复之后，队列里这条告警的「告警」通知不再有意义。
+		// 不撤销的话，开启免打扰/摘要或首次投递失败进入退避时，
+		// 运维会先收到「已恢复」，随后又收到一条「告警」并再无纠正
+		// —— 最后一条消息永远指向一个已经解决的问题。
+		s.suppressFiringJobsLocked(closedIDs, "告警已恢复")
 		// 恢复状态必须落盘，否则重启后已恢复的告警会「复活」。
 		s.RequestSave()
 	}
 	return resolved
+}
+
+// suppressFiringJobsLocked 撤销这些告警尚未投递的「告警」通知。
+//
+// 只压 Resolved=false 的任务：同一告警的「已恢复」通知必须照发，
+// 它是运维判断事情结束的唯一凭据。
+func (s *Store) suppressFiringJobsLocked(alertIDs []string, reason string) {
+	if len(alertIDs) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(alertIDs))
+	for _, id := range alertIDs {
+		seen[id] = struct{}{}
+	}
+	for _, j := range s.notifyJobs {
+		if j.Status != model.NotifyPending || j.Resolved {
+			continue
+		}
+		if _, ok := seen[j.AlertID]; !ok {
+			continue
+		}
+		j.Status = model.NotifySuppressed
+		j.SuppressedBy = "resolved"
+		j.LastError = reason
+		j.NextAttemptAt = 0
+		s.notifyStats.Suppressed++
+	}
 }
 
 // ActiveAlertCount 统计未恢复告警数。
@@ -2035,9 +2098,13 @@ func (s *Store) ResolveRuleAlerts(ruleID string) []*model.Alert {
 	}
 	// 规则停用后，队列里尚未投递的 firing 通知同样应该作废；
 	// 否则恢复通知已经发出，旧告警却还会晚一步到达。
+	//
+	// ★ 但「已恢复」的通知必须留下：停用规则时引擎正是靠它告诉运维
+	// 「这条告警结束了」。一起压制的话，界面上告警被关掉、通知里却只有
+	// 先前那条告警，此后永远收不到恢复 —— 比不关还难排查。
 	suppressed := 0
 	for _, j := range s.notifyJobs {
-		if j.RuleID == ruleID && j.Status == model.NotifyPending {
+		if j.RuleID == ruleID && j.Status == model.NotifyPending && !j.Resolved {
 			j.Status = model.NotifySuppressed
 			j.SuppressedBy = ruleID
 			j.LastError = "规则已停用"

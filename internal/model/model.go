@@ -132,6 +132,13 @@ type TrafficCycle struct {
 	// Incomplete 表示本周期经历过"计数口径变化"（网卡集合变更 / 计数器
 	// 异常归零），用量数字可能与服务商面板对不上；「校正本期」可修正并清除。
 	Incomplete bool `json:"incomplete,omitempty"`
+	// NeedBaseline 表示「本周期已有人工补录，但还没有拿到真实计数器基线」。
+	//
+	// 手动校正可能发生在节点尚未上报过任何指标时（迁移过来还没装 Agent），
+	// 此时 LastRx/LastTx 只能是 0。若不加这个标记，下一次上报会把
+	// /proc/net/dev 的自开机累计值当成"本次增量"整段记进本期用量。
+	// 旧快照没有这个字段（零值 false）= 基线已就绪，行为不变。
+	NeedBaseline bool `json:"needBaseline,omitempty"`
 }
 
 // TrafficUsage 是节点当前流量周期的展示数据。
