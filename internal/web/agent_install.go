@@ -716,7 +716,7 @@ func (s *Server) handleAgentChecksum(w http.ResponseWriter, r *http.Request) {
 // 节点接入命令会被管理员复制到目标服务器的 shell 里执行，所有插值参数
 // 必须按字面量处理：即使各值当前都来自系统生成（hex）或经过校验的地址，
 // 拼接侧也不信任上游 —— 与 normalizePanelLink 的主机白名单互为双保险。
-// 单引号内唯一需要处理的是单引号本身（'\'' 惯用法）。
+// 单引号内唯一需要处理的是单引号本身（'\” 惯用法）。
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

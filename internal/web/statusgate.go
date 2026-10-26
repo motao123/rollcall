@@ -130,6 +130,7 @@ func (l *tokenFailLimiter) succeed(ip string) {
 	defer l.mu.Unlock()
 	delete(l.state, ip)
 }
+
 // publicTokenOK 校验访问令牌，命中查询串时顺手种 Cookie。
 //
 // 失败尝试走 tokenFailLimiter 独立计数（在线枚举防护，v1.35.2）；
