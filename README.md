@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.35.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.35.1**（`./rollcall-server -version` 可查）。
 
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
@@ -1562,6 +1562,21 @@ certificate_days_remaining,uptime_percent_24h}`
 ---
 
 ## 十二、实际部署验证
+
+### v1.35.1（2026-10-26，公开页语义色修复 + 生产切 Caddy/ACME）
+
+- **修复公开页进度条全部透明**：v1.28.0 公开页用 EP 垫片替代 Element Plus 全量 CSS
+  （省 361KB），但主题 JS 只注入 `--el-color-primary` 家族，
+  **`success/warning/danger/info` 四个语义色从此无人定义** —— 卡片里 CPU/内存/磁盘
+  进度条、可用率状态点、网速迷你条、KPI 配色全部解析为透明：数字正常、条不可见，
+  且 CSP/缓存等常规排查都指向"正常"。现在 `status.css` 的 `:root` 补齐 EP 官方色值
+  （`#67c23a/#e6a23c/#f56c6c/#909399`，深色继承）。教训：**裁掉某个样式来源时，
+  要 grep 它原来提供的全部变量，不能只补"正在用"的那一族**
+- **生产部署切换到 Caddy + ACME**（`https://status.endgo.top`）：Let's Encrypt 自动
+  签发续期，Caddy 反代 `127.0.0.1:19080`；服务端回绑回环明文、公网 19080 关闭；
+  13 台 Agent 删除 `serverCertPin`/`tlsSkipVerify` 走系统 CA **真实验证**，
+  「加密但未验证服务端身份」缺口关闭，证书轮换与 Agent 解耦。运维细节见
+  `docs/operations.md` 7.6
 
 ### v1.35.0（2026-10-26，修完最后三条已知缺陷 + 温度采集）
 

@@ -21,6 +21,13 @@
   --app-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --el-font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+  /* Element Plus 语义色（EP 官方值）。v1.28.0 移除 EP 全量 CSS 后，主题 JS 只注入
+   * --el-color-primary 家族；这四个语义色没人定义，导致进度条/状态点/迷你条/
+   * KPI 配色全部解析为透明（v1.35.1 修复）。深色由 html.dark 继承。 */
+  --el-color-success: #67c23a;
+  --el-color-warning: #e6a23c;
+  --el-color-danger: #f56c6c;
+  --el-color-info: #909399;
 }
 
 html.dark {

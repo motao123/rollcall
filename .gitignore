@@ -39,6 +39,9 @@ Thumbs.db
 *.test
 coverage.out
 
+# 本地运维脚本与抓取的临时数据（scripts/ 内可能含面板密码等敏感临时文件，一律不入库）
+/scripts/
+
 # 密钥与证书材料
 # rollsign 默认把 Agent 自更新签名私钥写到仓库根（rollsign.key）。
 # 私钥一旦入库，等于把更新信任链的根交出去 —— 攻击者可签任意 Agent 二进制。

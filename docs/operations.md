@@ -16,7 +16,7 @@
 | Agent 配置 | `/etc/rollcall/agent.json` | `root:rollcall-agent 0640` |
 | Agent 单元 | `/etc/systemd/system/rollcall-agent.service` | 以 `rollcall-agent` 用户运行 |
 | Agent 分发目录 | `/opt/rollcall/agent` | 仅启用 `-agent-dir` 时存在；含 amd64/arm64/arm/386 二进制，供一键安装与升级下载 |
-| TLS 证书（v1.29.0+） | `/etc/rollcall/tls/` | 自签证书（10 年，SAN 含面板 IP/127.0.0.1/localhost），属主 `rollcall` 0640/0600；经 `/etc/systemd/system/rollcall-server.service.d/tls.conf` drop-in 启用内置 TLS。回滚 = 删除 drop-in + `daemon-reload` + restart。Agent 侧 agent.json 已切 https 并带 `tlsSkipVerify: true`（切换前明文配置备份为 `agent.json.http-bak`） |
+| TLS 证书（v1.29.0+） | `/etc/rollcall/tls/` | **当前生产（2026-10-26 起）已改由 Caddy 终止 TLS**（ACME 自动签发续期，见 7.6 末尾），本目录证书与 `tls.conf` drop-in 已移除（恢复内置 TLS 见该节回滚说明） |
 
 ### 容量基线
 
@@ -875,6 +875,23 @@ openssl x509 -in /etc/rollcall/tls/cert.pem -noout -fingerprint -sha256   # 人�
 **边界**：指纹防的是「证书被替换」；首次安装那一刻若链路已被控制，取到的指纹
 也会被一起替换（TOFU 固有盲区，面板显示指纹就是为了让人工核对）。
 要根治需要公共 CA 证书（上域名后换 Caddy / Let's Encrypt）。
+
+**★ v1.35.1 生产实况（2026-10-26）：已根治。** 机群切换到 Caddy + ACME 架构：
+
+- 生产入口改为 `https://status.endgo.top`（Caddy 2.6.2 监听 80/443，ACME 自动签发续期，
+  Let's Encrypt，HTTP-01）；`/etc/caddy/Caddyfile` 仅一条 `reverse_proxy 127.0.0.1:19080`
+- 服务端回绑 `127.0.0.1:19080` **明文**（回环明文是合法形态），删 `tls.conf` 与
+  `-allow-insecure`；公网不再暴露 19080。回滚：`rm zz-loopback.conf` +
+  恢复 `/root/dropin-private-targets.conf.bak` + `daemon-reload` + restart
+- **13 台 Agent 全部删掉 `serverCertPin`/`tlsSkipVerify`**，`server` 改为域名，
+  靠系统 CA 包真实验证服务端身份（实测 12 台裁剪镜像全部自带 ca-certificates，
+  无需兜底；若遇缺包节点，可用 `SSL_CERT_FILE` 环境变量指向 ISRG Root X1 而不装包）
+- 切换前每台备份 `agent.json.bak-acme`；IP 直连 `agent.json.http-bak` 仍在
+- clientIP/trustedProxies（web.go）默认信任回环，Caddy 同机部署零配置，
+  lastIP/限速/审计经反代后仍是真实客户端 IP，已实测
+- 面板「对外地址」已设为 `https://status.endgo.top`（落盘于 settings，非启动参数）
+- ACME 注意：Caddy 证书 60 天自动续期，**Agent 走 CA 验证后与证书轮换解耦**，
+  不再需要「换证书先逐台删指纹」的编排；域名解析变更或 80 端口被封才会影响续期
 
 ### 7.7 ICMP 探测的前提（v1.17.0+）
 
