@@ -74,7 +74,7 @@ func (s *Server) notifyIPChange(n *model.Node, prev, next string) {
 		Severity: severity,
 		NodeName: n.Name,
 		NodeID:   n.ID,
-		Link:     s.panelLink,
+		Link:     s.PanelLink(),
 		TS:       time.Now().Unix(),
 	})
 }
@@ -96,7 +96,7 @@ func (s *Server) notifyLogin(username, ip, method string) {
 		Title:    "面板登录",
 		Body:     fmt.Sprintf("账号 %s 从 %s 登录（%s）。如果不是你本人操作，请立即改密并检查审计日志。", username, ip, method),
 		Severity: sev,
-		Link:     s.panelLink,
+		Link:     s.PanelLink(),
 		TS:       time.Now().Unix(),
 	})
 }

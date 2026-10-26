@@ -50,11 +50,14 @@ type Server struct {
 	user       *auth.User
 	userPath   string
 	sessions   *auth.Sessions
-	panelLink  string
-	cnyRate    float64
-	limiter    *authFailureLimiter
-	outbox     *outbox.Manager
-	notifyErr  error
+	// panelLink 是「面板对外地址」：域名反代时填域名，用于告警通知里的链接
+	// 与 Agent 接入命令。可在面板里改（落盘到 settings），启动参数只是默认值。
+	panelLinkMu sync.RWMutex
+	panelLink   string
+	cnyRate     float64
+	limiter     *authFailureLimiter
+	outbox      *outbox.Manager
+	notifyErr   error
 
 	// opNotifyMu/opNotifyAt 是运营类通知的去重窗口（IP 变更等）。
 	opNotifyMu sync.Mutex
@@ -163,7 +166,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 	srv := &Server{st: st, runner: r, engine: e,
 		adminToken: cfg.AdminToken, authUser: cfg.AuthUser, authPass: cfg.AuthPass,
 		user: cfg.User, userPath: cfg.UserPath, sessions: cfg.Sessions,
-		panelLink: cfg.PanelLink, cnyRate: rate,
+		cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
 		certPin:        cfg.CertPin,
@@ -174,6 +177,11 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		events:         newEventHub(),
 		http:           newHTTPMetrics(),
 		startedAt:      time.Now()}
+	// 对外地址：启动参数优先（便于容器里用环境变量写死），否则用面板里保存的。
+	srv.panelLink = strings.TrimSpace(cfg.PanelLink)
+	if srv.panelLink == "" {
+		srv.panelLink = strings.TrimSpace(st.GetSetting("panel_link"))
+	}
 	if cfg.DataDir != "" {
 		srv.themeDir = filepath.Join(cfg.DataDir, "themes")
 	}
@@ -201,7 +209,7 @@ func (s *Server) applyNotifyConfig(cfg *notify.Config) {
 	}
 	s.engine.SetRepeat(cfg.RepeatInterval)
 	s.engine.SetOfflineGrace(cfg.OfflineGraceSec)
-	s.engine.SetLink(s.panelLink)
+	s.engine.SetLink(s.PanelLink())
 	if s.outbox != nil {
 		s.engine.SetNotifier(func(m notify.Message) { s.outbox.Enqueue(m) })
 		return
@@ -341,6 +349,8 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/services", authAdmin, http.HandlerFunc(s.handleAdminServices)},
 		{"/api/admin/services/", authAdmin, http.HandlerFunc(s.handleAdminServiceByID)},
 		{"/api/admin/settings", authAdmin, http.HandlerFunc(s.handleAdminSettings)},
+		// 面板对外地址（域名反代时设置）：影响告警链接与接入命令里的地址。
+		{"/api/admin/settings/panel-link", authAdmin, http.HandlerFunc(s.handlePanelLink)},
 		{"/api/admin/health", authAdmin, http.HandlerFunc(s.handleAdminHealth)},
 		{"/api/admin/renewals", authAdmin, http.HandlerFunc(s.handleAdminRenewals)},
 		{"/api/admin/renewals/", authAdmin, http.HandlerFunc(s.handleAdminRenewalByID)},
@@ -2144,7 +2154,7 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			"notify":    cfg.Redacted(),
 			"channels":  cfg.EnabledChannels(),
 			"defs":      notify.Defs(),
-			"panelLink": s.panelLink,
+			"panelLink": s.PanelLink(),
 			"version":   version.Version,
 		}
 		if warn != "" {
@@ -2271,7 +2281,7 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		NodeName: "Rollcall 控制端",
 		RuleName: "连通性自检",
 		TS:       time.Now().Unix(),
-		Link:     s.panelLink,
+		Link:     s.PanelLink(),
 	})
 	writeJSON(w, 200, map[string]any{"results": results})
 }

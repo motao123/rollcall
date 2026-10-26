@@ -90,7 +90,7 @@ func (s *Server) handleAdminNodesImport(w http.ResponseWriter, r *http.Request) 
 	// 地址优先用「面板对外地址」：面板可能经反代/隧道访问，请求里的 Host
 	// 未必是别人能连上的地址（例如从回环地址调 API 时拿到 127.0.0.1）。
 	// 与单台「节点接入」弹窗的取值口径保持一致。
-	base := strings.TrimRight(strings.TrimSpace(s.panelLink), "/")
+	base := strings.TrimRight(strings.TrimSpace(s.PanelLink()), "/")
 	if base == "" {
 		base = requestBaseURL(r)
 	}

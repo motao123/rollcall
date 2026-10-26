@@ -64,7 +64,7 @@ func (s *Server) handleNodeLogin(n *model.Node, ev model.LoginEvent) {
 		Severity: sev,
 		NodeName: n.Name,
 		NodeID:   n.ID,
-		Link:     s.panelLink,
+		Link:     s.PanelLink(),
 		TS:       ev.TS,
 	})
 }

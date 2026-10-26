@@ -3583,6 +3583,29 @@ async function viewSettings() {
         即可只替换二进制、保留现有配置（需服务端启用 <code>-agent-dir</code>）。
       </p>
       <details class="panel panel-pad">
+        <summary class="sum">⚙ 面板对外地址（域名反代）</summary>
+        <p class="field-hint" style="margin:8px 0">
+          用域名反代到 <code>ip:端口</code> 时填这里：<b>告警通知里的链接</b>与
+          <b>Agent 接入命令里的地址</b>都会用它。留空表示用当前浏览器访问的地址。
+          只支持站点根路径（<code>https://monitor.example.com</code>），不支持
+          <code>/rollcall/</code> 这类子路径部署。
+        </p>
+        <form id="panelLinkForm" class="form-grid">
+          <label class="field">
+            <span class="field-label">对外地址</span>
+            <input type="text" name="link" value="${esc(state.panelLink || '')}"
+              placeholder="https://monitor.example.com" autocomplete="off">
+            <span class="field-hint">
+              生效前提：反代要传 <code>X-Forwarded-Proto</code>，且服务端用
+              <code>-trusted-proxies</code> 信任该代理地址；否则记不到真实客户端 IP，
+              登录 Cookie 也不会带 Secure。
+            </span>
+          </label>
+          <div class="form-actions"><button class="btn primary" type="submit">保存地址</button></div>
+        </form>
+        <p class="field-hint" id="panelLinkHint" style="margin:6px 0 0"></p>
+      </details>
+      <details class="panel panel-pad">
         <summary class="sum">⇪ 批量导入（迁移用）</summary>
         <p class="field-hint" style="margin:8px 0">
           一行一台，逗号或制表符分隔：<code>名称,服务商,地区,国家,分组</code>（后四项可留空）。
@@ -4294,6 +4317,27 @@ async function viewSettings() {
       } catch (e) { toast('删除失败：' + e.message, 'err'); }
     };
   });
+
+  $('#panelLinkForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const input = e.target.querySelector('input[name=link]');
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      const r = await adminApi('/api/admin/settings/panel-link', {
+        method: 'POST',
+        body: JSON.stringify({ link: (input.value || '').trim() }),
+      });
+      state.panelLink = r.panelLink || '';
+      input.value = state.panelLink;
+      toast(state.panelLink ? '已保存：' + state.panelLink : '已清空，改用当前访问地址');
+    } catch (err) {
+      // 后端会把「不支持子路径」「缺少 scheme」等原因原样返回，直接显示比笼统报错有用
+      toast('保存失败：' + err.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  };
 
   $('#nodeImportForm').onsubmit = async (e) => {
     e.preventDefault();
