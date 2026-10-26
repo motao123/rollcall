@@ -2359,6 +2359,8 @@ func (s *Server) handleRuleMeta(w http.ResponseWriter, r *http.Request) {
 				Hint: "可发现连接泄漏或异常扫描"},
 			{Value: "procs", Label: "进程数", Unit: "个", Op: "gt", Min: 1, Max: 1000000, Step: 1,
 				Hint: "进程暴涨可能是 fork 风暴"},
+			{Value: "temp", Label: "温度", Unit: "℃", Op: "gt", Min: 30, Max: 150, Step: 1,
+				Hint: "取 hwmon 传感器的最高温；常用阈值 70–90。没有温度传感器的节点不会触发"},
 			{Value: "traffic_quota", Label: "流量配额使用率", Unit: "%", Op: "gt", Min: 1, Max: 1000, Step: 1,
 				Hint: "按节点设置的月度配额计算；常用阈值 90–100"},
 			{Value: "service_down", Label: "服务探测失败", Unit: "", Op: "gt", NoVal: true,
@@ -2631,7 +2633,19 @@ func (s *Server) handleAdminRuleByID(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		metricChanged := updated.Metric != existing.Metric
 		s.st.UpsertRule(&updated)
+		if metricChanged && s.engine != nil {
+			// ★ 换指标类别（节点类 ↔ 服务类）后，旧告警的键语义整体变了
+			// （节点类键是 rule|node，服务类键是 rule|service）：引擎不再评估
+			// 旧键，那些告警既不会自愈、也不该自愈 —— "CPU 高"的告警在规则
+			// 改成"磁盘高"之后没有"恢复"可言。整条规则的告警与跟踪状态
+			// 一并关闭，理由写明是规则被改，而不是伪装成恢复。
+			closed := s.st.ResolveRuleAlerts(id)
+			if len(closed) > 0 {
+				s.engine.RecoverRuleClosed(id, closed, "规则指标已修改")
+			}
+		}
 		writeJSON(w, 200, updated)
 
 	case http.MethodDelete:
@@ -2747,7 +2761,7 @@ func normalizeScope(values []string) []string {
 func validMetric(m string) bool {
 	switch m {
 	case "offline", "cpu", "mem", "disk", "swap", "load", "load5", "load15",
-		"tcp_conn", "procs", "traffic_quota",
+		"tcp_conn", "procs", "traffic_quota", "temp",
 		"service_down", "latency", "loss", "jitter", "cert_days":
 		return true
 	}
@@ -2779,6 +2793,9 @@ func thresholdRange(metric string) (float64, float64) {
 		return 1, 3650
 	case "traffic_quota":
 		return 1, 1000
+	case "temp":
+		// hwmon 的合理区间：30 以下几乎不存在，150 以上必然是读数错误
+		return 30, 150
 	case "offline", "service_down":
 		return 0, 0
 	}

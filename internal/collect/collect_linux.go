@@ -291,6 +291,10 @@ func (c *Collector) Collect() model.Metrics {
 	// 网络（排除 lo）：总量用于流量配额，明细用于面板展示
 	m.NetRx, m.NetTx, m.NICs = readNetDev()
 
+	// 温度（hwmon 传感器的最高值）。多数 VPS 没有传感器，这里就是 0，
+	// 字段整个缺席 —— 对"没有数据"与"真的是 0℃"必须可区分。
+	m.TempC = readTempC()
+
 	// 磁盘 IO 累计扇区数与多挂载点
 	m.DiskReadBytes, m.DiskWriteBytes = readDiskIO()
 	m.Mounts = readMounts()
@@ -417,10 +421,37 @@ func readNetDev() (rx, tx uint64, nics []model.NICInfo) {
 		nics = append(nics, model.NICInfo{Name: iface, Rx: r, Tx: t})
 	}
 	sort.Slice(nics, func(i, j int) bool { return nics[i].Rx+nics[i].Tx > nics[j].Rx+nics[j].Tx })
-	if len(nics) > 8 {
-		nics = nics[:8]
-	}
 	return
+}
+
+// readTempC 返回 hwmon 传感器的最高温度（℃）；找不到任何有效读数时返回 0。
+//
+// 只认 >0 的读数：部分虚拟化环境会暴露恒为 0 的传感器文件，
+// 那种"0℃"不是数据，混进来会把真实温度永远压成 0。
+// 取最大值而不是平均值：温度告警关心的是"最热的那一点"。
+func readTempC() float64 {
+	entries, err := os.ReadDir("/sys/class/hwmon")
+	if err != nil {
+		return 0
+	}
+	var maxC float64
+	for _, e := range entries {
+		inputs, _ := filepath.Glob("/sys/class/hwmon/" + e.Name() + "/temp*_input")
+		for _, p := range inputs {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			milli, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+			if err != nil {
+				continue
+			}
+			if c := float64(milli) / 1000; c > maxC {
+				maxC = c
+			}
+		}
+	}
+	return maxC
 }
 
 // readDiskIO 汇总整盘读写扇区（diskstats 固定以 512 字节为单位）。

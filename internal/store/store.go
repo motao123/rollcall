@@ -1839,6 +1839,30 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 			return false, false
 		}
 	}
+	// ★ 节点类告警按 (规则, 节点) 去重；服务类告警必须按 (规则, 服务) 去重。
+	// 引擎的键就是 rule|service（不含节点）—— 服务改挂到另一台节点是
+	// "同一条告警换了位置"，不是两条告警。早先这里连 NodeID 一起比对，
+	// 改挂节点后会再开一条新告警，旧的那条既不会自愈也不会关闭（双份+僵尸）。
+	if a.ServiceID != "" {
+		for _, ex := range s.alerts {
+			if ex.RuleID != a.RuleID || ex.ServiceID != a.ServiceID || ex.ResolvedAt != 0 {
+				continue
+			}
+			a.ID = ex.ID
+			changed := ex.Value != a.Value || ex.Message != a.Message ||
+				ex.NodeID != a.NodeID || ex.NodeName != a.NodeName
+			ex.NodeID = a.NodeID
+			ex.NodeName = a.NodeName
+			if ex.Value != a.Value || ex.Message != a.Message {
+				ex.Value = a.Value
+				ex.Message = a.Message
+			}
+			if changed {
+				s.RequestSave()
+			}
+			return false, true
+		}
+	}
 	for _, ex := range s.alerts {
 		if ex.RuleID == a.RuleID && ex.NodeID == a.NodeID &&
 			ex.ServiceID == a.ServiceID && ex.ResolvedAt == 0 {

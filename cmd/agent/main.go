@@ -319,6 +319,15 @@ func main() {
 			return fmt.Errorf("当前平台 %s 不支持指标采集（仅 Linux），拒绝上报全零数据", runtime.GOOS)
 		}
 		m := c.Collect()
+		// ★ 网卡指纹必须覆盖**参与求和的完整集合**：服务端拿指纹判断
+		// "计数口径是否变化"，而流量增量来自全集求和。早先版本把明细截到
+		// 前 8 块再算指纹 —— 超过 8 块网卡的机器上，第 9 块网卡增删
+		// 改变了求和口径却不改变指纹，那次跳变就被记成了真实流量。
+		// 明细仍截前 8 块（只用于面板展示，控制上报体大小）。
+		nicFP := nicSetFingerprint(m.NICs)
+		if len(m.NICs) > 8 {
+			m.NICs = m.NICs[:8]
+		}
 		rep := model.Report{NodeID: cfg.NodeID, Host: host, Metrics: m}
 		// 只带"自上次上报以来的新登录"，平时为空数组。
 		// 注意：这个字段要求服务端**先升级**（服务端用 DisallowUnknownFields 解码），
@@ -358,8 +367,9 @@ func main() {
 		// 统计网卡集合的指纹（沿用登录状态头的模式）：集合变化说明累计计数器的
 		// 口径变了（WARP/多 WAN 切换、网卡热插拔），服务端据此重建流量基线，
 		// 防止切换瞬间的大跳变被记成真实流量。旧服务端会忽略这个头。
-		if fp := nicSetFingerprint(m.NICs); fp != "" {
-			req.Header.Set("X-NIC-Set", fp)
+		// ★ 指纹在截断**之前**计算：它必须与求和口径一致（见上面 m.NICs 截断处）。
+		if nicFP != "" {
+			req.Header.Set("X-NIC-Set", nicFP)
 		}
 
 		resp, err := client.Do(req)

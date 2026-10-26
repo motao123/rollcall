@@ -1022,6 +1022,13 @@ func (e *Engine) check(rule *model.AlertRule, n *model.Node, now int64) (float64
 		v = float64(m.TCPConn)
 	case "procs":
 		v = float64(m.Procs)
+	case "temp":
+		// 0 = 节点没有温度传感器：按"无数据"处理，不触发也不维持告警。
+		// 不能把 0 当成读数 —— 那会让 gt 规则永远不响、lt 规则永远在响。
+		if m.TempC <= 0 {
+			return 0, false
+		}
+		v = m.TempC
 	default:
 		return 0, false
 	}
@@ -1113,6 +1120,9 @@ func describe(rule *model.AlertRule, node string, v float64) string {
 		return fmt.Sprintf("%s TCP 连接数 %.0f，%s阈值 %.0f", node, v, rel, rule.Threshold)
 	case "procs":
 		return fmt.Sprintf("%s 进程数 %.0f，%s阈值 %.0f", node, v, rel, rule.Threshold)
+	case "temp":
+		return fmt.Sprintf("%s 温度 %.1f℃，%s阈值 %.0f℃（取 hwmon 传感器的最高值）",
+			node, v, rel, rule.Threshold)
 	case "traffic_quota":
 		if rule.Op == "lt" {
 			return fmt.Sprintf("%s 本月流量使用率 %.1f%%，低于阈值 %.0f%%", node, v, rule.Threshold)
@@ -1165,6 +1175,8 @@ func metricName(m string) string {
 		return "5 分钟负载"
 	case "load15":
 		return "15 分钟负载"
+	case "temp":
+		return "温度"
 	}
 	return m
 }

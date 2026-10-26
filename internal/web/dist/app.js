@@ -1507,6 +1507,21 @@ async function viewNodeDetail(id) {
       netVals.push(Math.max(0, d / dt));
     }
   }
+  // 温度：hwmon 传感器的最高温。节点没有传感器时全程无值，整块不渲染。
+  // 过渡期（Agent 刚升级）前几个点可能缺温度：用第一个有效值补齐起点、
+  // 缺失点沿用上一个已知值 —— 温度是缓变量，这样画不会出现"跌到 0"的假象。
+  let tempVals = null;
+  const firstTempPt = pts.find((p) => typeof p.tempC === 'number' && p.tempC > 0);
+  if (firstTempPt) {
+    let cur = firstTempPt.tempC;
+    tempVals = pts.map((p) => {
+      if (typeof p.tempC === 'number' && p.tempC > 0) cur = p.tempC;
+      return cur;
+    });
+  }
+  const hasTemp = !!(tempVals && tempVals.filter((v) => v > 0).length >= 2);
+  const lastTemp = hasTemp ? tempVals[tempVals.length - 1] : 0;
+
   // 磁盘 I/O 速率与网络同理，但聚合桶只落了网络增量、没有磁盘 I/O 增量，
   // 因此只在原始区间（1h）可算；长范围明确说明而不是画一条假曲线。
   const diskIoVals = [];
@@ -1599,6 +1614,12 @@ async function viewNodeDetail(id) {
           ${areaChart(diskVals, 'var(--warn)', { times, label: '磁盘', fmt: (v) => v.toFixed(1) + '%' })}
           ${winStat(diskVals, (v) => v.toFixed(1) + '%')}
         </div>
+        ${hasTemp ? `<div class="chart-card">
+          <div class="chart-head"><span class="chart-title">温度（hwmon 最高）</span>
+            <span class="chart-val mono" style="color:${lastTemp > 85 ? 'var(--crit)' : 'var(--fg)'}">${lastTemp.toFixed(1)}℃</span></div>
+          ${areaChart(tempVals, 'var(--warn)', { times, label: '温度', fmt: (v) => v.toFixed(0) + '℃' })}
+          ${winStat(tempVals, (v) => v.toFixed(1) + '℃')}
+        </div>` : ''}
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">网络吞吐速率</span>
             <span class="chart-val" style="font-size:13px">${hasData ? `<span class="mono">↓${bytes(last.netRx)} ↑${bytes(last.netTx)}</span> <span style="color:var(--fg-3);font-weight:400;letter-spacing:0">累计</span>` : '—'}</span></div>

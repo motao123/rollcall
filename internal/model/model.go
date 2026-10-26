@@ -102,6 +102,9 @@ type Metrics struct {
 	TCPConn   int     `json:"tcpConn"`
 	Uptime    uint64  `json:"uptime"` // 秒
 	Procs     int     `json:"procs"`
+	// TempC 是 hwmon 传感器的最高温度（℃）。0/缺席表示无数据：
+	// 多数 VPS 没有温度传感器，字段整个不出现，不参与聚合与告警。
+	TempC float64 `json:"tempC,omitempty"`
 	// DiskReadBytes / DiskWriteBytes 是累计磁盘 I/O 字节数。
 	DiskReadBytes  uint64 `json:"diskReadBytes,omitempty"`
 	DiskWriteBytes uint64 `json:"diskWriteBytes,omitempty"`
@@ -892,6 +895,8 @@ type HistoryPoint struct {
 	NetRxDelta uint64  `json:"netRxDelta"`
 	NetTxDelta uint64  `json:"netTxDelta"`
 	Count      uint32  `json:"count"`
+	// TempC 是桶内最高温（℃）；0 表示该桶没有温度数据（老桶或节点无传感器）。
+	TempC float64 `json:"tempC,omitempty"`
 }
 
 // Overview 是总览页的聚合数据。

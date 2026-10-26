@@ -140,6 +140,10 @@ type historyBucket struct {
 	MemUsedSum  uint64 `json:"mus,omitempty"`
 	DiskUsedSum uint64 `json:"dus,omitempty"`
 	UsageOK     bool   `json:"uo,omitempty"`
+	// TempMax 是桶内最高温（℃）。用 max 而不是均值：温度告警关心
+	// "最热的那一点"，均值会把一次 15 秒的风扇停转抹平。
+	// 0 表示桶内没有温度数据（老桶或节点无传感器）。
+	TempMax float32 `json:"tmax,omitempty"`
 }
 
 // bucketRing 是按时间升序排列的定长聚合桶缓冲。
@@ -233,6 +237,9 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 	b.DiskTotal = m.DiskTotal
 	b.MemUsedSum = addSat(b.MemUsedSum, m.MemUsed)
 	b.DiskUsedSum = addSat(b.DiskUsedSum, m.DiskUsed)
+	if t := float32(m.TempC); t > b.TempMax {
+		b.TempMax = t
+	}
 	if hasPrev {
 		b.NetRx += counterDelta(prev.NetRx, m.NetRx)
 		b.NetTx += counterDelta(prev.NetTx, m.NetTx)
@@ -635,6 +642,7 @@ func (s *Store) HistorySeries(nodeID, resolution string, since int64) []model.Hi
 			NetRxDelta: b.NetRx,
 			NetTxDelta: b.NetTx,
 			Count:      b.Count,
+			TempC:      float64(b.TempMax),
 		}
 		if b.UsageOK && b.Count > 0 {
 			p.MemUsed = b.MemUsedSum / uint64(b.Count)
