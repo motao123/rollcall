@@ -431,7 +431,16 @@ func main() {
 	errCh := make(chan error, 1)
 	go func() {
 		if *tlsCert != "" {
-			errCh <- srv.ListenAndServeTLS(*tlsCert, *tlsKey)
+			// 用自带的 listener 先分辨明文/ TLS：明文请求跳转到 https，
+			// 而不是让 Go 回一行"Client sent an HTTP request to an HTTPS server."
+			//（浏览器里那就是一片空白）。
+			ln, lerr := net.Listen("tcp", *addr)
+			if lerr != nil {
+				errCh <- lerr
+				return
+			}
+			pl := &plaintextLogger{}
+			errCh <- srv.ServeTLS(&sniffListener{Listener: ln, onPlaintext: pl.log}, *tlsCert, *tlsKey)
 			return
 		}
 		errCh <- srv.ListenAndServe()
