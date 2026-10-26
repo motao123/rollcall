@@ -31,7 +31,7 @@ func newAuthWebAt(t *testing.T, ttl time.Duration) (http.Handler, string, *auth.
 	userPath := filepath.Join(dir, "admin-user.json")
 	u, created, generated, err := auth.LoadOrCreateUser(
 		userPath,
-		"imotao", "Login@Example.com", testAdminPassword, false)
+		"demo-admin", "Login@Example.com", testAdminPassword, false)
 	if err != nil {
 		t.Fatalf("创建测试管理员失败: %v", err)
 	}
@@ -131,13 +131,13 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 		t.Errorf("会话响应应禁止缓存，实际 Cache-Control=%q", cc)
 	}
 
-	w = loginReq(h, "10.10.0.2", "imotao", "wrong-password-123")
+	w = loginReq(h, "10.10.0.2", "demo-admin", "wrong-password-123")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("错误密码应 401，实际 %d", w.Code)
 	}
 
 	w = doAuthReq(h, http.MethodPost, "/api/auth/login", "10.10.0.3",
-		`{"identifier":"imotao","password":"`+testAdminPassword+`","extra":1}`,
+		`{"identifier":"demo-admin","password":"`+testAdminPassword+`","extra":1}`,
 		map[string]string{"Content-Type": "application/json"}, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("未知字段应 400，实际 %d", w.Code)
@@ -145,7 +145,7 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 
 	// 来自可信代理（默认回环）且带 X-Forwarded-Proto: https 时，Cookie 必须标记 Secure。
 	w = doAuthReq(h, http.MethodPost, "/api/auth/login", "127.0.0.1",
-		`{"identifier":"imotao","password":"`+testAdminPassword+`"}`,
+		`{"identifier":"demo-admin","password":"`+testAdminPassword+`"}`,
 		map[string]string{"Content-Type": "application/json", "X-Forwarded-Proto": "https"}, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("正确密码应 200，实际 %d: %s", w.Code, w.Body.String())
@@ -161,7 +161,7 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 		t.Error("HTTPS 请求下会话 Cookie 必须标记 Secure")
 	}
 	authed, user := decodeSession(t, w)
-	if !authed || user.Username != "imotao" || user.Email != "login@example.com" {
+	if !authed || user.Username != "demo-admin" || user.Email != "login@example.com" {
 		t.Fatalf("登录响应用户信息不符: %+v", user)
 	}
 	if user.TOTPEnabled {
@@ -219,7 +219,7 @@ func TestAuthLoginSessionFlow(t *testing.T) {
 func TestAuthUntrustedForwardedProtoIgnored(t *testing.T) {
 	h, _ := newAuthWeb(t, time.Hour)
 	w := doAuthReq(h, http.MethodPost, "/api/auth/login", "203.0.113.9",
-		`{"identifier":"imotao","password":"`+testAdminPassword+`"}`,
+		`{"identifier":"demo-admin","password":"`+testAdminPassword+`"}`,
 		map[string]string{"Content-Type": "application/json", "X-Forwarded-Proto": "https"}, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
@@ -244,21 +244,21 @@ func TestAuthLoginFailuresAreRateLimited(t *testing.T) {
 	h, _ := newAuthWeb(t, time.Hour)
 	const ip = "10.12.0.1"
 	for i := 0; i < 10; i++ {
-		if w := loginReq(h, ip, "imotao", "wrong-password-123"); w.Code != http.StatusUnauthorized {
+		if w := loginReq(h, ip, "demo-admin", "wrong-password-123"); w.Code != http.StatusUnauthorized {
 			t.Fatalf("第 %d 次失败应 401，实际 %d", i+1, w.Code)
 		}
 	}
-	if w := loginReq(h, ip, "imotao", "wrong-password-123"); w.Code != http.StatusTooManyRequests {
+	if w := loginReq(h, ip, "demo-admin", "wrong-password-123"); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("连续失败后应 429，实际 %d", w.Code)
 	}
-	if w := loginReq(h, "10.12.0.2", "imotao", testAdminPassword); w.Code != http.StatusOK {
+	if w := loginReq(h, "10.12.0.2", "demo-admin", testAdminPassword); w.Code != http.StatusOK {
 		t.Fatalf("其他来源不应受牵连，实际 %d", w.Code)
 	}
 }
 
 func TestAuthExpiredSessionRejected(t *testing.T) {
 	h, _ := newAuthWeb(t, 20*time.Millisecond)
-	w := loginReq(h, "10.13.0.1", "imotao", testAdminPassword)
+	w := loginReq(h, "10.13.0.1", "demo-admin", testAdminPassword)
 	if w.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
 	}
@@ -279,13 +279,13 @@ func TestAuthLoginSuccessResetsFailures(t *testing.T) {
 	h, _ := newAuthWeb(t, time.Hour)
 	const ip = "10.14.0.1"
 	for i := 0; i < 9; i++ {
-		loginReq(h, ip, "imotao", "wrong-password-123")
+		loginReq(h, ip, "demo-admin", "wrong-password-123")
 	}
-	if w := loginReq(h, ip, "imotao", testAdminPassword); w.Code != http.StatusOK {
+	if w := loginReq(h, ip, "demo-admin", testAdminPassword); w.Code != http.StatusOK {
 		t.Fatalf("第 10 次登录（正确密码）应 200，实际 %d", w.Code)
 	}
 	for i := 0; i < 5; i++ {
-		if w := loginReq(h, ip, "imotao", "wrong-password-123"); w.Code != http.StatusUnauthorized {
+		if w := loginReq(h, ip, "demo-admin", "wrong-password-123"); w.Code != http.StatusUnauthorized {
 			t.Fatalf("成功登录后失败计数应清零，第 %d 次实际 %d", i+1, w.Code)
 		}
 	}
@@ -310,21 +310,21 @@ func TestInitialPasswordFileRemovedAfterAuth(t *testing.T) {
 	}
 
 	write()
-	if w := loginReq(h, "10.15.0.1", "imotao", "wrong-password-123"); w.Code != http.StatusUnauthorized {
+	if w := loginReq(h, "10.15.0.1", "demo-admin", "wrong-password-123"); w.Code != http.StatusUnauthorized {
 		t.Fatalf("错误密码应 401，实际 %d", w.Code)
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("失败登录不应删除初始密码文件: %v", err)
 	}
 
-	if w := loginReq(h, "10.15.0.2", "imotao", testAdminPassword); w.Code != http.StatusOK {
+	if w := loginReq(h, "10.15.0.2", "demo-admin", testAdminPassword); w.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
 	}
 	requireGone("成功登录")
 
 	// 改密同样应清理（多实例/手工恢复可能留下旧文件）。
 	write()
-	login := loginReq(h, "10.15.0.3", "imotao", testAdminPassword)
+	login := loginReq(h, "10.15.0.3", "demo-admin", testAdminPassword)
 	cookie := findSessionCookie(t, login)
 	if w := doAuthReq(h, http.MethodPost, "/api/admin/account/password", "10.15.0.4",
 		`{"currentPassword":"`+testAdminPassword+`","newPassword":"another-strong-password-1"}`,
@@ -339,7 +339,7 @@ func TestInitialPasswordFileRemovedAfterAuth(t *testing.T) {
 func TestAdminAccountUpdateFlow(t *testing.T) {
 	h, userPath, _ := newAuthWebAt(t, time.Hour)
 
-	login := loginReq(h, "10.20.0.1", "imotao", testAdminPassword)
+	login := loginReq(h, "10.20.0.1", "demo-admin", testAdminPassword)
 	if login.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", login.Code, login.Body.String())
 	}
@@ -409,7 +409,7 @@ func TestAdminAccountUpdateFlow(t *testing.T) {
 	} else if authed, user := decodeSession(t, w); !authed || user.Username != "operator" {
 		t.Fatalf("续签会话信息不符: authed=%v user=%+v", authed, user)
 	}
-	if w := loginReq(h, "10.20.0.11", "imotao", testAdminPassword); w.Code != http.StatusUnauthorized {
+	if w := loginReq(h, "10.20.0.11", "demo-admin", testAdminPassword); w.Code != http.StatusUnauthorized {
 		t.Fatalf("旧用户名不应再能登录，实际 %d", w.Code)
 	}
 	if w := loginReq(h, "10.20.0.12", "operator", testAdminPassword); w.Code != http.StatusOK {

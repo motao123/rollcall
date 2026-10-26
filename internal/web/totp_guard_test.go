@@ -14,7 +14,7 @@ import (
 // 启用会递增会话版本，旧 Cookie 失效，必须用响应里换发的新会话继续。
 func enableTOTP(t *testing.T, h http.Handler, ip string) (secret string, cookie *http.Cookie) {
 	t.Helper()
-	w := loginReq(h, ip, "imotao", testAdminPassword)
+	w := loginReq(h, ip, "demo-admin", testAdminPassword)
 	if w.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
 	}
@@ -58,7 +58,7 @@ func TestTOTPReplayRejectedOnLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("计算动态码失败: %v", err)
 	}
-	body := `{"identifier":"imotao","password":` + mustJSON(testAdminPassword) + `,"totp":"` + code + `"}`
+	body := `{"identifier":"demo-admin","password":` + mustJSON(testAdminPassword) + `,"totp":"` + code + `"}`
 
 	if w := doAuthReq(h, http.MethodPost, "/api/auth/login", ip, body,
 		map[string]string{"Content-Type": "application/json"}, nil); w.Code != http.StatusOK {

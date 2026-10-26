@@ -428,7 +428,7 @@ func TestLoginRequiresTOTP(t *testing.T) {
 	u.TOTPSecret = secret
 	u.TOTPEnabled = true
 
-	w := loginReq(h, "10.20.0.1", "imotao", testAdminPassword)
+	w := loginReq(h, "10.20.0.1", "demo-admin", testAdminPassword)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("缺少动态码应 401，实际 %d", w.Code)
 	}
@@ -442,14 +442,14 @@ func TestLoginRequiresTOTP(t *testing.T) {
 		wrong = "111111"
 	}
 	w = doAuthReq(h, http.MethodPost, "/api/auth/login", "10.20.0.2",
-		`{"identifier":"imotao","password":`+mustJSON(testAdminPassword)+`,"totp":`+strconv.Quote(wrong)+`}`,
+		`{"identifier":"demo-admin","password":`+mustJSON(testAdminPassword)+`,"totp":`+strconv.Quote(wrong)+`}`,
 		map[string]string{"Content-Type": "application/json"}, nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("错误动态码应 401，实际 %d", w.Code)
 	}
 
 	w = doAuthReq(h, http.MethodPost, "/api/auth/login", "10.20.0.3",
-		`{"identifier":"imotao","password":`+mustJSON(testAdminPassword)+`,"totp":`+strconv.Quote(valid)+`}`,
+		`{"identifier":"demo-admin","password":`+mustJSON(testAdminPassword)+`,"totp":`+strconv.Quote(valid)+`}`,
 		map[string]string{"Content-Type": "application/json"}, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("正确动态码应登录成功，实际 %d: %s", w.Code, w.Body.String())

@@ -1049,7 +1049,7 @@ async function viewOverview() {
         ${sectionActions(`${lists.length} 台 · 按服务商分组`, '<button class="btn sm primary" id="wizBtn">＋ 接入节点</button>')}
       </div>
       <div class="prov-strip">${provChipsHTML(providerRows)}</div>
-      <div class="table-wrap"><table class="node-table">
+      <div class="table-wrap"><table class="node-table" data-page-size="10">
         <thead><tr>
           <th>状态</th><th>节点</th><th>位置</th><th>系统</th>
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
@@ -1168,12 +1168,12 @@ async function viewNodes() {
         <button class="btn tiny" data-batch="upgrade">加入升级清单</button>
         <button class="btn tiny danger" data-batch="delete">删除</button>
       </div>
-      <div class="table-wrap"><table class="nodes-table">
+      <div class="table-wrap"><table class="nodes-table" data-page-size="10">
         <thead><tr>
           <th class="col-check"><input type="checkbox" id="selAll" aria-label="全选"></th>
-          <th>状态</th><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
-          <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th>
-          <th class="num">负载</th><th class="num">运行时长</th><th class="num">流量</th><th class="num">操作</th>
+          <th title="在线 / 离线：15 分钟无上报判为离线">状态</th><th>节点</th><th>服务商</th><th title="机房所在地区">位置</th><th title="操作系统与内核">系统</th>
+          <th class="num" title="当前 CPU 使用率">CPU</th><th class="num" title="当前内存使用率">内存</th><th class="num" title="磁盘空间使用率">磁盘</th>
+          <th class="num" title="1 / 5 / 15 分钟平均负载">负载</th><th class="num" title="自上次开机起的运行时长">运行时长</th><th class="num" title="实时网速与计费周期用量">流量</th><th class="num">操作</th>
         </tr></thead>
         <tbody>${list.map((n) => `<tr class="row-click" data-node="${esc(n.id)}">
             <td><input type="checkbox" class="row-sel" data-id="${esc(n.id)}" aria-label="选择 ${esc(n.name)}"></td>
@@ -1800,7 +1800,7 @@ function serviceCompareSection(data) {
   } else {
     body = `<div class="table-wrap"><table class="services-table svc-compare-table">
       <thead><tr><th>探测</th><th>归属节点</th><th>类型</th><th>目标</th><th>状态</th>
-        <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24 小时可用率</th></tr></thead>
+        <th class="num" title="最近一次探测的往返延迟">延迟</th><th class="num" title="ICMP 探测的丢包率与延迟抖动">丢包 / 抖动</th><th class="num" title="HTTPS 目标的证书剩余天数">证书</th><th class="num" title="最近 24 小时探测成功率">24 小时可用率</th></tr></thead>
       <tbody>${groups.map(serviceCompareGroupHTML).join('')}</tbody>
     </table></div>`;
   }
@@ -1879,9 +1879,9 @@ async function viewServices() {
         <h2 class="section-title">服务探测</h2>
         ${sectionActions(`${list.length}/${svcs.length} 个目标 · 由服务端主动探测`, '<button class="btn sm primary" id="svcAdd">＋ 新增探测</button>')}
       </div>
-      <div class="table-wrap"><table class="services-table">
+      <div class="table-wrap"><table class="services-table" data-page-size="10">
         <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th>
-          <th class="num">延迟</th><th class="num">丢包 / 抖动</th><th class="num">证书</th><th class="num">24 小时可用率</th><th>最近 2 小时</th><th class="num">操作</th></tr></thead>
+          <th class="num" title="最近一次探测的往返延迟">延迟</th><th class="num" title="ICMP 探测的丢包率与延迟抖动">丢包 / 抖动</th><th class="num" title="HTTPS 目标的证书剩余天数">证书</th><th class="num" title="最近 24 小时探测成功率">24 小时可用率</th><th>最近 2 小时</th><th class="num">操作</th></tr></thead>
         <tbody>${list.map((s) => {
           const spark = (s.spark || []).slice(-120).map((p) => p[1]);
           const up = s.uptime || 0;
@@ -1996,7 +1996,7 @@ function openServiceDialog(svc, nodes, after) {
   const dlg = openDialog(editing ? '编辑探测目标' : '新增探测目标', `
     <p class="modal-sub">HTTP/HTTPS 会同时校验证书；TCP/DNS 只判断连通性；ICMP 测的是「机器在不在线 + 往返延迟」（仅 IPv4，需控制端内核允许非特权 ping）。间隔最小 10 秒。</p>
     <form id="svcDialogForm" class="form-grid">
-      ${field('名称', 'name', svc?.name || '', { required: true, placeholder: '例如 imotao.com' })}
+      ${field('名称', 'name', svc?.name || '', { required: true, placeholder: '例如 example.com' })}
       ${selectField('类型', 'type', svc?.type || 'https', [{ v: 'https', t: 'HTTPS' }, { v: 'http', t: 'HTTP' }, { v: 'tcp', t: 'TCP' }, { v: 'dns', t: 'DNS' }, { v: 'icmp', t: 'ICMP（ping）' }])}
       ${field('目标', 'target', svc?.target || '', { required: true, placeholder: 'https://example.com / 1.2.3.4:3306 / 1.1.1.1（ICMP 只填主机）' })}
       ${field('间隔（秒）', 'interval', String(svc?.interval || 60), { type: 'number', hint: '10–86400 秒' })}
@@ -2061,7 +2061,7 @@ async function viewAlerts() {
   const silLabel = (s) => `至 ${clock(s.until)}${s.reason ? ' · ' + s.reason : ''}`;
 
   // 告警记录是卡片列表而不是表格，通用表格分页覆盖不到，单独分页。
-  const alertPageSize = 12;
+  const alertPageSize = 10;
   const alertPages = Math.max(1, Math.ceil(filteredItems.length / alertPageSize));
   const alertPage = Math.max(1, Math.min(alertPages, state.alertPage || 1));
   state.alertPage = alertPage;
@@ -2080,7 +2080,7 @@ async function viewAlerts() {
         <h2 class="section-title">告警规则</h2>
         ${sectionActions(`${filteredRules.length}/${rulesAll.length} 条 · 阈值、持续时间与级别均可调整`, '<button class="btn sm" id="ruleTplBtn">规则模板</button> <button class="btn sm primary" id="addRuleBtn">＋ 新增规则</button>')}
       </div>
-      <div class="table-wrap"><table class="alerts-table" data-page-size="15">
+      <div class="table-wrap"><table class="alerts-table" data-page-size="10">
         <thead><tr><th>规则</th><th>条件</th><th class="num">持续</th><th>级别</th><th class="num">启用</th><th class="num">操作</th></tr></thead>
         <tbody>${filteredRules.map((r) => {
           const m = metricMap[r.metric];
@@ -2665,9 +2665,9 @@ async function viewAssets() {
         <h2 class="section-title">资产台账</h2>
         ${sectionActions(`${rows.length}/${rowsAll.length} 台 · 按到期时间排序`)}
       </div>
-      <div class="table-wrap"><table class="assets-table" data-page-size="20">
+      <div class="table-wrap"><table class="assets-table" data-page-size="10">
         <thead><tr><th>节点</th><th>服务商</th><th>位置</th><th>系统</th>
-          <th>到期日</th><th class="num">剩余</th><th class="num">续费</th><th class="num">月摊</th><th class="num">剩余价值</th><th class="num">操作</th></tr></thead>
+          <th>到期日</th><th class="num" title="距到期剩余天数">剩余</th><th class="num" title="年付折算的续费价格">续费</th><th class="num" title="周期价格按月摊销">月摊</th><th class="num" title="按剩余天数折算的未消耗价值">剩余价值</th><th class="num">操作</th></tr></thead>
         <tbody>${rows.map((r) => {
           const d2 = r.days;
           const cls = !d2 ? 'mute' : d2 <= 7 ? 'crit' : d2 <= 30 ? 'warn' : 'ok';
@@ -2834,7 +2834,7 @@ async function viewCompare() {
         <h2 class="section-title">节点对比</h2>
         <span class="section-meta">点击星标收藏，点击行查看详情</span>
       </div>
-      <div class="table-wrap"><table class="node-table">
+      <div class="table-wrap"><table class="node-table" data-page-size="10">
         <thead><tr><th></th><th>节点</th><th>状态</th><th>分组</th>
           <th class="num">CPU</th><th class="num">内存</th><th class="num">磁盘</th><th class="num">负载</th>
           <th class="num">实时流量</th><th class="num">周期用量</th><th class="num">年付价</th></tr></thead>
@@ -3564,7 +3564,7 @@ async function viewSettings() {
       <div class="field-hint" style="margin-bottom:10px">创建于 ${esc(clock(b.createdAt))} · ${b.total} 台 · 按各节点最近上报的 Agent 版本推导进度</div>
       <details>
         <summary class="sum">查看节点明细</summary>
-        <div class="table-wrap" style="margin-top:8px"><table class="maint-table">
+        <div class="table-wrap" style="margin-top:8px"><table class="maint-table" data-page-size="10">
           <thead><tr><th>节点</th><th>创建时版本</th><th>当前版本</th><th>状态</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
@@ -3611,8 +3611,8 @@ async function viewSettings() {
         <h2 class="section-title">节点管理</h2>
         <span class="section-meta">${nodes.length} 台${serverVersion ? ' · 控制端 ' + esc(serverVersion) : ''}</span>
       </div>
-      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-nodes-table" data-page-size="20">
-        <thead><tr><th>名称</th><th>服务商</th><th>位置</th><th>分组</th><th>到期</th><th>Agent</th><th class="num">操作</th></tr></thead>
+      <div class="table-wrap" style="margin-bottom:12px"><table class="settings-nodes-table" data-page-size="10">
+        <thead><tr><th>名称</th><th>服务商</th><th>位置</th><th>分组</th><th>到期</th><th title="节点上报的 Agent 版本">Agent</th><th class="num">操作</th></tr></thead>
         <tbody>${nodes.map((n) => `<tr>
           <td class="strong">${esc(n.name)}</td>
           <td>${esc(n.provider || '—')}</td>
@@ -3808,8 +3808,8 @@ async function viewSettings() {
         <h2 class="section-title">通知队列</h2>
         <span class="section-meta">待投递 ${qStats.pending || 0} · 失败 ${qStats.failed || 0} · 已送达 ${qStats.sent || 0} · 重试 ${qStats.retries || 0} · 拒收 ${qStats.rejected || 0}</span>
       </div>
-      <div class="table-wrap"><table class="queue-table" data-page-size="15">
-        <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
+      <div class="table-wrap"><table class="queue-table" data-page-size="10">
+        <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num" title="已投递尝试次数">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
         <tbody>${qJobs.map((j) => {
           const [cls, label] = qBadge[j.status] || ['mute', j.status];
           const canRetry = j.status === 'failed' || j.status === 'suppressed';
@@ -3894,7 +3894,7 @@ async function viewSettings() {
           管理范围可执行写操作，请仅授予可信自动化。路径限定可把令牌收窄到
           <code>/api/overview</code>、<code>/api/nodes/n1</code> 等前缀（留空=全部）。
         </p>
-        <div class="table-wrap"><table class="queue-table" data-page-size="15">
+        <div class="table-wrap"><table class="queue-table" data-page-size="10">
           <thead><tr><th>名称</th><th>前缀</th><th>范围</th><th>路径限定</th><th>创建时间</th><th>过期时间</th><th>最近使用</th><th class="num">操作</th></tr></thead>
           <tbody>${tokenRows}</tbody>
         </table></div>
@@ -4040,7 +4040,7 @@ async function viewSettings() {
         </div>
         <details style="margin-top:10px">
           <summary class="sum">按节点查看历史点数</summary>
-          <div class="table-wrap" style="margin-top:8px"><table class="maint-table">
+          <div class="table-wrap" style="margin-top:8px"><table class="maint-table" data-page-size="10">
             <thead><tr><th>节点</th><th class="num">1 分钟</th><th class="num">5 分钟</th><th class="num">1 小时</th></tr></thead>
             <tbody>${histNodeRows}</tbody>
           </table></div>
@@ -5062,7 +5062,7 @@ async function viewStatusPage() {
         <div class="field">
           <span class="field-label">逐台可见性</span>
           <p class="field-hint">取消「对外公开」即从公开页隐藏（连详情页一起 404）；备注只在公开页显示，与台账里的内部备注互不影响。</p>
-          <div class="table-wrap"><table class="maint-table">
+          <div class="table-wrap"><table class="maint-table" data-page-size="10">
             <thead><tr><th>节点</th><th style="width:96px">对外公开</th><th>公开备注</th></tr></thead>
             <tbody>${spNodeRows}</tbody>
           </table></div>
@@ -5101,7 +5101,7 @@ async function viewStatusPage() {
         <h2 class="section-title">维护窗口</h2>
         ${sectionActions('窗口内不产生新告警，公开页显示「维护中」', '<button class="btn sm primary" id="mtAdd">＋ 新建维护窗口</button>')}
       </div>
-      <div class="table-wrap"><table class="maint-table">
+      <div class="table-wrap"><table class="maint-table" data-page-size="10">
         <thead><tr><th>标题</th><th>范围</th><th>起止</th><th>状态</th><th class="num">操作</th></tr></thead>
         <tbody>${mtRows || '<tr><td colspan="5"><div class="empty">没有维护窗口</div></td></tr>'}</tbody>
       </table></div>
@@ -5112,7 +5112,7 @@ async function viewStatusPage() {
         <h2 class="section-title">人工事件</h2>
         ${sectionActions('与告警一起出现在公开页时间线', '<button class="btn sm primary" id="incAdd">＋ 登记事件</button>')}
       </div>
-      <div class="table-wrap"><table class="maint-table">
+      <div class="table-wrap"><table class="maint-table" data-page-size="10">
         <thead><tr><th>标题</th><th>级别</th><th>影响范围</th><th>时间</th><th class="num">操作</th></tr></thead>
         <tbody>${incRows || '<tr><td colspan="5"><div class="empty">没有人工事件</div></td></tr>'}</tbody>
       </table></div>
@@ -5634,7 +5634,7 @@ async function viewAudit() {
         </div>
       </div>
       <div class="table-wrap">
-        <table class="audit-table">
+        <table class="audit-table" data-page-size="10">
           <thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>方式</th><th>方法</th><th>路径</th><th class="num">状态</th><th>IP</th></tr></thead>
           <tbody>${entries.map((e) => `<tr>
             <td class="mono" style="font-size:11.5px;white-space:nowrap">${esc(fmtTime(e.ts))}</td>

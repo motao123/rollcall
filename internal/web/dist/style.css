@@ -720,7 +720,10 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .detail-grid {
   display: grid;
-  grid-template-columns: 1fr 268px;
+  /* minmax(0,1fr)：1fr 的默认 min-width 是 auto，长内容（长主机名/URL/备注）
+     会把主列撑到内容宽度、把侧栏挤出去——详情页「内容溢出」的根因。
+     minmax(0,1fr) 允许主列收缩，配合 info-v/table-wrap 的省略与横向滚动。 */
+  grid-template-columns: minmax(0, 1fr) 268px;
   gap: 14px;
   align-items: start;
 }

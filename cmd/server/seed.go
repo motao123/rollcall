@@ -152,15 +152,15 @@ func seedDemo(st *store.Store) {
 		}
 	}
 
-	// 服务探测目标
+	// 服务探测目标（全部使用文档保留地址与示例域名，不指向任何真实站点）
 	svcs := []model.Service{
-		{ID: "s1", NodeID: "n01", Name: "主控面板", Type: "http", Target: "https://43.156.17.202:8008", Interval: 60, Enabled: true},
-		{ID: "s2", NodeID: "n01", Name: "imotao.com", Type: "http", Target: "https://imotao.com", Interval: 60, Enabled: true},
-		{ID: "s3", NodeID: "n02", Name: "kvm.cx", Type: "http", Target: "https://kvm.cx", Interval: 60, Enabled: true},
-		{ID: "s4", NodeID: "n03", Name: "冷行日记", Type: "http", Target: "https://imotao.com/blog", Interval: 120, Enabled: true},
-		{ID: "s5", NodeID: "n15", Name: "MySQL 3306", Type: "tcp", Target: "58.49.150.222:3306", Interval: 60, Enabled: true},
-		{ID: "s6", NodeID: "n15", Name: "nginx 443", Type: "tcp", Target: "58.49.150.222:443", Interval: 60, Enabled: true},
-		{ID: "s7", NodeID: "n06", Name: "CDN 回源", Type: "http", Target: "https://cdn.nat.tf", Interval: 120, Enabled: true},
+		{ID: "s1", NodeID: "n01", Name: "主控面板", Type: "http", Target: "https://192.0.2.10:8008", Interval: 60, Enabled: true},
+		{ID: "s2", NodeID: "n01", Name: "示例官网", Type: "http", Target: "https://www.example.com", Interval: 60, Enabled: true},
+		{ID: "s3", NodeID: "n02", Name: "示例控制台", Type: "http", Target: "https://console.example.net", Interval: 60, Enabled: true},
+		{ID: "s4", NodeID: "n03", Name: "示例博客", Type: "http", Target: "https://www.example.com/blog", Interval: 120, Enabled: true},
+		{ID: "s5", NodeID: "n15", Name: "MySQL 3306", Type: "tcp", Target: "198.51.100.10:3306", Interval: 60, Enabled: true},
+		{ID: "s6", NodeID: "n15", Name: "nginx 443", Type: "tcp", Target: "198.51.100.10:443", Interval: 60, Enabled: true},
+		{ID: "s7", NodeID: "n06", Name: "CDN 回源", Type: "http", Target: "https://cdn.example.com", Interval: 120, Enabled: true},
 	}
 	for i := range svcs {
 		st.UpsertService(&svcs[i])

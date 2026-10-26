@@ -19,7 +19,7 @@ import (
 func TestAccountSaveFailureDoesNotLeakPath(t *testing.T) {
 	dir := t.TempDir()
 	userPath := filepath.Join(dir, "admin-user.json")
-	u, _, _, err := auth.LoadOrCreateUser(userPath, "imotao", "Login@Example.com", testAdminPassword, false)
+	u, _, _, err := auth.LoadOrCreateUser(userPath, "demo-admin", "Login@Example.com", testAdminPassword, false)
 	if err != nil {
 		t.Fatalf("创建账号失败: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestAccountSaveFailureDoesNotLeakPath(t *testing.T) {
 	})
 	h := srv.Handler()
 
-	login := loginReq(h, "10.40.0.1", "imotao", testAdminPassword)
+	login := loginReq(h, "10.40.0.1", "demo-admin", testAdminPassword)
 	if login.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", login.Code, login.Body.String())
 	}

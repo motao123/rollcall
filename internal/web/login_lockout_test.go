@@ -33,7 +33,7 @@ func TestLoginClearsBlockedReadonlyScope(t *testing.T) {
 	}
 
 	// 用正确密码登录：登录端点自身在 authPublic 作用域，不受 readonly 封禁影响
-	w := loginReq(h, ip, "imotao", testAdminPassword)
+	w := loginReq(h, ip, "demo-admin", testAdminPassword)
 	if w.Code != http.StatusOK {
 		t.Fatalf("登录应成功，实际 %d: %s", w.Code, w.Body.String())
 	}
@@ -57,7 +57,7 @@ func TestTOTPFailureCountsTowardLimit(t *testing.T) {
 	h, _ := newAuthWeb(t, time.Hour)
 	const ip = "10.21.0.1"
 
-	w := loginReq(h, ip, "imotao", testAdminPassword)
+	w := loginReq(h, ip, "demo-admin", testAdminPassword)
 	if w.Code != http.StatusOK {
 		t.Fatalf("登录失败: %d %s", w.Code, w.Body.String())
 	}
