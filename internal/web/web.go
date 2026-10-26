@@ -85,6 +85,9 @@ type Server struct {
 	// 为空表示不提供「一条命令接入」，下载接口会明确报错。
 	agentDir string
 
+	// certPin 是本实例 TLS 证书的指纹，供 /agent/tls-pin 与安装脚本使用。
+	certPin string
+
 	// dataDir 与 saveInterval 用于 /readyz 判断磁盘可写与快照是否新鲜。
 	dataDir      string
 	saveInterval time.Duration
@@ -135,6 +138,9 @@ type Config struct {
 	CNYRate    float64         // CNY→USD 折算汇率，<=0 时使用 7.2
 	Outbox     *outbox.Manager // 通知投递队列；nil 时不外发通知
 	AgentDir   string          // Agent 二进制分发目录；空则不提供下载
+	// CertPin 是当前 TLS 证书的 SHA-256 指纹（十六进制）。为空表示未启用 TLS。
+	// 安装脚本据此把指纹写进 agent.json，让 Agent 校验服务端身份而不是盲信证书。
+	CertPin string
 	// DataDir 与 SaveInterval 供 /readyz 做深度检查；SaveInterval<=0 时跳过时效判断。
 	DataDir      string
 	SaveInterval time.Duration
@@ -160,6 +166,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		panelLink: cfg.PanelLink, cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		agentDir:       cfg.AgentDir,
+		certPin:        cfg.CertPin,
 		trustedProxies: trusted,
 		dataDir:        cfg.DataDir,
 		saveInterval:   cfg.SaveInterval,
@@ -294,6 +301,9 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/agent/install.sh", authPublic, http.HandlerFunc(s.handleAgentInstall)},
 		{"/agent/download", authPublic, http.HandlerFunc(s.handleAgentDownload)},
 		{"/agent/download.sha256", authPublic, http.HandlerFunc(s.handleAgentChecksum)},
+		// 证书指纹：公开（只是公钥证书的摘要，不泄露私钥）。
+		// 安装脚本用它把 Agent 的信任收敛到「安装时这张证书」。
+		{"/agent/tls-pin", authPublic, http.HandlerFunc(s.handleAgentTLSPin)},
 		{"/api/theme", authPublic, http.HandlerFunc(s.handleTheme)},
 
 		// 面板登录：登录失败按独立 scope 限速，不会拖累公开页。

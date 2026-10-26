@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -61,7 +60,13 @@ type config struct {
 	Interval int    `json:"interval"` // 秒
 	// TLSSkipVerify 跳过主控证书校验：自签名证书（IP 直连、无域名）场景下启用，
 	// 链路仍是加密的，只是不验证服务端身份。明文 HTTP 不受此字段影响。
-	TLSSkipVerify bool         `json:"tlsSkipVerify,omitempty"`
+	TLSSkipVerify bool `json:"tlsSkipVerify,omitempty"`
+	// ServerCertPin 固定主控证书的 SHA-256 指纹（十六进制，可带冒号）。
+	//
+	// 有指纹时它的优先级高于 TLSSkipVerify：仍然不依赖公共 CA，但换证书
+	// 必须显式改配置，链路上的主动中间人无法再用自签证书静默接管上报通道。
+	// install.sh 会自动把控制端指纹写进这一项。
+	ServerCertPin string       `json:"serverCertPin,omitempty"`
 	Update        updateConfig `json:"update"`
 }
 
@@ -100,6 +105,14 @@ func loadConfig(path string) (*config, error) {
 		}
 	}
 	return &c, nil
+}
+
+// firstN 截取字符串前 n 个字符（用于在日志里显示指纹前缀）。
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // oneLine 把服务端返回的片段压成一行并截断，避免多行 JSON 撑乱日志。
@@ -283,9 +296,18 @@ func main() {
 		},
 	}
 	// 自签名证书（无域名、IP 直连）场景：跳过证书校验但保留加密。
-	// 诚实地说，这只防窃听不防中间人；更严格的「装公钥做校验」留待有需求时实现。
-	if cfg.TLSSkipVerify {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	// 配了 serverCertPin 时改为校验指纹 —— 那才是既加密又认身份的姿态。
+	// 构造失败（指纹写错）必须直接退出：静默退化会让你以为在固定指纹，
+	// 实际仍在盲信任何证书。
+	tlsCfg, err := agentwire.ClientTLSConfig(cfg.TLSSkipVerify, cfg.ServerCertPin)
+	if err != nil {
+		log.Fatalf("TLS 配置无效: %v", err)
+	}
+	if tlsCfg != nil {
+		client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+		if cfg.ServerCertPin != "" {
+			log.Printf("已启用服务端证书指纹校验（%s…）", firstN(cfg.ServerCertPin, 16))
+		}
 	}
 
 	send := func() error {

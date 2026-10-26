@@ -77,6 +77,22 @@ fetch_text() {
     fi
 }
 
+# 控制端证书指纹（SHA-256，小写十六进制）。取不到就留空：
+# 调用方据此退回 tlsSkipVerify，并在安装时明确告知「加密但不验证身份」。
+fetch_cert_pin() {
+    case "$SERVER" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
+    raw=$(fetch_text "$SERVER/agent/tls-pin" 2>/dev/null || true)
+    raw=$(printf '%%s' "$raw" | tr -d ' \r\n' | tr 'A-F' 'a-f')
+    case "$raw" in
+        *[!0-9a-f]*) return 0 ;;
+    esac
+    [ "${#raw}" -eq 64 ] || return 0
+    printf '%%s' "$raw"
+}
+
 ALLOW_INSECURE=0
 while [ "$#" -gt 0 ]; do
     case "${1:-}" in
@@ -193,6 +209,21 @@ case "$SERVER" in
         ;;
     *) INSECURE="" ;;
 esac
+
+# 取控制端证书指纹：写进配置后 Agent 会校验服务端身份，
+# 而不是「跳过校验、链路上谁都能冒充控制端」。
+CERT_PIN=$(fetch_cert_pin)
+if [ "$UPGRADE" != "1" ]; then
+    case "$SERVER" in
+        https://*)
+            if [ -z "$CERT_PIN" ]; then
+                echo "⚠ 未能取得控制端证书指纹：Agent 将加密但跳过证书校验（能防窃听，不防主动中间人）" >&2
+            else
+                echo "→ 已取得控制端证书指纹 $(printf '%%.16s' "$CERT_PIN")…（Agent 会校验服务端身份）"
+            fi
+            ;;
+    esac
+fi
 
 if [ "$UPGRADE" = "1" ]; then
     BIN=$BIN_ARG
@@ -384,6 +415,12 @@ if [ "$UPGRADE" = "1" ]; then
     fi
     echo "✔ Agent 已替换: $OLD_VER → $NEW_VER"
     echo "  配置未改动；旧版本备份在 $BIN.prev"
+    # 升级不改配置（改配置会让「回滚二进制」也带着新配置，风险不对等），
+    # 但把可选的加固动作明确说出来，别让「已加密」被误当成「已验证身份」。
+    if [ -n "$CERT_PIN" ] && ! grep -q "$CERT_PIN" "$CONFIG" 2>/dev/null; then
+        echo "  提示: 配置未固定控制端证书指纹。要校验服务端身份，在 $CONFIG 里加一行："
+        echo "        \"serverCertPin\": \"$CERT_PIN\","
+    fi
 
     if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && systemctl cat rollcall-agent.service >/dev/null 2>&1; then
         # set -e 下必须吞掉 restart 的失败，否则会跳过下面的回滚分支。
@@ -471,6 +508,9 @@ TLS_FLAG=""
 case "$SERVER" in
     https://*) TLS_FLAG='true' ;;
 esac
+# 有指纹时它优先于 tlsSkipVerify：仍然不依赖 CA，但换证书必须先改配置。
+PIN_LINE=""
+[ -n "$CERT_PIN" ] && PIN_LINE=$(printf '  "serverCertPin": "%%s",' "$CERT_PIN")
 cat > "$CONFIG" <<JSON
 {
   "server": "$SERVER_JSON",
@@ -478,6 +518,7 @@ cat > "$CONFIG" <<JSON
   "token": "$TOKEN_JSON",
   "interval": 30,
   "tlsSkipVerify": ${TLS_FLAG:-false},
+$PIN_LINE
   "update": { "enabled": false }
 }
 JSON
@@ -666,6 +707,26 @@ func (s *Server) handleAgentChecksum(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = io.WriteString(w, hex.EncodeToString(h.Sum(nil))+"\n")
+}
+
+// handleAgentTLSPin 返回本实例 TLS 证书的 SHA-256 指纹（小写十六进制）。
+//
+// 公开接口：指纹就是证书 DER 的摘要，任何能连上本服务的人都能自己算出来，
+// 因此不构成新的信息泄露；而安装脚本需要它把 Agent 的信任收敛到这张证书。
+// 未启用 TLS 时返回 404 —— 让脚本能明确区分「没有指纹」与「取指纹失败」，
+// 前者退回 tlsSkipVerify，后者应当告警而不是静默降级。
+func (s *Server) handleAgentTLSPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.certPin == "" {
+		fail(w, http.StatusNotFound, "控制端未启用 TLS，无证书指纹")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = io.WriteString(w, s.certPin+"\n")
 }
 
 // requestBaseURL 推断控制端的外部地址（scheme + host）。

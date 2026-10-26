@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/motao123/rollcall/internal/agentwire"
 	"github.com/motao123/rollcall/internal/alert"
 	"github.com/motao123/rollcall/internal/auth"
 	"github.com/motao123/rollcall/internal/backupjob"
@@ -98,6 +99,19 @@ func main() {
 	log.Printf("历史聚合保留: 1m=%s 5m=%s 1h=%s", retention.Tier1m, retention.Tier5m, retention.Tier1h)
 	if (*tlsCert == "") != (*tlsKey == "") {
 		log.Fatal("-tls-cert 与 -tls-key 必须同时提供")
+	}
+	// 从证书算出指纹，供 /agent/tls-pin 与安装脚本下发：
+	// Agent 用它校验服务端身份，取代「跳过校验但谁都能冒充」的自签默认。
+	certPin := ""
+	if *tlsCert != "" {
+		pin, err := agentwire.PinFromCertFile(*tlsCert)
+		if err != nil {
+			// 证书已配却读不出指纹说明路径/格式不对，启动就会在握手阶段失败；
+			// 直接报错退出，比跑起来后每个 Agent 都连不上更容易排查。
+			log.Fatalf("无法从 -tls-cert 读取证书指纹: %v", err)
+		}
+		certPin = pin
+		log.Printf("Agent 证书指纹: %s", pin)
 	}
 
 	// Basic Auth
@@ -381,6 +395,7 @@ func main() {
 		User: panelUser, UserPath: userPath, Sessions: sessions, PanelLink: *panelLink,
 		CNYRate: *cnyRate, Outbox: ob, TrustedProxies: trustedNets, AgentDir: *agentDir,
 		DataDir: *dataDir, SaveInterval: *saveInterval, AutoBackup: autoBackup,
+		CertPin: certPin,
 	})
 	if err := ws.NotifyErr(); err != nil {
 		log.Printf("⚠ 已保存的通知配置无法解析，通知已停用: %v", err)

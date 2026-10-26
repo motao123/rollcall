@@ -809,6 +809,53 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
   需要管理令牌或已登录会话
 - 设置页的「重置」会恢复默认主题；强调色以可读性为准，避免与文字/背景对比不足
 
+### 7.5 TLS 与 Agent 证书指纹（v1.29.0 / v1.30.0+）
+
+控制端启用内置 TLS 后，Agent 默认只做到「加密」：自签证书配 `tlsSkipVerify: true`
+意味着**不验证服务端身份**，链路上的主动中间人可以用另一张自签证书接管上报
+（上报里有节点令牌）。v1.30.0 起可用证书指纹把信任收敛到「安装时那张证书」。
+
+```bash
+# 控制端自己的指纹（公开接口，等价于 openssl 的结果）
+curl -kfsSL https://127.0.0.1:19080/agent/tls-pin
+openssl x509 -in /etc/rollcall/tls/cert.pem -noout -fingerprint -sha256   # 人工核对用
+```
+
+新装节点由 `install.sh` 自动取指纹写入 `agent.json`，无需手工配置：
+
+```json
+{
+  "server": "https://203.0.113.10:19080",
+  "nodeId": "...",
+  "token": "...",
+  "interval": 30,
+  "tlsSkipVerify": true,
+  "serverCertPin": "9f2c1b0a…（64 位十六进制）",
+  "update": { "enabled": false }
+}
+```
+
+- **指纹优先于 `tlsSkipVerify`**：配了指纹就按指纹校验，`tlsSkipVerify` 仅作为
+  「没有指纹时」的退路
+- **指纹写错 = Agent 启动失败**（日志 `TLS 配置无效: 证书指纹应为 32 字节…`）。
+  刻意不退化：静默降级会让使用者误以为在校验身份
+- 已装节点启用：在 `agent.json` 里补一行 `"serverCertPin": "<指纹>"`，
+  `systemctl restart rollcall-agent`，再确认节点在线（改动前先 `cp -p` 备份）
+- 升级脚本 `--upgrade` 只提示、不改配置：避免「回滚二进制却带着新配置」的不对等风险
+
+**证书轮换顺序（重要）**：换证书会让所有「已固定指纹」的节点立刻失联，
+所以不能「先换证书再逐台更新」。最稳妥的顺序是把连通性放在前面：
+
+1. 逐台删除 `serverCertPin`（退回 `tlsSkipVerify`，链路仍加密）并重启 Agent
+2. 更换控制端证书、重启服务端，确认面板可访问
+3. 逐台写回新指纹并重启，确认节点在线
+
+10 年自签证书平时不需要走这一步；只有换域名/换 CA 时才涉及。
+
+**边界**：指纹防的是「证书被替换」；首次安装那一刻若链路已被控制，取到的指纹
+也会被一起替换（TOFU 固有盲区，面板显示指纹就是为了让人工核对）。
+要根治需要公共 CA 证书（上域名后换 Caddy / Let's Encrypt）。
+
 ### 7.7 ICMP 探测的前提（v1.17.0+）
 
 ICMP 探测（ping）默认可用，但依赖内核允许非特权 ping：

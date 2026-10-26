@@ -4562,12 +4562,13 @@ systemctl enable --now rollcall-agent`;
       <button class="btn primary" id="copyCmd" type="button">复制命令</button>
     </div>
     <p class="modal-sub" id="agentDirCheck" hidden></p>
+    <p class="modal-sub" id="tlsPinLine" hidden></p>
     <p class="modal-sub" style="margin-top:10px">脚本会自动识别架构（amd64/arm64）；明文 HTTP 场景需显式加 --allow-insecure（上方命令已按当前地址自动补上）才会继续安装。约 30 秒后面板即可看到该节点。</p>
     ${insecure ? '<p class="modal-sub" style="color:var(--warn)">注意：控制端当前是明文 HTTP，节点令牌会在链路上明文传输。长期使用建议上 TLS 或保持隧道。</p>' : ''}
     <details style="margin-top:12px">
       <summary class="modal-sub" style="cursor:pointer">手动安装（备选）</summary>
       <pre class="code" style="margin-top:8px">${esc(manual)}</pre>
-      <pre class="code">${esc(cfg)}</pre>
+      <pre class="code" id="manualCfg">${esc(cfg)}</pre>
     </details>
     <p class="modal-sub" style="color:var(--warn)">令牌等同于该节点的上报凭据：轮换后旧令牌立即失效，需同步更新 agent.json 并重启 Agent。</p>
     <div class="form-actions">
@@ -4590,6 +4591,28 @@ systemctl enable --now rollcall-agent`;
       p.hidden = false;
       p.style.color = 'var(--warn)';
       p.textContent = '⚠ 服务端未启用 Agent 分发（启动参数 -agent-dir 未配置），上面的命令会下载失败。在服务端启动参数追加 -agent-dir <目录>、把 rollcall-agent-linux-<arch> 放进该目录并重启服务端后，这条命令即可使用；此前可先用下方「手动安装」。';
+    })
+    .catch(() => {});
+  // 控制端证书指纹：Agent 装了它就会校验服务端身份，而不是盲信任何自签证书。
+  // 显示出来是为了让安装者能人工核对——首次安装时链路若已被控制，
+  // 脚本取到的指纹也会被替换，那是 TOFU 的固有盲区，只能靠人看。
+  fetch(`${server}/agent/tls-pin`, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.text() : ''))
+    .then((t) => {
+      const pin = (t || '').trim();
+      if (!pin) return;
+      const line = dlg.querySelector('#tlsPinLine');
+      const pre = dlg.querySelector('#manualCfg');
+      if (line) {
+        line.hidden = false;
+        line.innerHTML = `服务端证书指纹 <code class="mono">${esc(pin)}</code>` +
+          `<br>安装脚本会自动写进 agent.json；Agent 会拒绝指纹不符的控制端。换证书后需同步更新各节点配置。`;
+      }
+      if (pre) {
+        pre.textContent = JSON.stringify({
+          server, nodeId: node.id, token: node.token, interval: 30, serverCertPin: pin,
+        }, null, 2);
+      }
     })
     .catch(() => {});
   dlg.querySelector('#copyCmd').onclick = async (ev) => {
