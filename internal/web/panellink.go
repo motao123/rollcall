@@ -36,6 +36,28 @@ func (s *Server) SetPanelLink(link string) {
 	s.st.SetSetting("panel_link", link)
 }
 
+// safePanelHost 判断主机名是否只含域名/IP/端口的合法字符。
+//
+// 为什么需要：url.Parse 会放行 Host 里的 `;`、`$`、`()` 等字符
+// （实测 `https://a.com$(id)` 解析为 Host="a.com$(id)"），而这个地址会被
+// agentInstallCommand 原样拼进「节点接入命令」，由管理员复制到目标服务器的
+// shell 里执行。白名单只放行域名/IPv4/IPv6 括号/端口可能出现的字符，
+// 从源头堵住命令替换，双保险的另一层在命令拼接处的单引号包裹。
+func safePanelHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == ':' || r == '[' || r == ']':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // normalizePanelLink 校验并规范化对外地址。
 //
 // 只接受 http/https 的「站点根」：路径必须为空或 "/"。
@@ -55,6 +77,9 @@ func normalizePanelLink(raw string) (string, string) {
 	}
 	if u.Host == "" {
 		return "", "地址缺少主机名（例如 https://monitor.example.com）"
+	}
+	if !safePanelHost(u.Host) {
+		return "", "主机名只能包含字母、数字、点、连字符、冒号与方括号（IPv6）"
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		return "", "地址不能带查询参数或锚点"

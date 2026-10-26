@@ -711,6 +711,16 @@ func (s *Server) handleAgentChecksum(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, hex.EncodeToString(h.Sum(nil))+"\n")
 }
 
+// shellSingleQuote 把值包进单引号，使其在 POSIX shell 里成为字面量。
+//
+// 节点接入命令会被管理员复制到目标服务器的 shell 里执行，所有插值参数
+// 必须按字面量处理：即使各值当前都来自系统生成（hex）或经过校验的地址，
+// 拼接侧也不信任上游 —— 与 normalizePanelLink 的主机白名单互为双保险。
+// 单引号内唯一需要处理的是单引号本身（'\'' 惯用法）。
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // agentInstallCommand 拼出一行接入命令（与面板「节点接入」展示的一致）。
 //
 // 放在服务端而不是只在前端拼：批量导入的响应里要直接给出每台机器的命令，
@@ -721,7 +731,8 @@ func (s *Server) agentInstallCommand(base, nodeID, token string) string {
 		flag = "--allow-insecure "
 	}
 	return fmt.Sprintf("curl -fsSL %s/agent/install.sh | sh -s -- %s%s %s %s",
-		base, flag, base, nodeID, token)
+		shellSingleQuote(base+"/agent/install.sh"), flag, shellSingleQuote(base),
+		shellSingleQuote(nodeID), shellSingleQuote(token))
 }
 
 // isLoopbackBase 判断控制端地址是否是回环（回环上的明文 HTTP 不要求

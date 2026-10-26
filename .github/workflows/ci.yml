@@ -34,7 +34,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.0"
+          go-version: "1.27.3"
 
       # tag 名可以合法包含 $ ( ) ` 与 / 等字符。VERSION 最终会进入链接器参数，
       # 先按白名单校验，避免任何形式的命令替换被带进构建；/ 在引用内无害。
@@ -80,7 +80,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.0"
+          go-version: "1.27.3"
 
       # store 的并发快照回归测试在 -race 下会显著变慢（约 2 分钟），
       # 单独成 job，避免拖慢常规 test 反馈。
@@ -105,7 +105,7 @@ jobs:
       # 编译器出产物，等于没验证过发布的那一份。三处修改必须同步。
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24.0"
+          go-version: "1.27.3"
 
       - name: build dist
         run: make linux VERSION="$VERSION"

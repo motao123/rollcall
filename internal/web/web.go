@@ -93,6 +93,9 @@ type Server struct {
 	// certPin 是本实例 TLS 证书的指纹，供 /agent/tls-pin 与安装脚本使用。
 	certPin string
 
+	// tokenFails 是公开页访问令牌的失败限速（在线枚举防护，独立桶）。
+	tokenFails *tokenFailLimiter
+
 	// dataDir 与 saveInterval 用于 /readyz 判断磁盘可写与快照是否新鲜。
 	dataDir      string
 	saveInterval time.Duration
@@ -171,6 +174,7 @@ func New(st *store.Store, r *probe.Runner, e *alert.Engine, cfg Config) *Server 
 		cnyRate: rate,
 		limiter: newAuthFailureLimiter(), outbox: cfg.Outbox,
 		tokenAudit:     newTokenReadAuditor(),
+		tokenFails:     newTokenFailLimiter(),
 		agentDir:       cfg.AgentDir,
 		certPin:        cfg.CertPin,
 		trustedProxies: trusted,
