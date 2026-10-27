@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.35.6**（`./rollcall-server -version` 可查）。
+当前版本 **v1.36.0**（`./rollcall-server -version` 可查）。
 
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
@@ -1561,7 +1561,41 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ---
 
-## 十二、实际部署验证
+## 十二、开发与验证工具
+
+`tools/` 是可复跑的验证工具（入库、零依赖、只读公开接口；凭据走环境变量）。
+
+| 工具 | 用途 | 用法 |
+|---|---|---|
+| `tools/check-contrast.mjs` | **WCAG 2.1 对比度自检**：解析 `style.css` 的深浅两套变量，正文/语义色 ≥4.5（AA 硬闸），辅助文字与强调色 ≥3（提示）。已挂 CI | `node tools/check-contrast.mjs` |
+| `tools/audit-headers.mjs` | **线上安全头与 TLS 回归**：CSP 脚本白名单、HSTS 时长、nosniff、点击劫持防护、明文跳转、证书剩余天数与链可信度 | `node tools/audit-headers.mjs [url]` |
+| `tools/ui-session.mjs` | **管理面板校验会话**：cookie 持久化到 `.auth/cookies.json`（登录一次复用），失败自动截图，统一 `goto/eval/shot/ok` 封装 | 作为库使用：`openSession()` / `withSession()` |
+| `tools/ui-check.mjs` | **UI 关键不变量**：分页器生效、可见行 ≤10、「自定义列」按钮、详情页系统信息是否**真的可见**、公开页渲染与无横向溢出 | `RCP_PASSWORD=... node tools/ui-check.mjs` |
+
+凭据约定：`RCP_PASSWORD` 环境变量，或 `.auth/password`（该目录已 gitignore）。
+`tools/` 与 `scripts/` 的区别：前者入库、可给 CI 与开源用户复跑；后者是个人的运维临时脚本（含真实主机与凭据，不入库）。
+
+当前基线（2026-10-27）：对比度 26/26 达标、安全头 12/12 通过、UI 不变量 11/11 通过。
+
+## 十三、实际部署验证
+
+### v1.36.0（2026-10-27，横向借鉴落地：三件验证工具 + 一处配色修正）
+
+来源：`docs/借鉴评估-20261027.md`（对照 Argus / panelOps / github-trends-site / bxait-pentest 等 12 个项目）。
+
+- **新增 `tools/`（4 个零依赖脚本，入库可复跑）**
+  - `check-contrast.mjs`：WCAG 对比度自检，**已挂 CI**（正文/语义色 ≥4.5 硬闸，辅助色 ≥3 提示）
+  - `audit-headers.mjs`：线上安全头 + TLS 证书回归（CSP/HSTS/nosniff/点击劫持/明文跳转/证书天数与链）
+  - `ui-session.mjs`：面板校验会话（cookie 持久化复用、失败自动截图），凭据只从 `RCP_PASSWORD`/`.auth/password` 读
+  - `ui-check.mjs`：UI 关键不变量（分页、可见行数、自定义列按钮、详情页系统信息可见性、公开页渲染）
+- **修复配色不达标**（自检工具首次运行即发现）：浅色主题 `--fg-3`（占位符/表头/图注）
+  在页面底上仅 **2.36:1**，低于 WCAG 小字 3:1 → 调整为 `#868f9c`（3.02 / 3.27），同色相、视觉差异极小
+- **消除验证脚本的密码落盘**：过去每个 UI 校验脚本都重登并把面板密码写到 `scripts/rcpwd.txt`；
+  现在 `.auth/`（cookie + 密码，0600）已 gitignore，登录态跨脚本复用
+- **评估文档自身修订**：撤销「通知凭据脱敏」一项——复核确认 `Redacted()/mask()/isMasked()`
+  早已实现且带测试，原判断因 grep 范围过窄而错误（见报告第六章修订记录）
+
+基线：对比度 26/26、安全头 12/12、UI 不变量 11/11。
 
 ### v1.35.6（2026-10-27，表格列显隐按钮定名「自定义列」）
 

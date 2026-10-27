@@ -57,6 +57,16 @@ jobs:
             exit 1
           fi
 
+      # 配色对比度闸门：样式是手写 CSS + 深浅双主题 + 语义色，
+      # 曾出过「进度条透明」这类只有肉眼才能发现的事故。
+      # 阈值：正文/语义色 ≥4.5（AA），辅助文字与强调色 ≥3（不阻塞，仅提示）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: contrast (WCAG 2.1)
+        run: node tools/check-contrast.mjs
+
       - name: go vet
         run: go vet ./...
 

@@ -69,3 +69,10 @@ coverage.out
 admin.token
 # 面板管理员账号（仅 PBKDF2 哈希）；运行时位于数据目录，此处防止本地测试时落在仓库里
 admin-user.json
+
+# UI 校验会话缓存（含面板会话 cookie 与密码，绝不入库）
+/.auth/
+
+# tools/ 是本仓库的一部分（入库）：CI 与开源用户都要能复跑。
+# 与 /scripts/ 的区别：scripts/ 是个人运维临时脚本（含真实主机与凭据），
+# tools/ 只读公开接口、凭据一律走环境变量 / .auth/。
