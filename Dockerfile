@@ -11,7 +11,7 @@
 # 与 tzdata，无 shell、无包管理器，攻击面与镜像体积都最小；
 # 二进制为 CGO_ENABLED=0 静态链接，与 systemd 部署的产物完全一致。
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY . .

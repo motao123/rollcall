@@ -1,0 +1,60 @@
+# Rollcall —— Docker Compose 部署样例
+#
+# 拓扑：
+#   浏览器 ──TLS──> 反代（nginx/Caddy，宿主上） ──明文──> rollcall:19080
+#
+# 用法：
+#   export ROLLCALL_ADMIN_PASSWORD='至少12位'     # 可选；不设则随机生成并打印一次
+#   docker compose up -d --build
+#   docker compose logs rollcall                  # 首次启动会打印初始密码（仅一次）
+#
+# 首次登录后请立即在「设置 → 管理员账号」改名改密，并开启两步验证。
+
+services:
+  rollcall:
+    build:
+      context: ..
+      args:
+        VERSION: ${ROLLCALL_VERSION:-dev}
+    image: rollcall:${ROLLCALL_VERSION:-dev}
+    container_name: rollcall
+    restart: unless-stopped
+
+    # 只绑宿主回环：TLS 由反代终结，19080 不对公网暴露。
+    # 若确实要让同宿主的其它容器直连，改为 "19080:19080" 并确保网络隔离。
+    ports:
+      - "127.0.0.1:19080:19080"
+
+    # 命名卷：新卷会继承镜像内 /data 的属主（nonroot:65532），开箱即用。
+    # 想直接查看/备份数据文件时改用 bind mount，并先执行：
+    #   mkdir -p ./data && sudo chown 65532:65532 ./data
+    volumes:
+      - rollcall-data:/data
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 仅在首次启动创建账号时生效；账号已存在时被忽略。
+      ROLLCALL_ADMIN_PASSWORD: ${ROLLCALL_ADMIN_PASSWORD:-}
+
+    command:
+      - -addr
+      - 0.0.0.0:19080
+      - -data
+      - /data
+      # 容器里监听 0.0.0.0 必然被视为对外暴露，明文需显式确认。
+      # 安全性建立在「端口只绑 127.0.0.1（见上）」之上，链路不出宿主。
+      - -allow-insecure
+      - -timezone
+      - ${TZ:-Asia/Shanghai}
+      # ★ 反代在 Docker 网桥上（默认 172.16.0.0/12）。
+      #   不配这一项会有两个后果：登录 Cookie 不带 Secure（v1.35.2 修过一次
+      #   公开页的同类问题）、审计日志里记录到的来源 IP 全是网关地址。
+      - -trusted-proxies
+      - ${ROLLCALL_TRUSTED_PROXIES:-172.16.0.0/12}
+
+    # 不写 healthcheck：运行镜像是 distroless（无 shell / curl / wget），
+    # 用 CMD 形式的二进制自检只能证明文件可执行，不代表 /readyz 通过。
+    # 需要健康检查时从宿主或监控侧探 http://127.0.0.1:19080/readyz。
+
+volumes:
+  rollcall-data:

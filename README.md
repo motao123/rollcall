@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.37.4**（`./rollcall-server -version` 可查）。
+当前版本 **v1.38.0**（`./rollcall-server -version` 可查）。
 
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
@@ -628,6 +628,16 @@ ROLLCALL_ADMIN_PASSWORD='demo-password-1234' \
 启动日志会打印完整路径。
 
 ### 3. 安装服务端（systemd）
+
+> **三种部署形态**（本小节是 systemd 主线；另两种见 `deploy/`）：
+>
+> | 形态 | 文件 | 适用 |
+> |---|---|---|
+> | systemd 二进制 | `deploy/rollcall-server.service` + `deploy/rollcall.env.example` | 单机生产，推荐（单元已含 `ProtectSystem` 等加固） |
+> | Docker Compose | `deploy/docker-compose.yml` | 已有容器编排；含命名卷、时区、`-trusted-proxies` 预设 |
+> | 反向代理 | `deploy/nginx.conf` | TLS 终结。★ 必须 `proxy_buffering off`（SSE 否则会卡顿），并给服务端配 `-trusted-proxies` |
+>
+> 三种形态的共同约束：**面板不支持子路径部署**（前端使用绝对路径），只能挂在域名根。
 
 ```bash
 sudo useradd --system --home /opt/rollcall --shell /usr/sbin/nologin rollcall
@@ -1578,6 +1588,27 @@ certificate_days_remaining,uptime_percent_24h}`
 当前基线（2026-10-27）：对比度 26/26 达标、安全头 12/12 通过、UI 不变量 11/11 通过。
 
 ## 十三、实际部署验证
+
+### v1.38.0（2026-10-27，部署矩阵补齐 + 发版清单固化）
+
+来源：`docs/借鉴评估-20261027.md` 的 P0-4 / P0-5（对照 `Argus/deploy/` 与 `Argus/docs/checklist.md`）。
+
+- **修复 Dockerfile 工具链残留**：`FROM golang:1.24-alpine` —— v1.35.2 升级工具链时
+  漏了容器锚点，而 `go.mod` 已要求 1.27.3，**容器构建会直接失败**。改为 `golang:1.27-alpine`；
+  同步修掉 CI 里「钉死在 1.24.0」的过期注释。
+- **`deploy/docker-compose.yml`**：命名卷（继承镜像内 `/data` 属主，免 chown）、
+  `TZ`、`-trusted-proxies 172.16.0.0/12` 预设（否则 Cookie 无 Secure、审计 IP 全是网关），
+  端口只绑 `127.0.0.1`；不含 healthcheck（distroless 无 shell/curl，用 CMD 自检只会
+  误报健康），改为注释指引从宿主探 `/readyz`。
+- **`deploy/nginx.conf`**：TLS 终结 + HTTP 强制 308 + `proxy_buffering off` 与
+  `proxy_read_timeout 3600s`（SSE 必需）+ 明确写出「不支持子路径部署」并附等价 Caddy 配置。
+- **`deploy/rollcall.env.example`**：只含真实生效的两个环境变量
+  （`ROLLCALL_ADMIN_PASSWORD` / `ROLLCALL_ADMIN_EMAIL`），并附常用**启动参数**速查——
+  避免把 flag 当环境变量写进 EnvironmentFile（Go 的 flag 包只读命令行，写了也不生效）。
+- **`docs/release-checklist.md`**：发版 DoD 七段 30 余项，每项给命令与期望值，
+  含本地自检（gofmt / vet / test / JS 语法 / 对比度 / **U+FFFD 计数** / **CRLF 计数**）、
+  digest 一致性、签名、部署、Agent 升级（含上海/成都/绿云三种特殊通路）、
+  上线回归、收尾，以及六条常见失败的处置表。
 
 ### v1.37.4（2026-10-27，升级弹窗不再缺目标版本）
 

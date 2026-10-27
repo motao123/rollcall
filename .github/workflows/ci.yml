@@ -110,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ★ 版本必须与 test/race 两个 job 完全一致（都钉死在 go.mod 的 1.24.0）。
+      # ★ 版本必须与 test/race 两个 job 完全一致（都钉死在 go.mod 的 1.27.3）。
       # 曾出现 test/race 用 1.24.x、发布用 1.27.3：测试通过的代码由另一个
       # 编译器出产物，等于没验证过发布的那一份。三处修改必须同步。
       - uses: actions/setup-go@v5
