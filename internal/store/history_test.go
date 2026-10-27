@@ -182,7 +182,7 @@ func TestHistorySchema1Fallback(t *testing.T) {
 func TestBucketRingRetention(t *testing.T) {
 	r := &bucketRing{interval: 60, size: 3}
 	for _, ts := range []int64{600, 660, 720, 780} {
-		r.add(model.Metrics{TS: ts, CPUPct: float64(ts / 60)}, nil, false)
+		r.add(model.Metrics{TS: ts, CPUPct: float64(ts / 60)}, nil, false, false)
 	}
 	got := r.slice()
 	if len(got) != 3 {
@@ -194,7 +194,7 @@ func TestBucketRingRetention(t *testing.T) {
 		}
 	}
 	// 同桶追加不应新增桶。
-	r.add(model.Metrics{TS: 799, CPUPct: 99}, nil, false)
+	r.add(model.Metrics{TS: 799, CPUPct: 99}, nil, false, false)
 	if n := len(r.slice()); n != 3 {
 		t.Fatalf("同桶追加后桶数 %d，want 3", n)
 	}

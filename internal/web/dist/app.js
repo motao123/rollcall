@@ -1540,8 +1540,25 @@ async function viewNodeDetail(id) {
   const netTimes = bucketSec > 0 ? times : times.slice(1);
   const loadVals = pts.map((p) => p.load1);
   // 图表脚注：窗口内均值与峰值。点太少不算，避免 1 个样本冒充"均值"。
-  const winStat = (vals, fmt) => (vals && vals.length >= 2
-    ? `<div class="chart-foot mono">均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)} · 峰值 ${fmt(Math.max(...vals))}</div>`
+  // p95Of：对原始样本做精确分位（线性插值），与后端 cpuhist 的语义一致。
+  // raw/1m 区间样本量小（≤2880），排序成本可忽略。
+  const p95Of = (vals) => {
+    if (!vals || !vals.length) return 0;
+    const a = vals.filter((v) => typeof v === 'number' && isFinite(v)).slice().sort((x, y) => x - y);
+    if (!a.length) return 0;
+    const pos = 0.95 * (a.length - 1);
+    const lo = Math.floor(pos), hi = Math.ceil(pos);
+    return a[lo] + (a[hi] - a[lo]) * (pos - lo);
+  };
+  // 区间 p95：聚合区间（5m/1h）用服务端桶内分位数，取各桶最大值 ——
+  // 关心的是"最差时段的尾部水位"，而不是全区间的平均尾部（会被空闲期拉低）。
+  // 老桶（升级前落盘）没有直方图，cpuP95 为 0，自动回退到自算。
+  const p95FromBuckets = (list) => {
+    const vs = (list || []).map((p) => p && p.cpuP95).filter((v) => typeof v === 'number' && v > 0);
+    return vs.length ? Math.max(...vs) : 0;
+  };
+  const winStat = (vals, fmt, p95) => (vals && vals.length >= 2
+    ? `<div class="chart-foot mono"${p95 ? ' title="p95 取区间内最差时段的桶内 95% 分位（直方图近似，误差 ≤ 档宽一半）"' : ''}>均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)} · 峰值 ${fmt(Math.max(...vals))}${p95 ? ` · <span style="color:var(--fg-2)">p95 ${fmt(p95)}</span>` : ''}</div>`
     : '');
   const last = detail.latest || {};
   const traffic = detail.traffic || {};
@@ -1603,7 +1620,7 @@ async function viewNodeDetail(id) {
           <div class="chart-head"><span class="chart-title">CPU 使用率</span>
             <span class="chart-val mono" style="color:${hasData && (last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—'}</span></div>
           ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%' })}
-          ${winStat(cpuVals, (v) => v.toFixed(1) + '%')}
+          ${winStat(cpuVals, (v) => v.toFixed(1) + '%', p95FromBuckets(pts) || p95Of(cpuVals))}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">内存使用率</span>

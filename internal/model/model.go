@@ -882,9 +882,13 @@ type Point struct {
 // HistoryPoint 是降采样后的历史点，用于 7 天/30 天/365 天查询。
 // 聚合只保留平均值、CPU 峰值、样本数与网络增量，不复制完整 Metrics。
 type HistoryPoint struct {
-	TS         int64   `json:"ts"`
-	CPUPct     float64 `json:"cpuPct"` // 桶内平均
-	CPUMax     float64 `json:"cpuMax"` // 桶内峰值
+	TS     int64   `json:"ts"`
+	CPUPct float64 `json:"cpuPct"` // 桶内平均
+	CPUMax float64 `json:"cpuMax"` // 桶内峰值
+	// CPUP50/CPUP95 是桶内 CPU 使用率的中位数与 p95（histogram schema 3）。
+	// 0 表示该桶没有直方图（1m 层、或升级前的老桶）—— 前端据此回退到自算。
+	CPUP50     float64 `json:"cpuP50,omitempty"`
+	CPUP95     float64 `json:"cpuP95,omitempty"`
 	MemPct     float64 `json:"memPct"`
 	MemUsed    uint64  `json:"memUsed"`
 	MemTotal   uint64  `json:"memTotal"`

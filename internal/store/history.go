@@ -22,7 +22,11 @@ const (
 	HistoryResolution1h  = "1h"
 
 	// schema 2 起聚合桶记录 memUsed/diskUsed 总和，不再用最新总量反推平均值。
-	historySchemaVersion = 2
+	// schema 3 起 5m/1h 桶带 CPU 直方图（cpuHist），用于长区间 p50/p95。
+	// ★ 改存储格式必须同时升版本：降级回旧版时旧代码会忽略 ch 字段，
+	//   但反向（新代码读旧桶）会得到空直方图 —— 必须能区分「无摘要」与
+	//   「摘要为 0」，因此升级是语义要求而非形式要求。
+	historySchemaVersion = 3
 
 	// HistorySaveInterval 是历史快照的落盘间隔。
 	// 崩溃最多丢失该窗口的聚合点，原始 24h 会用于重启后回填。
@@ -144,6 +148,11 @@ type historyBucket struct {
 	// "最热的那一点"，均值会把一次 15 秒的风扇停转抹平。
 	// 0 表示桶内没有温度数据（老桶或节点无传感器）。
 	TempMax float32 `json:"tmax,omitempty"`
+	// CPUHist 是 CPU 使用率直方图（10 档 × 10%），用于给长区间补 p50/p95。
+	// 只挂在 5m / 1h 两层：1m 与 raw 的样本量小，前端可直接精确计算；
+	// 而 5m/1h 要覆盖 30 天 ~ 365 天，事后无法从均值反推分布。
+	// schema 3 起存在；老桶为空直方图（total()==0），分位数输出 0。
+	CPUHist cpuHist `json:"ch"`
 }
 
 // bucketRing 是按时间升序排列的定长聚合桶缓冲。
@@ -160,7 +169,7 @@ func newBucketRing(t historyTier) *bucketRing {
 	return &bucketRing{interval: t.interval, size: t.keep}
 }
 
-func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
+func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool, withHist bool) {
 	if r.buf == nil {
 		r.buf = make([]historyBucket, r.size)
 	}
@@ -243,6 +252,9 @@ func (r *bucketRing) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
 	if hasPrev {
 		b.NetRx += counterDelta(prev.NetRx, m.NetRx)
 		b.NetTx += counterDelta(prev.NetTx, m.NetTx)
+	}
+	if withHist {
+		b.CPUHist.observe(float64(cpu))
 	}
 }
 
@@ -347,9 +359,9 @@ func (h *nodeHistory) hasData() bool {
 }
 
 func (h *nodeHistory) add(m model.Metrics, prev *model.Metrics, hasPrev bool) {
-	h.m1.add(m, prev, hasPrev)
-	h.m5.add(m, prev, hasPrev)
-	h.h1.add(m, prev, hasPrev)
+	h.m1.add(m, prev, hasPrev, false) // 7 天内样本量小，前端可精确算分位
+	h.m5.add(m, prev, hasPrev, true)
+	h.h1.add(m, prev, hasPrev, true)
 	if m.TS > h.lastTS {
 		h.lastTS = m.TS
 	}
@@ -634,6 +646,8 @@ func (s *Store) HistorySeries(nodeID, resolution string, since int64) []model.Hi
 			TS:         b.Index,
 			CPUPct:     float64(b.CPUAvg),
 			CPUMax:     float64(b.CPUMax),
+			CPUP50:     b.CPUHist.percentile(0.50),
+			CPUP95:     b.CPUHist.percentile(0.95),
 			MemPct:     float64(b.MemAvg),
 			MemTotal:   b.MemTotal,
 			DiskPct:    float64(b.DiskAvg),
