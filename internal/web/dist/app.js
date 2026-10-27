@@ -814,7 +814,7 @@ function nodesRowCells(n) {
   const flag = flagEmoji(n.country);
   const osLabel = osBadge(n.host?.os);
   return `<td data-cell="state"><span class="dot ${st.tone}"></span> <span class="state-text">${st.text}</span></td>
-            <td class="strong" data-cell="name">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn" title="Agent ${esc(n.agentVersion || '')} 低于控制端">可升级</span>` : ''}</td>
+            <td class="strong" data-cell="name">${esc(n.name)}${n.agentOutdated ? ` <span class="badge warn badge-click" data-node-upgrade="${esc(n.id)}" title="Agent ${esc(n.agentVersion || '')} 低于控制端 ${esc(state.serverVersion || '')} —— 点击获取该机器的升级命令">可升级</span>` : ''}</td>
             <td data-cell="provider">${esc(n.provider || '—')}</td>
             <td data-cell="region">${flag ? `<span title="${esc(n.country)}">${flag}</span> ` : ''}${esc(n.region || '—')}</td>
             <td class="os-cell" data-cell="os">${osLabel ? `<span class="os-badge" title="${esc(n.host?.os || '')}">${osLabel}</span>` : ''}${esc(n.host?.os || '—')}</td>
@@ -1182,6 +1182,7 @@ async function viewNodes() {
             <td><input type="checkbox" class="row-sel" data-id="${esc(n.id)}" aria-label="选择 ${esc(n.name)}"></td>
             ${nodesRowCells(n)}
             <td class="num"><div class="row-actions">
+              ${n.agentOutdated ? `<button class="btn tiny primary" data-node-upgrade="${esc(n.id)}" title="获取该机器的 Agent 升级命令">升级</button>` : ''}
               <button class="btn tiny" data-node-edit="${esc(n.id)}">编辑</button>
               <button class="btn tiny" data-node-agent="${esc(n.id)}">接入</button>
             </div></td>
@@ -1222,6 +1223,14 @@ async function viewNodes() {
     syncNodesHash();
     viewNodes();
   };
+  $$('[data-node-upgrade]').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const id = b.dataset.nodeUpgrade;
+      const n = (state.data.nodes || []).find((x) => x.id === id);
+      if (n) showNodeUpgrade(n);
+    };
+  });
   $$('[data-node-edit]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
@@ -4686,6 +4695,43 @@ function installInsecureFlag(base) {
 function agentServerURL() {
   const configured = (state.panelLink || '').trim().replace(/\/+$/, '');
   return configured || location.origin;
+}
+
+// showNodeUpgrade：给出一台机器的 Agent 升级命令。
+//
+// 为什么不是「点一下就远程升级」：本产品的硬边界是 Agent 只读、单向、
+// 服务端不下发指令 —— 攻击面从任意 RCE 降为「只能伪造指标」。升级因此
+// 只能给出在目标机器上执行的命令（与「接入」同理）。
+// 命令走控制端自己的 install.sh --upgrade：脚本内 uname -m 自动识别架构、
+// 下载后校验 SHA-256、替换二进制并重启，配置文件与令牌保持不变。
+function showNodeUpgrade(n) {
+  const base = agentServerURL();
+  const cmd = `curl -fsSL ${base}/agent/install.sh | sh -s -- --upgrade`;
+  const cur = n.agentVersion || '未上报';
+  const target = state.serverVersion || '';
+  const dlg = openDialog('升级 Agent · ' + n.name, `
+    <p class="modal-sub">当前 <span class="mono">${esc(cur)}</span>${target ? ` → 目标 <span class="mono">${esc(target)}</span>` : ''}（控制端版本）。</p>
+    <div class="field">
+      <span class="field-label">在 ${esc(n.name)} 上以 root 执行</span>
+      <pre class="code" style="max-height:120px;overflow:auto;word-break:break-all">${esc(cmd)}</pre>
+    </div>
+    <div class="field-hint">脚本会：识别架构 → 从控制端下载 Agent → 校验 SHA-256 → 替换 /usr/local/bin/rollcall-agent → 重启服务。配置与上报令牌不受影响。</div>
+    <div class="field-hint">多台设备建议先用「加入升级清单」建立批次（只做进度跟踪），再逐台执行命令；清单会按 Agent 版本自动计算完成数。</div>
+    <div class="form-actions">
+      <button class="btn" type="button" data-close>关闭</button>
+      <button class="btn primary" type="button" id="upCmdCopy">复制命令</button>
+    </div>`);
+  const copyBtn = dlg.querySelector('#upCmdCopy');
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(cmd);
+        toast('已复制升级命令');
+      } catch (err) {
+        toast('复制失败，请手动选中命令文本', 'err');
+      }
+    };
+  }
 }
 
 // showAgentConfig 展示（或轮换后重新展示）节点接入指引

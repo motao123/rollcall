@@ -36,6 +36,20 @@ try {
   await sess.ok('节点页无横向溢出', nodesPage.docW <= nodesPage.vw + 2,
     `docW=${nodesPage.docW} vw=${nodesPage.vw}`);
 
+  /* ---------- 1b. 「可升级」必须有可执行入口（v1.37.2） ---------- */
+  const up = await sess.eval(`JSON.stringify((()=>{
+    const badges = Array.from(document.querySelectorAll('.badge-click[data-node-upgrade]'));
+    const btns = Array.from(document.querySelectorAll('button[data-node-upgrade]'));
+    const outdated = Array.from(document.querySelectorAll('#view tbody tr'))
+      .filter(tr => tr.offsetParent !== null && tr.textContent.includes('可升级')).length;
+    return { badges: badges.length, btns: btns.length, outdated,
+             clickable: badges.every(b => getComputedStyle(b).cursor === 'pointer') };
+  })())`);
+  await sess.ok('可升级徽标可点击', up.clickable && (up.outdated === 0 || up.badges >= up.outdated),
+    `${up.outdated} 台可升级 / ${up.badges} 个可点徽标`);
+  await sess.ok('可升级行有「升级」按钮', up.outdated === 0 || up.btns >= up.outdated,
+    `按钮 ${up.btns} 个`);
+
   /* ---------- 2. 自定义列按钮 ---------- */
   const colBtn = await sess.eval(`JSON.stringify((()=>{
     const b = document.querySelector('.col-picker-btn');

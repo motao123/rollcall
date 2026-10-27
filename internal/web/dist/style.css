@@ -684,6 +684,11 @@ tbody tr:hover { background: var(--panel-2); }
 td.strong { color: var(--fg); font-weight: 550; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* 可点击的徽标（如「可升级」——点击给出升级命令）：给出手型与悬停反馈，
+   否则用户看不出它是入口（v1.37.2 前它只是个静态标签）。 */
+.badge-click { cursor: pointer; }
+.badge-click:hover { filter: brightness(0.94); text-decoration: underline; }
+
 .badge {
   display: inline-flex;
   align-items: center;
