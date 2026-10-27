@@ -1883,6 +1883,9 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
 
 .col-picker { display: flex; justify-content: flex-end; margin-bottom: 6px; position: relative; }
 .col-picker > summary { list-style: none; }
+/* 「列设置」按钮：图标与文字基线对齐 */
+.col-picker-btn { display: inline-flex; align-items: center; gap: 4px; }
+.col-picker-btn svg { flex: none; opacity: 0.7; }
 .col-picker > summary::-webkit-details-marker { display: none; }
 .col-menu {
   position: absolute;
