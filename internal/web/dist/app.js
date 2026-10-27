@@ -4708,7 +4708,10 @@ function showNodeUpgrade(n) {
   const base = agentServerURL();
   const cmd = `curl -fsSL ${base}/agent/install.sh | sh -s -- --upgrade`;
   const cur = n.agentVersion || '未上报';
-  const target = state.serverVersion || '';
+  // 目标版本优先取节点自带的 serverVersion（/api/nodes 每个节点都带，
+  // web.go 的节点级字段）；state.serverVersion 只在设置页加载过，
+  // 直接打开节点页时为空，会让弹窗只显示「当前 vX（控制端版本）」而缺目标版本。
+  const target = n.serverVersion || state.serverVersion || '';
   const dlg = openDialog('升级 Agent · ' + n.name, `
     <p class="modal-sub">当前 <span class="mono">${esc(cur)}</span>${target ? ` → 目标 <span class="mono">${esc(target)}</span>` : ''}（控制端版本）。</p>
     <div class="field">
