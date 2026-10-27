@@ -1581,7 +1581,7 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ### v1.37.1（2026-10-27，CSV 导出补 CPU p50/p95 列）
 
- 在末尾追加「CPU p50」「CPU p95」两列（追加而非插入，
+`/api/export/metrics.csv` 在末尾追加「CPU p50」「CPU p95」两列（追加而非插入，
 避免按列位置解析的脚本错位）；无直方图的老桶留空而不是写 0（0 会被误读成
 「使用率为 0」）。
 
