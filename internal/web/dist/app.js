@@ -514,10 +514,10 @@ function bindColumnPicker(table, ths, eligible, hidden) {
       <input type="checkbox" data-col="${i}" ${hidden.includes(label) ? '' : 'checked'}>
       <span>${esc(label)}</span>
     </label>`).join('');
-  // 按钮文案用「列设置」而不是单字「列」：单字过于简略，读者无法从按钮
-  // 判断它是「选择显示哪些列」的入口（参考腾讯云/AWS 控制台的「自定义列」）。
+  // 按钮文案用「自定义列」而不是单字「列」：单字过于简略，读者无法从按钮
+  // 判断它是「选择显示哪些列」的入口（与腾讯云「自定义列」等主流命名一致）。
   // 齿轮图标 + title 进一步说明用途。
-  details.innerHTML = `<summary class="btn tiny col-picker-btn" title="选择要显示的列"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>列设置</summary><div class="col-menu">${items}</div>`;
+  details.innerHTML = `<summary class="btn tiny col-picker-btn" title="选择要显示的列"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>自定义列</summary><div class="col-menu">${items}</div>`;
   wrap.parentNode.insertBefore(details, wrap);
   details.addEventListener('change', (e) => {
     const box = e.target.closest('input[data-col]');
