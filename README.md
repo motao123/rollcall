@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.35.3**（`./rollcall-server -version` 可查）。
+当前版本 **v1.35.4**（`./rollcall-server -version` 可查）。
 
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
@@ -1562,6 +1562,26 @@ certificate_days_remaining,uptime_percent_24h}`
 ---
 
 ## 十二、实际部署验证
+
+### v1.35.4（2026-10-27，修复详情页「系统信息」值不可见）
+
+**现象**：节点详情页右侧「系统信息」卡片只有标签、值全部空白（同一卡片的「资产」
+区块正常，曲线数据也正常）。
+
+**根因**（CDP 实测定位，非数据问题）：`.info-list` 是 `display:grid` 但未声明列，
+隐式 `auto` 列被列内 item 的 **min-content** 撑到约 700px —— min-content 被
+`.info-v { white-space: nowrap }` 里的长值（64 位上报签名、完整 OS 名）拉高；
+`.info-row` 用 `space-between`，值被推到行尾。侧栏仅 268px，于是值落到
+**屏幕外**（实测 rowW=697 / vRight=1787，视口 1382），标签留在左侧可见——
+视觉上就是「一片空白」，而数据其实全在。
+
+**修复**（三处，注入 CSS 先验证再落地）：
+- `.info-list` 显式 `grid-template-columns: minmax(0, 1fr)`（列宽=容器宽）
+- `.info-row` 加 `min-width: 0`（grid item 允许收缩）
+- `.info-v` 加 `flex: 1 1 auto; min-width: 0`（占剩余宽度，长值 ellipsis 截断）
+- 顺带把 `.info-row` 的 `align-items: baseline` 显式化（值/标签基线对齐）
+
+修复后实测：rowW=234、vRight=1324（视口内），系统信息全部可见。
 
 ### v1.35.3（2026-10-26，管理面板体验整改）
 

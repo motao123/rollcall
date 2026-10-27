@@ -780,20 +780,33 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .info-list {
   display: grid;
   gap: 0;
+  /* 必须显式声明单列 minmax(0,1fr)：grid 隐式 auto 列会被列内 item 的
+     min-content 撑开，而 .info-v 的 nowrap 长值（64 位上报签名、完整 OS 名）
+     会把列撑到约 700px；配合 .info-row 的 space-between，值被推到行尾——
+     侧栏只有 268px 时值就跑到屏幕外，视觉上「系统信息的值全是空的」
+     （v1.35.4 修复：注入前 rowW=697/vRight=1787，修复后 234/1324）。 */
+  grid-template-columns: minmax(0, 1fr);
 }
 .info-row {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 12px;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
+  /* grid item 默认 min-width:auto，会被 nowrap 内容的 min-content 撑开 */
+  min-width: 0;
 }
 .info-row:last-child { border-bottom: none; }
 .info-k { color: var(--fg-3); flex: none; }
 .info-v {
   color: var(--fg);
   text-align: right;
+  /* 占据剩余宽度并可收缩：长值按 ellipsis 截断（悬停 title 可看全文），
+     不会把整行推出容器 */
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
