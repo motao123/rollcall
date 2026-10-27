@@ -1228,7 +1228,7 @@ async function viewNodes() {
       e.stopPropagation();
       const id = b.dataset.nodeUpgrade;
       const n = (state.data.nodes || []).find((x) => x.id === id);
-      if (n) showNodeUpgrade(n);
+      if (n) showNodeUpgrade(n).catch((err) => toast('打开升级指引失败：' + err.message, 'err'));
     };
   });
   $$('[data-node-edit]').forEach((b) => {
@@ -4704,16 +4704,25 @@ function agentServerURL() {
 // 只能给出在目标机器上执行的命令（与「接入」同理）。
 // 命令走控制端自己的 install.sh --upgrade：脚本内 uname -m 自动识别架构、
 // 下载后校验 SHA-256、替换二进制并重启，配置文件与令牌保持不变。
-function showNodeUpgrade(n) {
+async function showNodeUpgrade(n) {
   const base = agentServerURL();
   const cmd = `curl -fsSL ${base}/agent/install.sh | sh -s -- --upgrade`;
   const cur = n.agentVersion || '未上报';
-  // 目标版本优先取节点自带的 serverVersion（/api/nodes 每个节点都带，
-  // web.go 的节点级字段）；state.serverVersion 只在设置页加载过，
-  // 直接打开节点页时为空，会让弹窗只显示「当前 vX（控制端版本）」而缺目标版本。
-  const target = n.serverVersion || state.serverVersion || '';
+  // 目标版本：列表接口不带 serverVersion（只有详情接口带），
+  // state.serverVersion 也只在设置页加载过 —— 直接打开节点页时两者都可能是空。
+  // 这里补一次详情请求（单台、走缓存，代价可忽略），拿不到就不写死错误文案。
+  let target = n.serverVersion || state.serverVersion || '';
+  if (!target) {
+    try {
+      const d = await api('/api/nodes/' + encodeURIComponent(n.id));
+      target = (d && d.serverVersion) || '';
+    } catch (err) { /* 拿不到就退化为不显示目标版本 */ }
+  }
+  const verLine = target
+    ? `当前 <span class="mono">${esc(cur)}</span> → 目标 <span class="mono">${esc(target)}</span>（控制端版本）。`
+    : `当前 <span class="mono">${esc(cur)}</span>。升级后与控制端版本一致。`;
   const dlg = openDialog('升级 Agent · ' + n.name, `
-    <p class="modal-sub">当前 <span class="mono">${esc(cur)}</span>${target ? ` → 目标 <span class="mono">${esc(target)}</span>` : ''}（控制端版本）。</p>
+    <p class="modal-sub">${verLine}</p>
     <div class="field">
       <span class="field-label">在 ${esc(n.name)} 上以 root 执行</span>
       <pre class="code" style="max-height:120px;overflow:auto;word-break:break-all">${esc(cmd)}</pre>
