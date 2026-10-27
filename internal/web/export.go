@@ -235,11 +235,21 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "该时间范围内没有数据")
 		return
 	}
+	// p50/p95 追加在**末尾**而不是紧跟 CPU峰值：导出文件可能被脚本按列位置解析，
+	// 插在中间会让其后所有列右移。空值（无直方图的老桶）留空而不是写 0 ——
+	// 0 会被误读成"CPU 使用率为 0"，空才表示"该桶没有摘要"。
 	_ = cw.Write([]string{
 		"时间", "unix", "分辨率", "CPU%", "CPU峰值",
 		"内存已用", "内存总量", "内存%", "磁盘已用", "磁盘总量", "磁盘%",
 		"负载1", "接收增量字节", "发送增量字节", "样本数",
+		"CPU p50", "CPU p95",
 	})
+	optF2 := func(v float64) string {
+		if v <= 0 {
+			return ""
+		}
+		return f2(v)
+	}
 	for _, p := range pts {
 		_ = cw.Write([]string{
 			tsFmt(p.TS), strconv.FormatInt(p.TS, 10), resolution,
@@ -249,6 +259,7 @@ func (s *Server) exportMetrics(w http.ResponseWriter, r *http.Request) {
 			f2(p.Load1),
 			strconv.FormatUint(p.NetRxDelta, 10), strconv.FormatUint(p.NetTxDelta, 10),
 			strconv.FormatUint(uint64(p.Count), 10),
+			optF2(p.CPUP50), optF2(p.CPUP95),
 		})
 	}
 	flushCSV(w, "rollcall-metrics-"+safeFileName(node.Name), buf, cw)
