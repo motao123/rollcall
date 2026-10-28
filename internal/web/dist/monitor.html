@@ -17,17 +17,13 @@
     <div class="brand">
       <span class="brand-dot" id="brandDot"></span>
       Rollcall 监控面板
-      <span class="brand-sub hide-sm" id="brandSub">只读聚合视图</span>
+      <span class="brand-sub hide-sm" id="brandSub"></span>
     </div>
     <div class="heartbeat" id="heartbeat" aria-live="polite">
       <span class="pulse"></span>
-      <span id="hbText">初始化…</span>
+      <span id="hbText">正在连接…</span>
     </div>
     <div class="topbar-right">
-      <select class="select" id="sourceSel" title="数据来源">
-        <option value="mock">数据源：模拟</option>
-        <option value="http">数据源：实时接口</option>
-      </select>
       <select class="select" id="intervalSel" title="自动刷新间隔">
         <option value="0">不自动刷新</option>
         <option value="10000">每 10 秒</option>
@@ -53,10 +49,6 @@
 <main class="wrap" id="app">
   <section class="stats" id="stats" aria-label="总体统计"></section>
   <div id="view"></div>
-  <details class="notes" id="notes">
-    <summary>数据说明：图表内容、字段与刷新机制</summary>
-    <div class="notes-body" id="notesBody"></div>
-  </details>
 </main>
 
 <div class="toast-host" id="toastHost"></div>

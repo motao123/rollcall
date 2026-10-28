@@ -149,7 +149,7 @@ function fmtRate(bps) {
  * 卡片里三列并排，写两遍单位会撑换行导致卡片高度不齐。
  */
 function fmtPair(used, total) {
-  if (used == null || total == null) return '未上报';
+  if (used == null || total == null) return '—';
   const split = (v) => {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let i = 0, x = Number(v) || 0;
@@ -527,7 +527,7 @@ function donutSVG(pct, opts) {
               stroke-width="${stroke}" stroke-linecap="round"
               stroke-dasharray="${valLen.toFixed(2)} ${circ.toFixed(2)}"/>
     </g>
-    <text class="donut-num" x="${cx}" y="${cx + 5}" text-anchor="middle">${v.toFixed(0)}<tspan class="donut-pct" dy="-2">%</tspan></text>
+    <text class="donut-num" x="${cx}" y="${cx + 5}" text-anchor="middle">${v.toFixed(0)}<tspan class="donut-pct" dy="-3">&#8201;%</tspan></text>
   </svg>`;
 }
 
@@ -970,12 +970,12 @@ function renderBars(nodes) {
         </div>`).join('')}
       </div>
       <div class="card-foot">
-        <span class="kv"><span class="down">${esc(fmtRate(n.rxRate))}</span></span>
-        <span class="kv"><span class="up">${esc(fmtRate(n.txRate))}</span></span>
+        <span class="kv" title="入站速率">↓ ${esc(fmtRate(n.rxRate))}</span>
+        <span class="kv" title="出站速率">↑ ${esc(fmtRate(n.txRate))}</span>
         <span class="dot-sep">·</span>
-        <span class="kv"><b>${esc(fmtDuration(n.uptimeSec))}</b></span>
+        <span class="kv" title="运行时长">${esc(fmtDuration(n.uptimeSec))}</span>
         <span class="dot-sep">·</span>
-        <span>${esc(fmtAgo(n.lastSeen))}</span>
+        <span title="最后上报">${esc(fmtAgo(n.lastSeen))}</span>
       </div>
     </article>`;
   }).join('')}</div>`;
@@ -985,7 +985,7 @@ function renderBars(nodes) {
 function renderRings(nodes) {
   return `<div class="grid">${nodes.map((n) => {
     const rings = [
-      { k: 'CPU', v: n.cpu, spec: n.cores ? n.cores + ' 核' : '未上报' },
+      { k: 'CPU', v: n.cpu, spec: n.cores ? n.cores + ' 核' : '' },
       { k: '内存', v: n.mem, spec: fmtPair(n.memUsed, n.memTotal) },
       { k: '磁盘', v: n.disk, spec: fmtPair(n.diskUsed, n.diskTotal) },
     ];
@@ -1005,27 +1005,58 @@ function renderRings(nodes) {
       </div>
       <div class="card-foot">
         <span class="kv">负载 <b class="num">${n.load1 == null ? '—' : n.load1.toFixed(2)}</b></span>
-        <span class="kv"><span class="down">${esc(fmtRate(n.rxRate))}</span></span>
-        <span class="kv"><span class="up">${esc(fmtRate(n.txRate))}</span></span>
-        <span style="margin-left:auto">${esc(fmtAgo(n.lastSeen))}</span>
+        <span class="kv" title="入站速率">↓ ${esc(fmtRate(n.rxRate))}</span>
+        <span class="kv" title="出站速率">↑ ${esc(fmtRate(n.txRate))}</span>
+        <span style="margin-left:auto" title="最后上报">${esc(fmtAgo(n.lastSeen))}</span>
       </div>
     </article>`;
   }).join('')}</div>`;
 }
 
 /* ---------- 视图 3：列表 ---------- */
+/**
+ * 列表列定义。
+ * `optional: true` 的列在**整列都没有值**时会被整体省略 —— 公开数据不提供
+ * 地区与系统时，与其铺满一列「—」，不如让表格自动收窄，把宽度留给有数的列。
+ */
 const LIST_COLS = [
-  { key: 'name', label: '主机名', cls: 'cell-host', sortable: true },
-  { key: 'region', label: '地区', sortable: true, hideSm: true },
-  { key: 'os', label: '系统 / 架构', sortable: true, hideSm: true },
-  { key: 'cpu', label: 'CPU', n: true, sortable: true },
-  { key: 'mem', label: '内存', n: true, sortable: true },
-  { key: 'disk', label: '磁盘', n: true, sortable: true },
-  { key: 'load1', label: '负载 1/5/15', n: true, sortable: true },
-  { key: 'rxRate', label: '入站', n: true, sortable: true },
-  { key: 'txRate', label: '出站', n: true, sortable: true },
-  { key: 'uptimeSec', label: '运行时长', n: true, sortable: true, hideSm: true },
-  { key: 'lastSeen', label: '最后上报', n: true, sortable: true },
+  {
+    key: 'name', label: '主机名', cls: 'cell-host', sortable: true,
+    cell: (n) => `<span class="status-dot ${n.state === 'offline' ? 'off' : n.state === 'stale' ? 'stale' : ''}"></span>
+      <span class="host-name">${esc(n.name)}</span>
+      ${n.group ? `<span class="host-group">${esc(n.group)}</span>` : ''}`,
+  },
+  {
+    key: 'region', label: '地区', sortable: true, hideSm: true,
+    optional: true, has: (n) => !!n.region,
+    cell: (n) => `<span class="card-flag" style="display:inline-block">${esc(n.region)}</span>`,
+  },
+  {
+    key: 'os', label: '系统 / 架构', sortable: true, hideSm: true,
+    optional: true, has: (n) => !!(n.os || n.arch),
+    cell: (n) => `${esc(n.os || '')}${n.arch ? `<span style="color:var(--fg-3)"> / ${esc(n.arch)}</span>` : ''}`,
+  },
+  { key: 'cpu', label: 'CPU', n: true, sortable: true,
+    cell: (n) => (n.cpu == null ? '<span style="color:var(--fg-3)">—</span>'
+      : `${miniBar(n.cpu)}<span class="num">${pct1(n.cpu)}</span>`) },
+  { key: 'mem', label: '内存', n: true, sortable: true,
+    cell: (n) => (n.mem == null ? '<span style="color:var(--fg-3)">—</span>'
+      : `${miniBar(n.mem)}<span class="num">${pct1(n.mem)}</span>`) },
+  { key: 'disk', label: '磁盘', n: true, sortable: true,
+    cell: (n) => (n.disk == null ? '<span style="color:var(--fg-3)">—</span>'
+      : `${miniBar(n.disk)}<span class="num">${pct1(n.disk)}</span>`) },
+  { key: 'load1', label: '负载 1/5/15', n: true, sortable: true,
+    cell: (n) => `<span class="num" style="font-size:11.5px;color:var(--fg-2)">${
+      n.load1 == null ? '—'
+        : [n.load1, n.load5, n.load15].filter((v) => v != null).map((v) => v.toFixed(2)).join(' ')}</span>` },
+  { key: 'rxRate', label: '入站', n: true, sortable: true,
+    cell: (n) => `<span class="num">${esc(fmtRate(n.rxRate))}</span>` },
+  { key: 'txRate', label: '出站', n: true, sortable: true,
+    cell: (n) => `<span class="num">${esc(fmtRate(n.txRate))}</span>` },
+  { key: 'uptimeSec', label: '运行时长', n: true, sortable: true, hideSm: true,
+    cell: (n) => `<span class="num">${esc(fmtDuration(n.uptimeSec))}</span>` },
+  { key: 'lastSeen', label: '最后上报', n: true, sortable: true,
+    cell: (n) => `<span style="color:var(--fg-3)">${esc(fmtAgo(n.lastSeen))}</span>` },
 ];
 
 function sortNodes(nodes) {
@@ -1056,36 +1087,27 @@ function miniBar(pct) {
 
 function renderList(nodes) {
   const rows = sortNodes(nodes);
+  const cols = LIST_COLS.filter((c) => !c.optional || nodes.some((n) => c.has(n)));
   return `<div class="table-wrap">
     <table>
       <thead><tr>
-        ${LIST_COLS.map((c) => {
+        ${cols.map((c) => {
           const active = state.sort.key === c.key;
           const aria = active ? ` aria-sort="${state.sort.dir > 0 ? 'ascending' : 'descending'}"` : '';
           // 箭头必须体现方向：恒用 ↕ 时用户看不出当前是升序还是降序
           const arrow = active ? (state.sort.dir > 0 ? '↑' : '↓') : '↕';
-          const cls = [c.n ? 'n' : '', c.sortable ? 'sortable' : '', c.hideSm ? 'hide-sm' : ''].filter(Boolean).join(' ');
+          const cls = [c.cls || '', c.n ? 'n' : '', c.sortable ? 'sortable' : '', c.hideSm ? 'hide-sm' : '']
+            .filter(Boolean).join(' ');
           return `<th class="${cls}"${c.sortable ? ` data-sort="${c.key}"` : ''}${aria}
             ${c.sortable ? 'tabindex="0" role="button"' : ''}>${c.label}${c.sortable ? `<span class="arrow">${arrow}</span>` : ''}</th>`;
         }).join('')}
       </tr></thead>
       <tbody>
         ${rows.map((n) => `<tr data-node="${esc(n.id)}" aria-label="${esc(n.name)} 详情">
-          <td class="cell-host">
-            <span class="status-dot ${n.state === 'offline' ? 'off' : n.state === 'stale' ? 'stale' : ''}"></span>
-            <span class="host-name">${esc(n.name)}</span>
-            <span class="host-group">${esc(n.group)}</span>
-          </td>
-          <td class="hide-sm">${n.region ? `<span class="card-flag" style="display:inline-block">${esc(n.region)}</span>` : '<span style="color:var(--fg-3)">—</span>'}
-          <td class="hide-sm">${esc(n.os)} <span style="color:var(--fg-3)">/ ${esc(n.arch)}</span></td>
-          <td class="n">${miniBar(n.cpu)}<span class="num">${n.cpu == null ? '—' : pct1(n.cpu)}</span></td>
-          <td class="n">${miniBar(n.mem)}<span class="num">${n.mem == null ? '—' : pct1(n.mem)}</span></td>
-          <td class="n">${miniBar(n.disk)}<span class="num">${n.disk == null ? '—' : pct1(n.disk)}</span></td>
-          <td class="n num" style="font-size:11.5px;color:var(--fg-2)">${n.load1 == null ? '—' : `${n.load1.toFixed(2)} ${n.load5 == null ? '' : n.load5.toFixed(2)} ${n.load15 == null ? '' : n.load15.toFixed(2)}`}</td>
-          <td class="n num">${esc(fmtRate(n.rxRate))}</td>
-          <td class="n num">${esc(fmtRate(n.txRate))}</td>
-          <td class="n num hide-sm">${esc(fmtDuration(n.uptimeSec))}</td>
-          <td class="n" style="color:var(--fg-3)">${esc(fmtAgo(n.lastSeen))}</td>
+          ${cols.map((c) => {
+            const cls = [c.cls || '', c.n ? 'n' : '', c.hideSm ? 'hide-sm' : ''].filter(Boolean).join(' ');
+            return `<td class="${cls}">${c.cell(n)}</td>`;
+          }).join('')}
         </tr>`).join('')}
       </tbody>
     </table>
@@ -1124,22 +1146,22 @@ function renderDetail(node, rangeKey) {
         ${stateBadge(n)}
       </div>
       <div style="margin-left:auto;font-size:12px;color:var(--fg-3)">
-        ${esc(n.group)} · ${esc(n.provider)}
+        ${[n.group, n.provider].filter(Boolean).map((x) => esc(x)).join(' · ')}
       </div>
     </div>
 
     <div class="info-grid">
       ${[
-        infoCell('运行时长', n.uptimeSec == null ? '未公开' : fmtDuration(n.uptimeSec)),
+        infoCell('运行时长', n.uptimeSec == null ? '—' : fmtDuration(n.uptimeSec)),
         (n.os || n.arch) ? infoCell('操作系统 / 架构', [n.os, n.arch].filter(Boolean).join(' / ')) : '',
         n.kernel ? infoCell('内核版本', n.kernel) : '',
         n.cpuModel ? infoCell('CPU 型号', n.cpuModel, n.cores ? `× ${n.cores}` : '') : '',
         infoCell('内存', `${fmtBytes(n.memUsed)} / ${fmtBytes(n.memTotal)}`, n.mem == null ? '' : pct1(n.mem)),
         infoCell('磁盘', `${fmtBytes(n.diskUsed)} / ${fmtBytes(n.diskTotal)}`, n.disk == null ? '' : pct1(n.disk)),
-        infoCell('负载 1 / 5 / 15', n.load1 == null ? '未公开'
+        infoCell('负载 1 / 5 / 15', n.load1 == null ? '—'
           : `${n.load1.toFixed(2)} / ${(n.load5 ?? 0).toFixed(2)} / ${(n.load15 ?? 0).toFixed(2)}`),
-        infoCell('累计流量', `${fmtBytes(n.totalRx)} / ${fmtBytes(n.totalTx)}`, '↓ / ↑'),
-        infoCell('实时速率', `${fmtRate(n.rxRate)} / ${fmtRate(n.txRate)}`, '↓ / ↑'),
+        infoCell('累计流量', `↓ ${fmtBytes(n.totalRx)} / ↑ ${fmtBytes(n.totalTx)}`),
+        infoCell('实时速率', `↓ ${fmtRate(n.rxRate)} / ↑ ${fmtRate(n.txRate)}`),
         n.region ? infoCell('地区', n.region) : '',
         infoCell('最后上报', fmtAgo(n.lastSeen), online ? '' : '（非在线）'),
         infoCell('状态', online ? '在线' : n.state === 'stale' ? '数据陈旧' : '离线'),
@@ -1184,9 +1206,8 @@ async function mountDetailCharts(node, rangeKey) {
   const filled = (c) => Array.isArray(c) && c.length > 1;
   if (!cols || ![cols.cpu, cols.mem, cols.disk, cols.rx, cols.tx].some(filled)) {
     box.innerHTML = `<div class="empty" style="grid-column:1/-1">
-      <strong>该数据源未提供历史序列</strong>
-      实时接口读 <code>/api/status/node/{hid}?range=</code>；若公开页关闭了「节点详情」区块，
-      该接口会返回 404，面板不会用当前值伪造曲线。可切回「数据源：模拟」查看图表形态。
+      <strong>暂无历史数据</strong>
+      该节点还没有采集到趋势记录，采满几个点后图表会自动出现。
     </div>`;
     return;
   }
@@ -1205,7 +1226,7 @@ async function mountDetailCharts(node, rangeKey) {
   if (metaEl) {
     const cnt = (cols.cpu || cols.mem || cols.disk || []).length;
     const step = cnt > 1 ? Math.round(spanSec / (cnt - 1)) : 0;
-    metaEl.textContent = `${cnt} 个采样点 · 实际间隔 ${fmtStep(step)}`;
+    metaEl.textContent = `每 ${fmtStep(step)}一个采样点 · 共 ${cnt} 个`;
   }
 
   const vals = (c) => (filled(c) ? c.map((p) => p.v).filter((v) => v != null && isFinite(v)) : []);
@@ -1239,7 +1260,7 @@ async function mountDetailCharts(node, rangeKey) {
         峰值 <b>${maxOf(cpuVals) == null ? '—' : pct1(maxOf(cpuVals))}</b>
         p95 <b>${percentile(cpuVals, 0.95) == null ? '—' : pct1(percentile(cpuVals, 0.95))}</b>
       </div>
-    </div>` : missing('CPU 使用率', '该数据源未返回 CPU 序列')}
+    </div>` : missing('CPU 使用率', '暂无 CPU 历史数据')}
 
     ${filled(cols.mem) ? `<div class="chart-card">
       <div class="chart-head">
@@ -1253,7 +1274,7 @@ async function mountDetailCharts(node, rangeKey) {
         均值 <b>${avg(memVals) == null ? '—' : pct1(avg(memVals))}</b>
         峰值 <b>${maxOf(memVals) == null ? '—' : pct1(maxOf(memVals))}</b>
       </div>
-    </div>` : missing('内存使用率', '该数据源未返回内存序列')}
+    </div>` : missing('内存使用率', '暂无内存历史数据')}
 
     ${filled(cols.disk) ? `<div class="chart-card">
       <div class="chart-head">
@@ -1264,7 +1285,7 @@ async function mountDetailCharts(node, rangeKey) {
       ${lineChart({ series: [{ key: 'disk', label: '磁盘', color: '#0891b2', points: cols.disk }],
         yMax: 100, yFmt: (v) => v.toFixed(0) + '%', spanSec, aria: '磁盘使用率趋势' })}
       <div class="chart-foot">磁盘变化缓慢，短区间内近乎平线属正常</div>
-    </div>` : missing('磁盘使用率', '该数据源未返回磁盘序列')}
+    </div>` : missing('磁盘使用率', '暂无磁盘历史数据')}
 
     ${(filled(cols.rx) || filled(cols.tx)) ? `<div class="chart-card">
       <div class="chart-head">
@@ -1283,7 +1304,7 @@ async function mountDetailCharts(node, rangeKey) {
         入站峰值 <b>${esc(fmtRate(maxOf(rxVals) || 0))}</b>
         出站峰值 <b>${esc(fmtRate(maxOf(txVals) || 0))}</b>
       </div>
-    </div>` : missing('网络吞吐', '该数据源未返回网络序列')}
+    </div>` : missing('网络吞吐', '暂无网络历史数据')}
 
     ${filled(cols.load1) ? `<div class="chart-card" style="grid-column:1/-1">
       <div class="chart-head">
@@ -1296,7 +1317,7 @@ async function mountDetailCharts(node, rangeKey) {
       ${lineChart({ series: [{ key: 'load', label: '负载 1 分钟', color: '#b45309', points: cols.load1 }],
         yFmt: (v) => v.toFixed(1), spanSec, height: 150, aria: '系统负载趋势' })}
       <div class="chart-foot">
-        核数 <b>${node.cores || '未上报'}</b>
+        核数 <b>${node.cores || '—'}</b>
         峰值 <b>${maxOf(vals(cols.load1)) == null ? '—' : maxOf(vals(cols.load1)).toFixed(2)}</b>
       </div>
     </div>` : `<div class="chart-card" style="grid-column:1/-1">
@@ -1307,7 +1328,7 @@ async function mountDetailCharts(node, rangeKey) {
         </span>
       </div>
       <div class="empty" style="padding:20px 14px;font-size:12.5px;border:0;background:transparent">
-        公开接口只提供负载的<b>当前值</b>，没有历史序列 —— 因此这里只显示数值，不给曲线
+        暂无负载趋势记录，当前值见上方
       </div>
     </div>`}`;
 
@@ -1326,7 +1347,7 @@ function renderHome() {
 
   renderStats(snap);
   const sub = document.getElementById('brandSub');
-  if (sub) sub.textContent = `${snap.nodes.length} 台 · 只读聚合视图`;
+  if (sub) sub.textContent = `${snap.nodes.length} 台服务器`;
 
   // 筛选在渲染前生效：三种视图共用同一份过滤结果，
   // 避免"卡片过滤了但列表没过滤"这类不一致。
@@ -1371,8 +1392,8 @@ function renderHome() {
     ${body}
     ${renderActivity(snap)}
     ${snap.partial ? `<div class="empty" style="margin-top:12px;text-align:left;padding:12px 14px">
-      <strong style="display:inline;font-size:12.5px">部分字段未上报</strong>
-      实时接口缺少部分指标（显示为「未上报」而非 0），这类缺失通常是 Agent 版本或采集能力不同导致的。
+      <strong style="display:inline;font-size:12.5px">部分数据暂未采集</strong>
+      个别指标暂时没有数值，显示为「—」而不是 0 —— 刚接入的节点通常需要一两分钟补齐。
     </div>` : ''}`;
 }
 
@@ -1405,7 +1426,7 @@ function render(forceDetail) {
     if (!node) {
       document.getElementById('stats').style.display = '';
       document.getElementById('view').innerHTML =
-        `<div class="empty" style="margin-top:18px"><strong>节点不存在</strong>该节点可能已被删除，或数据源已切换。</div>`;
+        `<div class="empty" style="margin-top:18px"><strong>节点不存在</strong>该节点可能已被移除。</div>`;
       detailSig = '';
       return;
     }
@@ -1460,19 +1481,17 @@ function updateHeartbeat() {
   if (state.lastError) {
     els.hb.classList.add('error');
     const wait = state.interval ? Math.max(0, Math.round((nextAt - Date.now()) / 1000)) : null;
-    els.hbText.innerHTML = `<strong>刷新失败</strong> 第 ${state.failures} 次`
-      + (wait != null ? ` · ${wait}s 后重试` : ' · 自动刷新已关闭');
+    els.hbText.innerHTML = `<strong>数据获取失败</strong>`
+      + (wait != null ? ` · ${wait}s 后重试` : ' · 请手动刷新');
     return;
   }
-  if (!snap) { els.hbText.textContent = '初始化…'; return; }
+  if (!snap) { els.hbText.textContent = '正在连接…'; return; }
   const age = Math.round((Date.now() - snap.at) / 1000);
   // 超过 2 倍刷新间隔就提示"陈旧"，让"没在动"这件事可见
   if (state.interval && age * 1000 > state.interval * 2.2) els.hb.classList.add('stale');
   const next = state.interval ? Math.max(0, Math.round((nextAt - Date.now()) / 1000)) : null;
-  const src = snap.source === 'http' ? '实时接口' : '模拟数据';
-  // 推送连接状态只在实时接口下有意义；模拟数据没有流可连。
-  const push = snap.source === 'http' && state.streamOK ? ' · 推送已连接' : '';
-  els.hbText.innerHTML = `<strong>${fmtAgo(snap.at)}</strong> · ${esc(src)}${push}`
+  // 只说"多久之前更新、几秒后更新" —— 数据走哪条通道是内部实现，对看板的人没有意义
+  els.hbText.innerHTML = `<strong>更新于 ${esc(fmtAgo(snap.at))}</strong>`
     + (next != null ? ` · ${next}s 后刷新` : ' · 自动刷新已关闭');
 }
 
@@ -1511,7 +1530,7 @@ async function runRefresh(manual) {
     state.loading = false;
     // 手动刷新强制重建详情页；自动刷新只更新首页（详情页保持当前图表）
     render(!!manual);
-    if (manual) toast(`已刷新 · ${snap.nodes.length} 台节点`);
+    if (manual) toast(`已更新 · ${snap.nodes.length} 台服务器`);
   } catch (err) {
     state.failures += 1;
     state.lastError = err.message || String(err);
@@ -1527,7 +1546,7 @@ async function runRefresh(manual) {
     }
     if (manual || state.failures === 1) {
       const wait = state.interval ? Math.round(backoffDelay() / 1000) + ' 秒后自动重试' : '自动刷新已关闭';
-      toast(`刷新失败：${state.lastError}（${wait}）`, 'err');
+      toast(`更新失败：${state.lastError}（${wait}）`, 'err');
     }
   } finally {
     state.inFlight = false;
@@ -1543,98 +1562,13 @@ function startHeartbeatClock() {
 }
 
 /* ============================================================
-   十、说明区（数据契约写在界面上）
-   ============================================================ */
-
-function renderNotes() {
-  const body = document.getElementById('notesBody');
-  if (!body) return;
-  const isHttp = state.source === 'http';
-  body.innerHTML = `
-    <h4>三种视图各展示什么</h4>
-    <ul>
-      <li><b>条形图</b>：每台服务器一张卡片，CPU / 内存 / 磁盘 各一条进度条（宽度 = 使用率，颜色在 ≥60% 转琥珀、≥80% 转红），
-        第四条「负载」是 <code>load1 ÷ 核数</code> 归一化后的百分比，便于跨核数比较；卡片底部是实时速率、运行时长与最后上报时间。</li>
-      <li><b>环形图</b>：同一组指标画成 3/4 圆环，中心是百分比；环下方标注容量规格（核数 / 已用÷总量）。</li>
-      <li><b>列表</b>：表格形式，一屏可比 13 台的绝对值；水位列内嵌迷你条，表头可点击排序（再点切换升降序）。</li>
-      <li><b>内页详情</b>：点任意卡片/行进入 <code>#/server/&lt;id&gt;</code>，含 12 项资产信息、时间范围切换（24 小时 / 7 天 / 30 天）
-        与 5 张趋势图（CPU / 内存 / 磁盘 / 网络 / 负载），图上悬停可读取该时刻的全部序列值。</li>
-      <li><b>筛选与最近事件</b>：搜索（主机名/地区/系统）、状态、分组三种筛选对<b>所有视图共用</b>，
-        切换视图不丢条件；页面底部「最近事件」直接取自公开状态接口的 <code>activity</code> 数组，
-        按 warn / error / info 着色，不额外发请求。</li>
-    </ul>
-
-    <h4>数据来源</h4>
-    <table>
-      <tr><th>字段</th><th>含义</th><th>${isHttp ? '实时接口取值' : '模拟数据取值'}</th></tr>
-      <tr><td><code>cpu</code> / <code>mem</code> / <code>disk</code></td><td>使用率（%）</td><td>${isHttp ? '<code>nodes[].cpu</code> / <code>mem</code> / <code>disk</code>' : '随机游走 + 日周期 + 4% 概率尖峰'}</td></tr>
-      <tr><td><code>load1/5/15</code></td><td>系统负载均值</td><td>${isHttp ? '<code>nodes[].load1</code> 等' : '由基线负载派生'}</td></tr>
-      <tr><td><code>memUsed/Total</code>、<code>diskUsed/Total</code></td><td>容量（字节）</td><td>${isHttp ? '<code>nodes[].memUsed/memTotal</code> 等' : '节点台账 × 使用率'}</td></tr>
-      <tr><td><code>rxRate/txRate</code></td><td>实时速率（字节/秒）</td><td>${isHttp ? '<code>nodes[].netRx/netTx</code>，按 bytes/s 解释' : '突发型随机游走'}</td></tr>
-      <tr><td><code>totalRx/totalTx</code></td><td>累计流量（字节）</td><td>${isHttp ? '<code>nodes[].totalRx/totalTx</code>' : '按基线速率推算'}</td></tr>
-      <tr><td><code>uptimeSec</code>、<code>lastSeen</code></td><td>运行时长、最后上报</td><td>${isHttp ? '<code>nodes[].uptime</code>、<code>lastSeen</code>（秒）' : '启动时刻到当前时间'}</td></tr>
-      <tr><td>历史曲线</td><td>详情页趋势图</td><td>${isHttp ? '<code>GET /api/status/node/{hid}?range=</code>（公开详情接口，支持 24h/7d/30d）；不可用时显示「未提供历史」，不伪造' : '按区间粒度确定性生成'}</td></tr>
-    </table>
-    <p style="margin:8px 0 0">
-      当前数据源：<b>${isHttp ? '实时接口（' + esc(state.baseUrl || '未配置') + '）' : '内置模拟数据'}</b>。
-      实时接口读取 <code>GET /api/status</code>（Rollcall 公开状态接口，未鉴权）。
-      浏览器跨域限制要求面板与该接口<b>同源部署</b>，或用 <code>?api=</code> 参数指定地址；
-      若返回缺字段，面板显示「未上报」而<b>不补零</b> —— 0% 和"没有数据"是两件事。
-    </p>
-
-    <h4>列表字段</h4>
-    <table>
-      <tr><th>列</th><th>说明</th></tr>
-      <tr><td>状态点 + 主机名 + 分组</td><td>绿=在线、琥珀=数据陈旧、红=离线；分组来自资产台账</td></tr>
-      <tr><td>地区</td><td>国旗 + 地区代码</td></tr>
-      <tr><td>系统 / 架构</td><td>发行版与 CPU 架构（异构机群里 <code>aarch64</code> 与 <code>x86_64</code> 要分开看）</td></tr>
-      <tr><td>CPU / 内存 / 磁盘</td><td>迷你条 + 百分比，颜色按水位分级</td></tr>
-      <tr><td>负载 1/5/15</td><td>三个时间窗的均值，单位是"可运行进程数"，需结合核数判断</td></tr>
-      <tr><td>入站 / 出站</td><td>实时速率（不是累计），用于看当下是否在跑流量</td></tr>
-      <tr><td>运行时长</td><td>自上次启动，用于发现意外重启</td></tr>
-      <tr><td>最后上报</td><td>距今多久，<b>比"在线"徽章更可信</b>：徽章是状态，这个是事实</td></tr>
-    </table>
-
-    <h4>数据更新的触发方式</h4>
-    <ul>
-      <li><b>实时推送</b>：连上 <code>/api/status/stream</code>（SSE）后，服务端每次变更只推一个版本号，
-        客户端收到就重取一次快照（1.2 秒内合并，避免一批节点同时上报导致连环重绘）。
-        心跳区显示「推送已连接」。</li>
-      <li><b>自动刷新</b>：间隔可选 10 / 30 / 60 秒或关闭，默认 30 秒；只重绘数据区，不重载页面。
-        推送不可用时它就是唯一的数据来源 —— 两者并存而不是二选一。</li>
-      <li><b>手动刷新</b>：点右上角「刷新」或按 <kbd>R</kbd>；刷新期间按钮图标旋转并禁用，防止重复请求。</li>
-      <li><b>页面可见性</b>：切到后台标签页时暂停定时器，回到前台立即刷新一次 —— 避免后台空转，也避免回来后看到过期数据。</li>
-      <li><b>失败退避</b>：连续失败时间隔翻倍（30s → 60s → 120s …，上限 5 分钟），成功一次即复位。</li>
-      <li><b>切换数据源</b>：立即重新取数、重连推送并刷新说明区。</li>
-    </ul>
-
-    <h4>交互反馈</h4>
-    <ul>
-      <li><b>首屏</b>：卡片骨架屏，尺寸与真实卡片一致，避免布局跳动。</li>
-      <li><b>刷新中</b>：刷新按钮旋转 + 禁用；心跳区显示"X 秒后刷新"的倒计时。</li>
-      <li><b>刷新成功</b>：心跳时间戳更新（等宽数字，列宽不抖）；变动的数值有一次淡黄/淡绿脉冲（升/降）。</li>
-      <li><b>刷新失败</b>：心跳圆点转红并显示失败次数与重试倒计时，同时弹出一条错误提示（同类错误只在第 1 次与手动触发时提示，不刷屏）。</li>
-      <li><b>数据陈旧</b>：超过 2 倍刷新间隔未更新，心跳转为琥珀色；单台节点超过阈值则卡片打「数据陈旧」徽章。</li>
-      <li><b>筛选</b>：搜索框 180ms 防抖，重绘后自动恢复焦点与光标位置；状态/分组下拉即时生效；右侧显示「显示 N / 共 M 台」。</li>
-      <li><b>视图与排序</b>：选择记忆在 localStorage，下次打开保持；表头箭头随升/降序变化；图表悬停显示该时刻各序列读数。</li>
-      <li><b>主题</b>：右上角按钮在「跟随系统 → 浅色 → 深色」间循环，选择同样记忆；<code>auto</code> 时系统切换会实时跟随。</li>
-      <li><b>键盘</b>：<kbd>R</kbd> 刷新、<kbd>Esc</kbd> 从详情返回、表头可 Tab 聚焦后回车排序。</li>
-    </ul>`;
-
-  // kbd 样式内联补齐（说明区专用，避免污染主样式表）
-  body.querySelectorAll('kbd').forEach((k) => {
-    k.style.cssText = 'font-family:var(--mono);font-size:11px;background:#f4f6f9;border:1px solid var(--line-3);border-bottom-width:2px;border-radius:4px;padding:0 4px;';
-  });
-}
-
-/* ============================================================
    十一、事件绑定与初始化
    ============================================================ */
 
 function savePrefs() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
-      view: state.view, source: state.source, interval: state.interval,
+      view: state.view, interval: state.interval,
       range: state.range, theme: state.theme,
     }));
   } catch { /* 隐私模式下 localStorage 可能不可写，忽略 */ }
@@ -1654,7 +1588,8 @@ function loadPrefs() {
     if (raw) {
       const p = JSON.parse(raw);
       if (p.view && ['bars', 'rings', 'list'].includes(p.view)) state.view = p.view;
-      if (p.source === 'http' || p.source === 'mock') state.source = p.source;
+      // 数据源不做持久化：它由「跑在什么协议上」决定。
+      // 若沿用上次的选择，在 https 部署里读到残留的 mock 就会展示演示数据 —— 那是最坏的情况。
       if ([0, 10000, 30000, 60000].includes(p.interval)) state.interval = p.interval;
       if (p.range && RANGES[p.range]) state.range = p.range;
       if (p.theme && ['auto', 'light', 'dark'].includes(p.theme)) state.theme = p.theme;
@@ -1757,22 +1692,6 @@ function bindEvents() {
     else if (mq.addListener) mq.addListener(onChange);
   }
 
-  document.getElementById('sourceSel').addEventListener('change', (ev) => {
-    state.source = ev.target.value;
-    if (state.source === 'http' && !state.baseUrl) {
-      state.baseUrl = location.protocol.startsWith('http') ? location.origin : '';
-    }
-    savePrefs();
-    renderNotes();
-    state.failures = 0;
-    state.lastError = '';
-    toast(state.source === 'http'
-      ? `已切到实时接口：${state.baseUrl || '未配置地址'}`
-      : '已切到内置模拟数据');
-    connectStream();
-    runRefresh(true);
-  });
-
   document.getElementById('intervalSel').addEventListener('change', (ev) => {
     state.interval = Number(ev.target.value) || 0;
     savePrefs();
@@ -1811,13 +1730,10 @@ function init() {
   loadPrefs();
   applyTheme(state.theme, false);
 
-  // 控件初值同步（localStorage 可能改过默认值）
-  const srcSel = document.getElementById('sourceSel');
+  // 刷新间隔初值同步（localStorage 可能改过默认值）
   const itvSel = document.getElementById('intervalSel');
-  srcSel.value = state.source;
   itvSel.value = String(state.interval);
 
-  renderNotes();
   bindEvents();
   startHeartbeatClock();
   connectStream();

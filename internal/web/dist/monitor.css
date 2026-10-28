@@ -507,7 +507,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .donut-track { stroke: var(--line-2); }
 .donut-val { transition: stroke-dasharray .5s cubic-bezier(.4,0,.2,1), stroke .3s; }
 .donut-num { font-size: 21px; font-weight: 600; fill: var(--fg); font-family: var(--mono); }
-.donut-pct { font-size: 10px; fill: var(--fg-3); font-family: var(--mono); }
+.donut-pct { font-size: 12px; fill: var(--fg-3); font-family: var(--mono); font-weight: 500; }
 
 /* ---- 列表视图 ---- */
 .table-wrap {
@@ -775,66 +775,6 @@ td.n { text-align: right; }
 .toast.err { background: #7f1d1d; }
 .toast .t-ico { flex: none; margin-top: 1px; opacity: .9; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-
-/* 说明区：把数据契约写在界面上，避免"这数字哪来的"成为疑问 */
-.notes {
-  margin-top: 22px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  box-shadow: var(--shadow);
-}
-.notes summary {
-  padding: 12px 14px;
-  cursor: pointer;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--fg-2);
-  list-style: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.notes summary::-webkit-details-marker { display: none; }
-.notes summary::before {
-  content: "▸";
-  color: var(--fg-3);
-  font-size: 10px;
-  transition: transform .16s;
-}
-.notes[open] summary::before { transform: rotate(90deg); }
-.notes-body {
-  padding: 0 14px 14px;
-  font-size: 12.5px;
-  color: var(--fg-2);
-  border-top: 1px solid var(--line-2);
-  padding-top: 12px;
-}
-.notes-body h4 {
-  margin: 14px 0 6px;
-  font-size: 12px;
-  color: var(--fg);
-  font-weight: 650;
-}
-.notes-body h4:first-child { margin-top: 0; }
-.notes-body ul { margin: 0; padding-left: 18px; }
-.notes-body li { margin: 3px 0; }
-.notes-body code {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  background: var(--code-bg);
-  padding: 1px 4px;
-  border-radius: 3px;
-  color: #334155;
-}
-.notes-body table { font-size: 12px; margin-top: 6px; }
-.notes-body th, .notes-body td {
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--line-2);
-  text-align: left;
-  white-space: normal;
-}
-.notes-body th { color: var(--fg-3); font-weight: 600; font-size: 11.5px; background: transparent; position: static; }
 
 /* ============ 筛选条 ============ */
 .filters {
