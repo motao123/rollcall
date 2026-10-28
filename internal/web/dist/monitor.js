@@ -1385,7 +1385,19 @@ function parseRoute() {
   return { name: 'home' };
 }
 
-function render() {
+/** 当前详情页的结构签名（节点 + 区间）。用于抑制自动刷新引起的重建。 */
+let detailSig = '';
+
+/**
+ * 渲染入口。
+ *
+ * forceDetail=true 时才允许重建详情页结构。自动刷新（轮询 / SSE）走 false ——
+ * 否则每 30 秒详情页都会重建骨架、重新取一次 24h 序列、图表闪一下再画回来，
+ * 而且多次渲染会互相抢 detailToken，最后一次可能因为 DOM 已被换掉而落不了地
+ * （表现为"停在骨架屏"）。指标数值本身由心跳与卡片展示，详情页看的是趋势，
+ * 不值得为了几秒的新鲜度反复重画。
+ */
+function render(forceDetail) {
   if (state.loading && !state.snap) return;
   const route = parseRoute();
   if (route.name === 'detail' && state.snap) {
@@ -1394,11 +1406,16 @@ function render() {
       document.getElementById('stats').style.display = '';
       document.getElementById('view').innerHTML =
         `<div class="empty" style="margin-top:18px"><strong>节点不存在</strong>该节点可能已被删除，或数据源已切换。</div>`;
+      detailSig = '';
       return;
     }
     state.range = route.range;
+    const sig = route.id + '|' + route.range;
+    if (!forceDetail && sig === detailSig && document.getElementById('charts')) return;
+    detailSig = sig;
     renderDetail(node, route.range);
   } else {
+    detailSig = '';
     renderHome();
   }
 }
@@ -1492,7 +1509,8 @@ async function runRefresh(manual) {
     state.failures = 0;
     state.lastError = '';
     state.loading = false;
-    render();
+    // 手动刷新强制重建详情页；自动刷新只更新首页（详情页保持当前图表）
+    render(!!manual);
     if (manual) toast(`已刷新 · ${snap.nodes.length} 台节点`);
   } catch (err) {
     state.failures += 1;
