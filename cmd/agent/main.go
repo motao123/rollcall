@@ -312,6 +312,11 @@ func main() {
 	// （首次 Poll 只记录当前最新时间，不会把历史登录当成新事件）。
 	loginWatcher := logins.NewWatcher()
 
+	// 可选采集能力只探测一次：每次上报都遍历 /sys 没有意义。
+	// 空清单会被 NormalizeCaps 规整成 "none"，与"旧 Agent 没发这个头"区分开 ——
+	// 面板据此把"这台机器没有传感器"与"Agent 读不到"分开陈述。
+	agentCaps := agentwire.NormalizeCaps(collect.DetectCaps())
+
 	send := func() error {
 		// 非 Linux 构建没有 /proc 采集实现，Collect 只能返回全零。
 		// 直接拒绝上报，避免面板把「没有数据」误当成「资源用量为 0」。
@@ -364,6 +369,8 @@ func main() {
 		// 用请求头而不是 JSON 字段：旧服务端启用了 DisallowUnknownFields，
 		// 加字段会让先升级 Agent 的节点整份上报被拒。
 		req.Header.Set("X-Agent-Version", version.Version)
+		// 能力清单同样走请求头（见 agentwire.HeaderAgentCaps 的说明）。
+		req.Header.Set(agentwire.HeaderAgentCaps, agentCaps)
 		// 统计网卡集合的指纹（沿用登录状态头的模式）：集合变化说明累计计数器的
 		// 口径变了（WARP/多 WAN 切换、网卡热插拔），服务端据此重建流量基线，
 		// 防止切换瞬间的大跳变被记成真实流量。旧服务端会忽略这个头。

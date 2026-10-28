@@ -1392,6 +1392,27 @@ func (s *Store) SetAgentVersion(nodeID, ver string) {
 	s.RequestSave()
 }
 
+// SetNodeCaps 记录 Agent 自报的可选能力清单（请求头 X-Agent-Caps）。
+//
+// 与 SetAgentVersion 同样只在变化时落盘：能力在进程生命周期内不变，
+// 13 台节点 30 秒一报，每次都唤醒快照队列没有意义。
+// 空串表示"未上报"（旧 Agent），调用方不应写入空串 —— 那会把已知状态
+// 降级成未知；已知无能力用 agentwire.CapsNone（"none"）。
+func (s *Store) SetNodeCaps(nodeID, caps string) {
+	if caps == "" {
+		return
+	}
+	s.mu.Lock()
+	n, ok := s.nodes[nodeID]
+	if !ok || n.Caps == caps {
+		s.mu.Unlock()
+		return
+	}
+	n.Caps = caps
+	s.mu.Unlock()
+	s.RequestSave()
+}
+
 // SetNodeIP 记录最近一次通过鉴权上报的来源 IP。
 // 与 SetAgentVersion 同样只在变化时落盘：13 台节点 30 秒一报，
 // 每次保存都唤醒快照队列毫无意义，而 IP 变动本身极少。

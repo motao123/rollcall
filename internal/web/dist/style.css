@@ -745,6 +745,17 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   box-shadow: var(--shadow);
   margin-bottom: 12px;
 }
+/* 图表区的「缺什么、为什么缺」说明行。
+   刻意用中性文字色而不是警告色：缺温度传感器是机器的物理事实，不是故障。
+   只有当 Agent 报告"有传感器却没读数"时，文字本身会指出值得排查的方向。 */
+.chart-note {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-3);
+  padding: 0 2px 2px;
+  margin: -4px 0 12px;
+  cursor: help;
+}
 .chart-head {
   display: flex;
   align-items: center;

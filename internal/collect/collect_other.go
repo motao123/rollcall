@@ -19,6 +19,10 @@ type Collector struct {
 
 func New() *Collector { return &Collector{} }
 
+// DetectCaps 在非 Linux 平台没有可选采集能力（与 Supported() 一致：
+// 这里根本不采集真实指标，也就谈不上"支持温度"）。
+func DetectCaps() []string { return nil }
+
 // Supported 表示当前平台是否有真实采集实现。
 // Agent 在非 Linux 上据此拒绝上报全零指标，而不是把它们当成真实数据。
 func Supported() bool { return false }

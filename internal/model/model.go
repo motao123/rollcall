@@ -63,7 +63,15 @@ type Node struct {
 	LoginState  string `json:"loginState,omitempty"`
 	LoginAge    int64  `json:"loginAge,omitempty"`
 	LoginLastTS int64  `json:"loginLastTs,omitempty"`
-	Token       string `json:"-"` // 上报凭证，永不下发给前端
+	// Caps 是 Agent 自报的可选采集能力（请求头 X-Agent-Caps 写入，如 "temp"）。
+	// 三种状态必须可区分：
+	//   ""      —— 旧 Agent 没发这个头，能力未知
+	//   "none"  —— 新 Agent 已探测，确认本机没有任何可选能力
+	//   "temp"  —— 有温度传感器（可能是逗号分隔的多项）
+	// 没有这个字段时，面板看到"没有温度数据"无法判断是"机器没有传感器"
+	// 还是"Agent 读不到"，只能沉默 —— 而本机群 13 台恰好全都没有传感器。
+	Caps  string `json:"caps,omitempty"`
+	Token string `json:"-"` // 上报凭证，永不下发给前端
 }
 
 // MountInfo 是一个文件系统的用量快照。

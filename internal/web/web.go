@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/motao123/rollcall/internal/agentwire"
 	"github.com/motao123/rollcall/internal/alert"
 	"github.com/motao123/rollcall/internal/auth"
 	"github.com/motao123/rollcall/internal/backupjob"
@@ -783,6 +784,13 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	// 集合变化时重建流量基线并标记周期不完整，防止 WARP/多 WAN 切换的跳变被记成真实流量。
 	s.st.AddMetrics(node.ID, sanitizeHost(rep.Host), sanitizeMetrics(rep.Metrics),
 		sanitizetext.Text(strings.TrimSpace(r.Header.Get("X-NIC-Set")), 32))
+
+	// 可选采集能力（请求头，v1.40.0 起的 Agent 才发）。
+	// 缺席=未知（旧 Agent），none=已确认无能力 —— 面板据此区分
+	// "这台机器没有温度传感器"与"Agent 读不到温度"。
+	if caps, known := agentwire.ParseCaps(r.Header.Get(agentwire.HeaderAgentCaps)); known {
+		s.st.SetNodeCaps(node.ID, caps)
+	}
 
 	// 登录采集的可用性（请求头，旧 Agent 不发）。存下来是为了让面板能显示
 	// "最近写入 N 天前"，而不是让一个在这台机器上永远不触发的功能假装正常。

@@ -187,6 +187,23 @@ try {
     }
   }
 
+  /* ---------- 3b. 温度缺失必须说清原因（v1.40.0） ---------- */
+  // 本机群 13 台都没有 hwmon 传感器。改造前界面对"没有温度"完全沉默，
+  // 用户无法区分"机器没传感器 / Agent 读不到 / Agent 太旧"。
+  const tempNote = await sess.eval(`JSON.stringify((()=>{
+    const notes = Array.from(document.querySelectorAll('.chart-note')).map(n => n.textContent.trim());
+    const temp = notes.find(t => t.indexOf('温度') === 0) || '';
+    // 节点详情里若真画出了温度曲线，本条不适用
+    const hasTempCard = Array.from(document.querySelectorAll('.chart-title')).some(t => /温度/.test(t.textContent));
+    return { hasTempCard, note: temp, notes: notes.length };
+  })())`);
+  if (!tempNote.hasTempCard) {
+    await sess.ok('温度缺失有明确说明', !!tempNote.note, tempNote.note || '未找到说明文字');
+    // Agent 全部升级到 v1.40.0+ 之后，能力应为已知（不再出现"未上报"）
+    await sess.ok('Agent 已上报采集能力', !!tempNote.note && tempNote.note.indexOf('未上报') < 0,
+      tempNote.note);
+  }
+
   /* ---------- 4. 公开页（无需登录） ---------- */
   await sess.goto('/status', 2000);
   await sess.waitStableView({ selector: '.ep-progress, main' });

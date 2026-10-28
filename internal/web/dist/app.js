@@ -1596,6 +1596,21 @@ async function viewNodeDetail(id) {
     });
   }
   const hasTemp = !!(tempVals && tempVals.filter((v) => v > 0).length >= 2);
+  // 温度缺失时必须说清是哪种缺失。三种情况在界面上原本都是"什么都没有"：
+  //   caps 含 temp  → 有传感器，但这段区间没有读数（采集或权限问题，值得排查）
+  //   caps = none   → 已确认本机没有 hwmon 传感器（属于正常，不必管）
+  //   caps 为空     → 旧 Agent 没上报能力，无法判断（升级即可获得结论）
+  // 产品口径是"只陈述事实、不做判定"，所以这里只描述状态。
+  const caps = (n && n.caps) || '';
+  const capsKnown = caps !== '';
+  const hasTempCap = capsKnown && caps.split(',').indexOf('temp') >= 0;
+  const tempNote = !hasTemp
+    ? (hasTempCap
+      ? '温度：Agent 报告本机有 hwmon 传感器，但该区间内没有读数（检查传感器是否可读）'
+      : capsKnown
+        ? '温度：本机没有可读的 hwmon 传感器（大多数 VPS 如此，属正常）'
+        : '温度：Agent 未上报采集能力（v1.40.0 起支持），暂无法区分「无传感器」与「读取失败」')
+    : '';
   const lastTemp = hasTemp ? tempVals[tempVals.length - 1] : 0;
 
   // 磁盘 I/O 速率与网络同理，但聚合桶只落了网络增量、没有磁盘 I/O 增量，
@@ -1713,7 +1728,7 @@ async function viewNodeDetail(id) {
             <span class="chart-val mono" style="color:${lastTemp > 85 ? 'var(--crit)' : 'var(--fg)'}">${lastTemp.toFixed(1)}℃</span></div>
           ${areaChart(tempVals, 'var(--warn)', { times, label: '温度', fmt: (v) => v.toFixed(0) + '℃' })}
           ${winStat(tempVals, (v) => v.toFixed(1) + '℃')}
-        </div>` : ''}
+        </div>` : (tempNote ? `<div class="chart-note" title="能力由 Agent 上报（X-Agent-Caps 请求头），服务端不做推断">${esc(tempNote)}</div>` : '')}
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">网络吞吐速率</span>
             <span class="chart-val" style="font-size:13px">${hasData ? `<span class="mono">↓${bytes(last.netRx)} ↑${bytes(last.netTx)}</span> <span style="color:var(--fg-3);font-weight:400;letter-spacing:0">累计</span>` : '—'}</span></div>

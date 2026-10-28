@@ -429,6 +429,35 @@ func readTempC() float64 {
 	return readTempCFrom("/sys/class/hwmon")
 }
 
+// DetectCaps 探测本机支持的可选采集能力（启动时调用一次）。
+//
+// 只回答"机器是否具备采集条件"，不回答"这次采集是否成功"——
+// 两者混在一起，面板就无法区分"没有传感器"与"传感器读不到"。
+//
+// 温度用"是否存在 temp*_input 文件"判断，而不是"这次读数是否 >0"：
+// 虚拟机的传感器可能偶发返回恒 0（readTempCFrom 会把它当无效值丢弃），
+// 但文件存在说明这台机器是有传感器的，不该被报成"无传感器"。
+func DetectCaps() []string {
+	if hasHwmonTempIn("/sys/class/hwmon") {
+		return []string{"temp"}
+	}
+	return nil
+}
+
+// hasHwmonTempIn 报告指定 hwmon 目录下是否存在任何温度输入文件。
+func hasHwmonTempIn(hwmonDir string) bool {
+	entries, err := os.ReadDir(hwmonDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if inputs, _ := filepath.Glob(hwmonDir + "/" + e.Name() + "/temp*_input"); len(inputs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // readTempCFrom 是 readTempC 的可测形态：从指定目录读 hwmon。
 //
 // 只认 >0 的读数：部分虚拟化环境会暴露恒为 0 的传感器文件，

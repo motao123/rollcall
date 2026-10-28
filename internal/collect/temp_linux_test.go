@@ -83,3 +83,45 @@ func TestReadTempCFrom(t *testing.T) {
 		t.Fatalf("负读数不应成为最高温，实际 %.1f", got)
 	}
 }
+
+// TestHasHwmonTempIn 覆盖能力探测：有 temp*_input 即认为本机具备温度采集条件。
+//
+// 判据刻意不用"这次读数是否 >0"：虚拟化环境里的传感器可能恒返回 0
+// （readTempCFrom 会把它当无效值丢弃），但文件存在说明机器确实有传感器，
+// 不该被上报成"没有传感器"——那会让面板给出错误结论。
+func TestHasHwmonTempIn(t *testing.T) {
+	// 有传感器（读数恒 0 也算有）
+	withSensor := mkFakeHwmon(t, map[string]int64{
+		"hwmon0/temp1_input": 0,
+	})
+	if !hasHwmonTempIn(withSensor) {
+		t.Error("存在 temp*_input 时应判定为有传感器")
+	}
+	// 只有风扇/电压等非温度输入
+	other := mkFakeHwmon(t, map[string]int64{
+		"hwmon0/fan1_input": 1200,
+		"hwmon0/in0_input":  3300,
+	})
+	if hasHwmonTempIn(other) {
+		t.Error("没有 temp*_input 时不应判定为有传感器")
+	}
+	// 空目录与不存在的目录
+	if hasHwmonTempIn(t.TempDir()) {
+		t.Error("空目录不应判定为有传感器")
+	}
+	if hasHwmonTempIn(filepath.Join(t.TempDir(), "nope")) {
+		t.Error("不存在的目录不应判定为有传感器")
+	}
+}
+
+// TestDetectCapsShape 只校验返回值的形态：真实机器上有无传感器取决于硬件，
+// 断言具体内容会让测试在开发机（通常有传感器）与 VPS（通常没有）上结果不同。
+func TestDetectCapsShape(t *testing.T) {
+	caps := DetectCaps()
+	if len(caps) > 1 {
+		t.Fatalf("当前只定义了一种可选能力，实际返回 %v", caps)
+	}
+	if len(caps) == 1 && caps[0] != "temp" {
+		t.Fatalf("未知能力项: %v", caps)
+	}
+}
