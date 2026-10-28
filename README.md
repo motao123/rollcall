@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.38.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.39.0**（`./rollcall-server -version` 可查）。
 
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
@@ -1571,7 +1571,56 @@ certificate_days_remaining,uptime_percent_24h}`
 
 ---
 
-## 十二、开发与验证工具
+## 十二、HTTP API（v1 分页约定）
+
+历史类数据（告警历史 / 通知投递队列 / 管理审计）会持续增长，`/api/v1/` 下的接口
+提供**服务端分页 + 统一响应信封**，供脚本与第三方集成使用。
+
+**统一信封**
+
+```json
+{
+  "items": [],
+  "total": 137,
+  "limit": 20,
+  "offset": 0,
+  "hasMore": true
+}
+```
+
+- `total` 是**筛选后的匹配总数**，不是当前页条数——前端据此算总页数；
+- `hasMore` 等价于 `offset + len(items) < total`，客户端可只依赖它做「下一页」；
+- `limit` 默认 20、上限 200；超过上限按上限截断而**不报错**（分页接口的职责是限制单次响应体积）；
+- `offset` < 0 归零；越界返回空 `items`，但 `total` 不变（前端据此把页码夹回最后一页）。
+
+| 端点 | 说明 | 主要参数 |
+|---|---|---|
+| `GET /api/v1/alerts` | 告警历史（附 `active` / `silences` / `notify` / `now`） | `limit` `offset` `state=all\|active\|resolved` `q` |
+| `GET /api/v1/admin/notify/jobs` | 通知投递队列（附 `stats`） | `limit` `offset` `status=pending\|sent\|failed\|suppressed` |
+| `GET /api/v1/admin/audit` | 管理审计日志（附 `stats`） | `limit` `offset` `range=24h\|7d\|30d\|90d` `since` `until` `actor` `action` `q` |
+
+鉴权与同名老端点一致：`/api/v1/alerts` 接受只读会话或令牌，
+另两个需要管理会话或 `X-Admin-Token`。
+
+**为什么保留老端点**：`/api/alerts`、`/api/admin/notify/jobs`、`/api/admin/audit`
+的响应形状（`items` / `entries` / `jobs` / `stats`）已被旧版前端与外部脚本依赖，
+改形状属于破坏性变更。老端点的语义是"取最近 N 条"，没有 `offset` 概念；
+新端点才提供分页。两者数据源与排序完全一致。
+
+**为什么需要分页**（真实盲区，不是洁癖）：
+
+- 告警历史在内存保留 500 条（`store.AlertRetainMax`），老接口只给最近 200 条 → **300 条不可达**；
+- 通知队列上限 2000 条（`store.MaxNotifyJobs`），配置页固定取 100 条 → **1900 条不可达**；
+- 排障时"上周那条告警到底发出去了吗"过去只能去翻 `journalctl`，现在可直接翻页。
+
+**排序稳定性**：告警按"追加顺序逆序"（创建时间新→旧）；投递队列按
+"状态优先级 → 创建时间倒序 → ID 倒序"。末位用 ID 兜底是为了同一秒内的多条记录也有
+确定顺序——否则相邻页会重复或遗漏，这是分页接口最典型的缺陷（`TestV1AlertsSortStable` 锁住它）。
+
+**检索在后端做**：`q` 在分页之前过滤，`total` 反映全量命中数。若先取一页再在客户端过滤，
+用户会看到"只有几十条历史"的错觉——这正是改造前的实际表现。
+
+## 十三、开发与验证工具
 
 `tools/` 是可复跑的验证工具（入库、零依赖、只读公开接口；凭据走环境变量）。
 
@@ -1587,7 +1636,36 @@ certificate_days_remaining,uptime_percent_24h}`
 
 当前基线（2026-10-27）：对比度 26/26 达标、安全头 12/12 通过、UI 不变量 11/11 通过。
 
-## 十三、实际部署验证
+## 十四、实际部署验证
+
+### v1.39.0（2026-10-28，历史类列表服务端分页 + API v1 统一信封）
+
+**问题（真实盲区）**：告警历史在内存保留 500 条、老接口只给最近 200；通知队列上限
+2000 条、配置页只取 100。更早的记录在界面上完全不可达；而页面上的"总数"显示的是
+**已取回条数**（200 / 100），用户会误判历史规模。
+
+**后端**
+
+- `Store.AlertsPage(AlertPageQuery)`：offset 分页 + 状态筛选 + 检索，**筛选发生在分页之前**
+- `Store.NotifyJobsPage(NotifyJobPageQuery)`：offset 分页 + 状态筛选
+- 抽出 `snapshotNotifyJobsLocked`，让 `NotifyJobs` 与分页版共用同一套排序（否则两处排序键不一致会导致翻页错位）
+- 新增 `/api/v1/{alerts,admin/notify/jobs,admin/audit}`：统一信封
+  `{items,total,limit,offset,hasMore}`，默认 20 / 上限 200
+- `AlertRetainMax`(500)、`AuditQueryMaxLimit`(200) 由散落字面量提为常量
+- 老端点一字未改；`TestLegacyEndpointsUnchanged` 锁住其响应形状（缺字段即失败）
+
+**前端**
+
+- 告警页改服务端分页：检索词交给服务端，KPI 与区段标题显示**真实总数**（"可翻页至最早记录"）
+- 设置页与告警页新增「全部投递记录」：分页 + 按状态筛选的弹窗，队列 2000 条可达
+
+**测试**
+
+- `internal/web/apiv1_test.go` 7 例：信封、翻页、越界、末页 hasMore、排序稳定性、
+  状态/检索筛选、未鉴权 401、老接口兼容
+- `tools/ui-check.mjs` 新增 6 条断言（页面总数、单页 ≤10、入口存在、信封字段完整、
+  limit 约束、hasMore 与 total 一致）
+- 按项目惯例做了**有效性验证**：把 `hasMore` 改成恒 false → 断言失败，恢复后通过
 
 ### v1.38.0（2026-10-27，部署矩阵补齐 + 发版清单固化）
 

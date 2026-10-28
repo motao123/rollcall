@@ -340,6 +340,11 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/services", authReadonly, http.HandlerFunc(s.handleServices)},
 		{"/api/services/compare", authReadonly, rejectNonGET(s.handleServiceCompare)},
 		{"/api/alerts", authReadonly, http.HandlerFunc(s.handleAlerts)},
+		// v1 分页接口：老路由原样保留（"取最近 N 条"，兼容旧前端与外部脚本），
+		// v1 提供 offset 分页 + 统一信封。两者数据源与排序一致。
+		{"/api/v1/alerts", authReadonly, http.HandlerFunc(s.handleV1Alerts)},
+		{"/api/v1/admin/audit", authAdmin, http.HandlerFunc(s.handleV1Audit)},
+		{"/api/v1/admin/notify/jobs", authAdmin, http.HandlerFunc(s.handleV1NotifyJobs)},
 		{"/api/rules", authReadonly, http.HandlerFunc(s.handleRules)},
 		{"/api/assets", authReadonly, http.HandlerFunc(s.handleAssets)},
 		{"/api/renewals", authReadonly, http.HandlerFunc(s.handleRenewals)},

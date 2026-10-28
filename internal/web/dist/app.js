@@ -2066,17 +2066,28 @@ function openServiceDialog(svc, nodes, after) {
 
 async function viewAlerts() {
   const canManage = state.authenticated;
+  // 告警历史改为服务端分页（/api/v1/alerts）：存储保留 500 条，而老接口
+  // /api/alerts 只给最近 200 条，更早的记录在界面上完全不可达。
+  // 检索词一并交给服务端，这样 total 与翻页在"全量"上计算，
+  // 而不是"先取 200 条再在本地筛"——后者会让用户以为只有几十条历史。
+  const pageSize = 10;
+  const wantPage = Math.max(1, state.alertPage || 1);
+  const qs = new URLSearchParams({
+    limit: String(pageSize),
+    offset: String((wantPage - 1) * pageSize),
+  });
+  if (state.search) qs.set('q', state.search);
   const [d, rules, meta, nodes] = await Promise.all([
-    api('/api/alerts'),
+    api('/api/v1/alerts?' + qs.toString()),
     api('/api/rules').catch(() => []),
     adminApi('/api/admin/rule-meta').catch(() => ({ metrics: [], severities: [], durations: [] })),
     canManage ? adminApi('/api/admin/nodes').catch(() => []) : Promise.resolve([]),
   ]);
   const items = d.items || [];
+  const totalRecords = d.total || 0;
   setAlertBadge(d.active || 0);
   const rulesAll = rules || [];
   const filteredRules = rulesAll.filter((r) => matchesSearch([r.name, r.metric, r.severity, ...(r.groups || [])]));
-  const filteredItems = items.filter((a) => matchesSearch([a.ruleName, a.nodeName, a.message, a.severity]));
 
   const metricMap = {};
   (meta.metrics || []).forEach((m) => { metricMap[m.value] = m; });
@@ -2090,17 +2101,24 @@ async function viewAlerts() {
   const silLabel = (s) => `至 ${clock(s.until)}${s.reason ? ' · ' + s.reason : ''}`;
 
   // 告警记录是卡片列表而不是表格，通用表格分页覆盖不到，单独分页。
-  const alertPageSize = 10;
-  const alertPages = Math.max(1, Math.ceil(filteredItems.length / alertPageSize));
-  const alertPage = Math.max(1, Math.min(alertPages, state.alertPage || 1));
+  // 分页由服务端完成：本页 items 就是这一页的 10 条，不再本地切片。
+  const alertPageSize = pageSize;
+  const alertPages = Math.max(1, Math.ceil(totalRecords / alertPageSize));
+  const alertPage = Math.max(1, Math.min(alertPages, wantPage));
   state.alertPage = alertPage;
-  const pageItems = filteredItems.slice((alertPage - 1) * alertPageSize, alertPage * alertPageSize);
+  // 页码越界（例如检索词变化后总量变少）时回到最后一页重新取，
+  // 否则用户会停在一个空页上，误以为记录被删了。
+  if (alertPage !== wantPage) {
+    state.alertPage = alertPage;
+    return viewAlerts();
+  }
+  const pageItems = items;
 
   $('#view').innerHTML = `
     <div class="kpis" style="margin-bottom:20px">
       ${kpi('活跃告警', d.active, '', d.active ? '需要处理' : '全部恢复')}
       ${kpi('启用规则', (rules || []).filter((r) => r.enabled).length, '', `共 ${(rules || []).length} 条`)}
-      ${kpi('历史记录', items.length, '', '最近 200 条')}
+      ${kpi('历史记录', totalRecords, '', '可翻页至最早记录')}
       ${kpi('待投递通知', nq.pending || 0, '条', `失败 ${nq.failed || 0} · 静默拦截 ${nq.suppressed || 0}`)}
     </div>
 
@@ -2140,7 +2158,7 @@ async function viewAlerts() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">告警记录</h2>
-        ${sectionActions(`${filteredItems.length}/${items.length} 条 · 最近 200 条`)}
+        ${sectionActions(`${state.search ? `检索命中 ${totalRecords} 条` : `共 ${totalRecords} 条`}`)}
       </div>
       <div class="panel">
         ${pageItems.map((a) => {
@@ -2160,10 +2178,10 @@ async function viewAlerts() {
               <div class="alert-time">${clock(a.startedAt)} 开始${a.resolvedAt ? ` · ${clock(a.resolvedAt)} 恢复` : ''}</div>
             </div>
           </div>`;
-        }).join('') || `<div class="empty">${items.length ? '没有匹配的告警记录' : '暂无告警记录'}</div>`}
+        }).join('') || `<div class="empty">${state.search ? '没有匹配的告警记录' : '暂无告警记录'}</div>`}
         ${alertPages > 1 ? `<div class="table-pager" style="padding:0 14px 14px">
           <button class="btn tiny" data-alert-page="-1" ${alertPage <= 1 ? 'disabled' : ''}>上一页</button>
-          <span class="pager-info">第 <b class="mono">${alertPage}</b> / ${alertPages} 页 · 共 ${filteredItems.length} 条</span>
+          <span class="pager-info">第 <b class="mono">${alertPage}</b> / ${alertPages} 页 · 共 ${totalRecords} 条</span>
           <button class="btn tiny" data-alert-page="1" ${alertPage >= alertPages ? 'disabled' : ''}>下一页</button>
         </div>` : ''}
       </div>
@@ -2179,6 +2197,7 @@ async function viewAlerts() {
         <span class="section-meta">队列：待投递 ${nq.pending || 0} · 已送达 ${nq.sent || 0} · 失败 ${nq.failed || 0} · 重试 ${nq.retries || 0}</span>
         <span class="section-meta">${nq.lastSuccess ? '最近成功 ' + clock(nq.lastSuccess) : '尚无成功记录'}</span>
         ${canManage ? `<div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn tiny" id="notifyJobsAllBtn" title="分页查看全部投递记录（队列最多保留 2000 条）">全部投递记录</button>
           <button class="btn tiny" id="globalSilenceBtn">${globalSil ? '调整全局静默' : '全局静默'}</button>
           ${globalSil ? '<button class="btn tiny danger" id="globalUnsilenceBtn">取消静默</button>' : ''}
         </div>` : ''}
@@ -2234,6 +2253,8 @@ async function viewAlerts() {
     };
   }
 
+  const notifyJobsBtn = $('#notifyJobsAllBtn');
+  if (notifyJobsBtn) notifyJobsBtn.onclick = () => openNotifyJobsDialog();
   const globalSilenceBtn = $('#globalSilenceBtn');
   if (globalSilenceBtn) {
     globalSilenceBtn.onclick = () => {
@@ -3835,7 +3856,7 @@ async function viewSettings() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">通知队列</h2>
-        <span class="section-meta">待投递 ${qStats.pending || 0} · 失败 ${qStats.failed || 0} · 已送达 ${qStats.sent || 0} · 重试 ${qStats.retries || 0} · 拒收 ${qStats.rejected || 0}</span>
+        ${sectionActions(`待投递 ${qStats.pending || 0} · 失败 ${qStats.failed || 0} · 已送达 ${qStats.sent || 0} · 重试 ${qStats.retries || 0} · 拒收 ${qStats.rejected || 0}`, '<button class="btn sm" id="qJobsAllBtn">全部记录</button>')}
       </div>
       <div class="table-wrap"><table class="queue-table" data-page-size="10">
         <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num" title="已投递尝试次数">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
@@ -3854,7 +3875,8 @@ async function viewSettings() {
         }).join('') || `<tr><td colspan="7"><div class="empty">队列为空</div></td></tr>`}</tbody>
       </table></div>
       <p class="field-hint" style="margin:8px 0 0">
-        失败或被静默拦截的任务可在修复通道后手动重试，重试会重置尝试次数；此处仅显示最近 100 条，累计值见 /metrics。
+        失败或被静默拦截的任务可在修复通道后手动重试，重试会重置尝试次数；此处仅显示最近 100 条，
+        更早的记录用「全部记录」分页查看，累计计数见 /metrics。
       </p>
     </section>
 
@@ -4316,6 +4338,8 @@ async function viewSettings() {
     } catch (err) { toast('应用失败：' + err.message, 'err'); }
   };
 
+  const qJobsAllBtn = $('#qJobsAllBtn');
+  if (qJobsAllBtn) qJobsAllBtn.onclick = () => openNotifyJobsDialog();
   $$('[data-retry-job]').forEach((b) => {
     b.onclick = async () => {
       b.disabled = true;
@@ -4916,6 +4940,106 @@ systemctl enable --now rollcall-agent`;
  * 标题、公告、字段可见性、区块开关、维护窗口、人工事件。
  * 维护窗口同时作用于告警引擎 —— 窗口内的节点不再产生新告警。
  */
+
+// openNotifyJobsDialog 浏览完整通知投递记录（服务端分页）。
+//
+// 为什么需要它：设置页「通知队列」固定取最近 100 条
+// （/api/admin/notify/jobs → Store.NotifyJobs(100)），而队列上限是
+// MaxNotifyJobs=2000 条——更早的已送达记录在界面上完全不可达，
+// 排障时（"上周那条告警到底发出去没有"）无从查起。
+// 这里走 /api/v1/admin/notify/jobs 按页取，并支持按状态筛选。
+//
+// 为什么用弹窗而不是把设置页的表格改成服务端分页：设置页一次要拉十几个
+// 接口，为翻一页而重渲染整页代价过大；弹窗可以只重取队列这一块。
+function openNotifyJobsDialog() {
+  const pageSize = 10;
+  // 与设置页 qBadge 保持一致的文案与配色；两处若不一致，同一状态在
+  // 两个界面会显示成不同颜色的标签。
+  const badge = {
+    pending: ['warn', '待投递'], failed: ['crit', '失败'],
+    suppressed: ['mute', '已拦截'], sent: ['ok', '已送达'],
+  };
+  let page = 1;
+  let status = '';
+
+  const dlg = openDialog('通知投递记录', `
+    <p class="modal-sub">队列最多保留 2000 条；设置页只显示最近 100 条，这里可翻完全部并按状态筛选。</p>
+    <div class="field">
+      <span class="field-label">投递状态</span>
+      <select id="qJobStatus">
+        <option value="">全部</option>
+        <option value="pending">待投递</option>
+        <option value="failed">失败</option>
+        <option value="suppressed">已拦截</option>
+        <option value="sent">已送达</option>
+      </select>
+    </div>
+    <div id="qJobBox"><div class="empty">加载中…</div></div>
+    <div class="form-actions"><button class="btn" type="button" data-close>关闭</button></div>
+  `);
+  const box = dlg.querySelector('#qJobBox');
+  const sel = dlg.querySelector('#qJobStatus');
+
+  const rowHTML = (j) => {
+    const [cls, label] = badge[j.status] || ['mute', j.status];
+    const canRetry = j.status === 'failed' || j.status === 'suppressed';
+    return `<tr>
+      <td><span class="badge ${cls}">${label}</span></td>
+      <td class="strong" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.title)}">${esc(j.title)}</td>
+      <td style="font-size:11.5px">${esc(j.ruleName || j.ruleId || '—')}<div class="field-hint">${esc(j.nodeName || j.nodeId || '—')}${j.resolved ? ' · 恢复通知' : ''}</div></td>
+      <td class="num mono">${j.attempts || 0}</td>
+      <td class="mono" style="font-size:11.5px">${clock(j.createdAt)}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.lastError || '')}">${esc(j.lastError || '—')}</td>
+      <td class="num">${canRetry ? `<button class="btn tiny" data-qjob-retry="${esc(j.id)}">重试</button>` : '<span class="state-text">—</span>'}</td>
+    </tr>`;
+  };
+
+  const render = async () => {
+    let d;
+    try {
+      const qs = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) });
+      if (status) qs.set('status', status);
+      d = await adminApi('/api/v1/admin/notify/jobs?' + qs.toString());
+    } catch (e) {
+      box.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+      return;
+    }
+    const jobs = d.items || [];
+    const total = d.total || 0;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    // 换筛选条件后总量可能变小：页码越界时夹回末页重取，避免停在空页。
+    if (page > pages) { page = pages; return render(); }
+    box.innerHTML = `
+      <div class="table-wrap"><table class="queue-table">
+        <thead><tr><th>状态</th><th>通知</th><th>规则 / 节点</th><th class="num" title="已投递尝试次数">尝试</th><th>创建时间</th><th>最近错误</th><th class="num">操作</th></tr></thead>
+        <tbody>${jobs.map(rowHTML).join('') || `<tr><td colspan="7"><div class="empty">该状态下没有记录</div></td></tr>`}</tbody>
+      </table></div>
+      <div class="table-pager" style="padding:10px 0 0">
+        <button class="btn tiny" data-qp="-1" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+        <span class="pager-info">第 <b class="mono">${page}</b> / ${pages} 页 · 共 ${total} 条</span>
+        <button class="btn tiny" data-qp="1" ${page >= pages ? 'disabled' : ''}>下一页</button>
+      </div>`;
+    box.querySelectorAll('[data-qp]').forEach((b) => {
+      b.onclick = () => { page = Math.max(1, page + Number(b.dataset.qp)); render(); };
+    });
+    box.querySelectorAll('[data-qjob-retry]').forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await adminApi('/api/admin/notify/jobs/' + encodeURIComponent(b.dataset.qjobRetry) + '/retry', { method: 'POST' });
+          toast('已重新入队');
+          render();
+        } catch (e) {
+          toast('重试失败：' + e.message, 'err');
+          b.disabled = false;
+        }
+      };
+    });
+  };
+
+  sel.onchange = () => { status = sel.value; page = 1; render(); };
+  render();
+}
 
 // openDialog 统一的模态框脚手架。
 // 返回 { close, querySelector }：close 关闭并解绑，

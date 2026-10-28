@@ -24,6 +24,11 @@ const (
 	auditDetailMaxLen = 200
 )
 
+// AuditQueryMaxLimit 是单次审计查询的条数硬上限（QueryAudit 内部会按它截断）。
+// 对外暴露是给 web 层的分页接口复用：若那边用更大的上限，存储层仍会静默截断，
+// 响应里报告的 limit 就会与实际返回条数不一致。
+const AuditQueryMaxLimit = auditQueryMax
+
 // AuditQuery 是审计日志的查询条件。时间范围按 Unix 秒闭区间。
 type AuditQuery struct {
 	Limit  int

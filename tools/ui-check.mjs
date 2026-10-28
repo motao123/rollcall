@@ -59,6 +59,35 @@ try {
     colBtn ? `文案=${colBtn.text} title=${colBtn.title}` : '未找到按钮');
   await sess.ok('按钮带用途提示', !!colBtn && !!colBtn.title, colBtn ? colBtn.title : '');
 
+  /* ---------- 2b. 告警历史：服务端分页（v1.39.0） ---------- */
+  // 这一组断言锁住"历史记录可翻到最早"这件事：
+  // 老实现只取最近 200 条再本地分页，存储里的 500 条有 300 条不可达。
+  // 页面数必须以服务端 total 计算，而不是当前页条数。
+  await sess.goto('/#/alerts', 6000);
+  const alertsPage = await sess.eval(`JSON.stringify((()=>{
+    const meta = Array.from(document.querySelectorAll('.section-actions .section-meta'))
+      .map(m => m.textContent.trim());
+    const kpis = Array.from(document.querySelectorAll('.kpi')).map(k => k.textContent.trim().replace(/\\s+/g,' '));
+    return { meta, kpis, items: document.querySelectorAll('.alert-item').length,
+             hasAllJobsBtn: !!document.querySelector('#notifyJobsAllBtn') };
+  })())`);
+  const totalText = (alertsPage.meta.find((m) => /共 \d+ 条|检索命中 \d+ 条/.test(m)) || '');
+  const totalNum = Number((totalText.match(/(\d+) 条/) || [])[1] || 0);
+  await sess.ok('告警页显示服务端总数', totalNum > 0, totalText || '未找到总数文案');
+  await sess.ok('单页不超过 10 条', alertsPage.items <= 10, `本页 ${alertsPage.items} 条（总数 ${totalNum}）`);
+  await sess.ok('存在「全部投递记录」入口', alertsPage.hasAllJobsBtn, '');
+
+  // 接口层：v1 信封必须完整（前端与外部脚本都依赖这五个字段）
+  const env = await sess.eval(`fetch('/api/v1/alerts?limit=5',{headers:{'X-Requested-With':'XMLHttpRequest'}})
+    .then(r=>r.json()).then(d=>JSON.stringify({
+      has: ['items','total','limit','offset','hasMore'].filter(k => !(k in d)),
+      total: d.total, len: (d.items||[]).length, limit: d.limit, hasMore: d.hasMore }))`);
+  await sess.ok('v1 分页信封字段完整', env.has.length === 0, env.has.length ? `缺 ${env.has.join(',')}` : `total=${env.total} limit=${env.limit}`);
+  await sess.ok('v1 单页受 limit 约束', env.len <= env.limit,
+    `返回 ${env.len} 条 / limit ${env.limit}`);
+  await sess.ok('v1 hasMore 与 total 一致', env.hasMore === (env.limit < env.total),
+    `hasMore=${env.hasMore} limit=${env.limit} total=${env.total}`);
+
   /* ---------- 3. 节点详情：系统信息可见性 ---------- */
   let target = nodeID;
   if (!target) {

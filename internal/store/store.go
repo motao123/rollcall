@@ -1762,6 +1762,13 @@ func (s *Store) Rule(id string) (*model.AlertRule, bool) {
 	return &cp, true
 }
 
+// AlertRetainMax 是内存与快照中保留的告警历史条数上限。
+//
+// 淘汰策略见 addAlertLocked：先保留全部未恢复告警，再用最近的已恢复记录补满。
+// 之所以显式命名：分页接口的 total 上限、以及"最近 200 条"这类前端文案
+// 都依赖这个数值，散落的字面量 500 容易在改动后不一致。
+const AlertRetainMax = 500
+
 func (s *Store) Alerts(limit int) []*model.Alert {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1774,6 +1781,85 @@ func (s *Store) Alerts(limit int) []*model.Alert {
 		}
 	}
 	return out
+}
+
+// AlertPageQuery 是告警历史的服务端分页与筛选参数。
+type AlertPageQuery struct {
+	Limit  int
+	Offset int
+	// State 取值：""/"all" 全部、"active" 仅在持续、"resolved" 已恢复。
+	State string
+	// Search 对规则名/节点名/服务名/正文/级别做不区分大小写的子串匹配。
+	Search string
+}
+
+// AlertsPage 返回一页告警历史与匹配总数。
+//
+// 与 Alerts(limit) 的分工：那条路径只能"取最近 N 条"，更早的记录永远拿不到
+// （存储保留 alertRetainMax 条，只给最近 200 → 其余对用户不可见）。
+// 这里补 offset 与筛选，供分页接口使用。
+//
+// 排序与 Alerts 保持一致：按追加顺序逆序（即创建时间新→旧）。同一秒内的多条
+// 告警依赖这个稳定顺序翻页，否则不同页之间可能出现重复或遗漏。
+func (s *Store) AlertsPage(q AlertPageQuery) ([]*model.Alert, int) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	state := strings.ToLower(strings.TrimSpace(q.State))
+	search := strings.ToLower(strings.TrimSpace(q.Search))
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// 先收集下标的逆序，再切片：不复制被筛掉的告警（最多 500 条，代价可控）。
+	idx := make([]int, 0, len(s.alerts))
+	for i := len(s.alerts) - 1; i >= 0; i-- {
+		a := s.alerts[i]
+		switch state {
+		case "active":
+			if a.ResolvedAt != 0 {
+				continue
+			}
+		case "resolved":
+			if a.ResolvedAt == 0 {
+				continue
+			}
+		}
+		if search != "" && !alertMatches(a, search) {
+			continue
+		}
+		idx = append(idx, i)
+	}
+	total := len(idx)
+	if offset >= total {
+		return []*model.Alert{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	out := make([]*model.Alert, 0, end-offset)
+	for _, i := range idx[offset:end] {
+		cp := *s.alerts[i]
+		out = append(out, &cp)
+	}
+	return out, total
+}
+
+// alertMatches 判断告警是否命中检索词（调用方已把检索词转小写）。
+// 字段集合与前端 matchesSearch 保持一致，避免同一关键词在前后端命中不同结果。
+func alertMatches(a *model.Alert, lowerQuery string) bool {
+	for _, f := range [...]string{a.RuleName, a.NodeName, a.ServiceName, a.Message, a.Severity} {
+		if f != "" && strings.Contains(strings.ToLower(f), lowerQuery) {
+			return true
+		}
+	}
+	return false
 }
 
 // ActiveAlerts 返回所有未恢复告警的副本（用于引擎重启后恢复告警状态）。
@@ -1879,10 +1965,10 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 		}
 	}
 	s.alerts = append(s.alerts, a)
-	if len(s.alerts) > 500 {
+	if len(s.alerts) > AlertRetainMax {
 		// 只淘汰已恢复的旧记录：未恢复告警必须保留，
 		// 否则会把仍在进行的告警从历史里抹掉。
-		kept := make([]*model.Alert, 0, 500)
+		kept := make([]*model.Alert, 0, AlertRetainMax)
 		unresolved := make([]*model.Alert, 0, len(s.alerts))
 		for _, ex := range s.alerts {
 			if ex.ResolvedAt == 0 {
@@ -1890,7 +1976,7 @@ func (s *Store) OpenAlert(a *model.Alert) (created, ok bool) {
 			}
 		}
 		kept = append(kept, unresolved...)
-		for i := len(s.alerts) - 1; i >= 0 && len(kept) < 500; i-- {
+		for i := len(s.alerts) - 1; i >= 0 && len(kept) < AlertRetainMax; i-- {
 			if s.alerts[i].ResolvedAt != 0 {
 				kept = append(kept, s.alerts[i])
 			}
@@ -2357,6 +2443,18 @@ var (
 func (s *Store) NotifyJobs(limit int) []*model.NotifyJob {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	out := s.snapshotNotifyJobsLocked()
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// snapshotNotifyJobsLocked 返回按投递优先级排好的任务副本。
+// 排序键：状态优先级（待投递在前）→ 创建时间倒序 → ID 倒序。
+// 末位用 ID 兜底是为了同一秒内创建的多条任务有确定顺序，
+// 否则分页时相邻页可能重复或遗漏。调用方必须持有读锁。
+func (s *Store) snapshotNotifyJobsLocked() []*model.NotifyJob {
 	out := make([]*model.NotifyJob, 0, len(s.notifyJobs))
 	for _, j := range s.notifyJobs {
 		cp := *j
@@ -2372,10 +2470,55 @@ func (s *Store) NotifyJobs(limit int) []*model.NotifyJob {
 		}
 		return out[i].ID > out[k].ID
 	})
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
 	return out
+}
+
+// NotifyJobPageQuery 是通知队列的服务端分页与筛选参数。
+type NotifyJobPageQuery struct {
+	Limit  int
+	Offset int
+	// Status 为空表示全部，否则按投递状态精确匹配（pending/sent/failed/suppressed）。
+	Status string
+}
+
+// NotifyJobsPage 返回一页投递任务与匹配总数。
+//
+// 与 NotifyJobs(limit) 的分工：后者只能"取优先级最高的前 N 条"
+// （配置页固定取 100），而队列上限是 MaxNotifyJobs=2000，
+// 更早的已送达记录在界面上完全不可达。分页接口解决这一盲区。
+func (s *Store) NotifyJobsPage(q NotifyJobPageQuery) ([]*model.NotifyJob, int) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	status := strings.TrimSpace(q.Status)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	all := s.snapshotNotifyJobsLocked()
+	filtered := all
+	if status != "" {
+		filtered = make([]*model.NotifyJob, 0, len(all))
+		for _, j := range all {
+			if j.Status == status {
+				filtered = append(filtered, j)
+			}
+		}
+	}
+	total := len(filtered)
+	if offset >= total {
+		return []*model.NotifyJob{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return filtered[offset:end], total
 }
 
 func notifyStatusRank(status string) int {

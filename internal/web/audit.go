@@ -23,6 +23,25 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	aq := auditQueryFromRequest(r, limit, offset)
+	entries, total := s.st.QueryAudit(aq)
+	if entries == nil {
+		entries = []model.AuditEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+		"stats":   s.st.AuditStats(),
+	})
+}
+
+// auditQueryFromRequest 解析审计查询条件（时间范围、主体、动作、检索词）。
+// limit/offset 由调用方传入：老路由沿用查询串里的原值，v1 分页接口
+// 使用 pageParams 的夹取结果，两者的默认值与上限可以不同。
+func auditQueryFromRequest(r *http.Request, limit, offset int) store.AuditQuery {
+	q := r.URL.Query()
 	aq := store.AuditQuery{
 		Limit:  limit,
 		Offset: offset,
@@ -47,17 +66,7 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	if v, err := strconv.ParseInt(q.Get("until"), 10, 64); err == nil && v > 0 {
 		aq.Until = v
 	}
-	entries, total := s.st.QueryAudit(aq)
-	if entries == nil {
-		entries = []model.AuditEntry{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"entries": entries,
-		"total":   total,
-		"limit":   limit,
-		"offset":  offset,
-		"stats":   s.st.AuditStats(),
-	})
+	return aq
 }
 
 // auditActor 从请求中解析审计主体。按鉴权优先级判断，
