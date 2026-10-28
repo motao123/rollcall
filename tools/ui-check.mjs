@@ -216,6 +216,40 @@ try {
   await sess.ok('公开页已渲染', pub.mounted, `进度条 ${pub.bars} 个`);
   await sess.ok('公开页无横向溢出', pub.docW <= pub.vw + 2, `docW=${pub.docW} vw=${pub.vw}`);
 
+  /* ---------- 5. /monitor 控制台式视图（v1.41.0） ---------- */
+  // 直接针对 v1.41.1 修过的缺陷：详情页曾被自动刷新反复重建，
+  // 三个 mountDetailCharts 抢 detailToken，最后一个落在已脱离 DOM 的容器上，
+  // 表现是"切区间后停在骨架屏"。这里断言切区间后仍有曲线、且没有骨架残留。
+  await sess.goto('/monitor', 2500);
+  await sess.waitStableView({ selector: '.card' });
+  const mon = await sess.eval(`JSON.stringify((()=>{
+    const cards = document.querySelectorAll('.card').length;
+    const skel = document.querySelectorAll('.skel').length;
+    return { cards, skel, hasFilters: !!document.querySelector('.filters') };
+  })())`);
+  await sess.ok('/monitor 渲染节点卡片', mon.cards > 0 && mon.skel === 0,
+    `卡片 ${mon.cards} 张，骨架 ${mon.skel} 个`);
+  await sess.ok('/monitor 有筛选条', mon.hasFilters);
+
+  // 进详情（列表视图点第一行更稳，卡片也可）
+  await sess.eval(`document.querySelector('.card').click()`);
+  await sess.waitStableView({ selector: '.chart-wrap svg', timeoutMs: 20000 });
+  const d1 = await sess.eval(`JSON.stringify({svg: document.querySelectorAll('.chart-wrap svg').length,
+    info: document.querySelectorAll('.info-cell').length, hash: location.hash})`);
+  await sess.ok('/monitor 详情页画出历史曲线', d1.svg > 0, `${d1.svg} 张图 · 信息格 ${d1.info}`);
+
+  // 切到 7 天：曲线必须还在（这是缺陷复现点）
+  await sess.eval(`(()=>{const b=document.querySelector('[data-range="7d"]'); if(b) b.click();})()`);
+  await sess.waitStableView({ selector: '.chart-wrap svg', timeoutMs: 20000 });
+  await new Promise((r) => setTimeout(r, 2500));
+  const d2 = await sess.eval(`JSON.stringify({svg: document.querySelectorAll('.chart-wrap svg').length,
+    skel: document.querySelectorAll('.skel').length,
+    on: (document.querySelector('.range-tabs button[aria-pressed="true"]')||{}).textContent,
+    meta: (document.getElementById('rangeMeta')||{}).textContent})`);
+  await sess.ok('/monitor 切区间后曲线仍在', d2.svg > 0 && d2.skel === 0,
+    `${d2.svg} 张图 · 骨架 ${d2.skel} · ${d2.on} · ${String(d2.meta || '').trim()}`);
+
+  await sess.goto('/', 2000);
   await sess.shot('ui-check-final');
 } finally {
   await sess.close();

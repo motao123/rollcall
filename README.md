@@ -1666,7 +1666,7 @@ certificate_days_remaining,uptime_percent_24h}`
 凭据约定：`RCP_PASSWORD` 环境变量，或 `.auth/password`（该目录已 gitignore）。
 `tools/` 与 `scripts/` 的区别：前者入库、可给 CI 与开源用户复跑；后者是个人的运维临时脚本（含真实主机与凭据，不入库）。
 
-当前基线（2026-10-28）：对比度 fail=0、安全头 12/12、UI 不变量 24/24、健康巡检 10/10。
+当前基线（2026-10-28）：对比度 fail=0、安全头 12/12、UI 不变量 28/28、健康巡检 10/10。
 巡检工具的分工：`health-check` 看「数据是否在动」，`audit-headers` 看「配置还对不对」，
 `ui-check` 看「界面关键不变量」——三者互补，任一为红都说明生产有问题。
 
