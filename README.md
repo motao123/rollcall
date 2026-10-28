@@ -1628,7 +1628,7 @@ certificate_days_remaining,uptime_percent_24h}`
 |---|---|---|
 | `tools/check-contrast.mjs` | **WCAG 2.1 对比度自检**：解析 `style.css` 的深浅两套变量，正文/语义色 ≥4.5（AA 硬闸），辅助文字与强调色 ≥3（提示）。已挂 CI | `node tools/check-contrast.mjs` |
 | `tools/audit-headers.mjs` | **线上安全头与 TLS 回归**：CSP 脚本白名单、HSTS 时长、nosniff、点击劫持防护、明文跳转、证书剩余天数与链可信度 | `node tools/audit-headers.mjs [url]` |
-| `tools/ui-session.mjs` | **管理面板校验会话**：cookie 持久化到 `.auth/cookies.json`（登录一次复用），失败自动截图，统一 `goto/eval/shot/ok` 封装 | 作为库使用：`openSession()` / `withSession()` |
+| `tools/ui-session.mjs` | **管理面板校验会话**：cookie 持久化到 `.auth/cookies.json`（登录一次复用），失败自动截图，统一 `goto/eval/shot/ok` 封装；`waitStableView({selector})` 等页面稳定（SSE 会触发整页重渲染，固定 sleep 会撞上中间态造成假失败） | 作为库使用：`openSession()` / `withSession()` |
 | `tools/ui-check.mjs` | **UI 关键不变量**：分页器生效、可见行 ≤10、「自定义列」按钮、详情页系统信息是否**真的可见**、公开页渲染与无横向溢出 | `RCP_PASSWORD=... node tools/ui-check.mjs` |
 
 凭据约定：`RCP_PASSWORD` 环境变量，或 `.auth/password`（该目录已 gitignore）。

@@ -142,6 +142,41 @@ export async function openSession(opts = {}) {
       await sleep(waitMs);
     },
 
+    /**
+     * 等到页面稳定：`#view` 已挂载、可选的选择器已出现，且连续两次采样的
+     * DOM 规模一致。
+     *
+     * 为什么需要：面板走 SSE，机群状态变化会触发整页重渲染。固定 sleep 之后
+     * 断言，可能正好落在「旧 DOM 已拆、新 DOM 未挂」的中间态 —— 表现为
+     * 「按钮/分页器找不到」这类假失败（实测同一版本连跑两次，一次 19/19、
+     * 一次 4 条失败，失败项还每次都不同）。
+     *
+     * 为什么还要 selector：详情页会先挂骨架再异步填数据，只看"DOM 规模稳定"
+     * 会在骨架阶段就判稳定。传一个"数据出现后才有的选择器"（如 `.info-row`）
+     * 才能真正确认渲染完成。
+     *
+     * 判据 = (选择器命中或未传) && 两次采样规模相同。
+     */
+    async waitStableView({ selector = '', timeoutMs = 20000, quietMs = 400 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      let prev = null;
+      while (Date.now() < deadline) {
+        const sig = await sess.eval(`JSON.stringify({
+          ready: (document.querySelector('#view')?.children.length || 0) > 0 &&
+                 ${selector ? `!!document.querySelector(${JSON.stringify(selector)})` : 'true'},
+          shape: (document.querySelector('#view')?.children.length || 0) * 10000 +
+                 document.querySelectorAll('*').length
+        })`).catch(() => null);
+        if (sig && sig.ready && prev === sig.shape) {
+          await sleep(quietMs);
+          return true;
+        }
+        prev = sig ? sig.shape : null;
+        await sleep(150);
+      }
+      return false;
+    },
+
     /** 截图；name 用于文件名，失败断言也复用它 */
     async shot(name, clip) {
       const params = { format: 'png' };

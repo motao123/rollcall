@@ -19,7 +19,8 @@ const sess = await openSession({ base, admin: true });
 
 try {
   /* ---------- 1. 全部节点：分页 ---------- */
-  await sess.goto('#/nodes', 6000);
+  await sess.goto('#/nodes', 2000);
+  await sess.waitStableView({ selector: '#view .col-picker-btn' });
   const nodesPage = await sess.eval(`JSON.stringify((()=>{
     const pager = document.querySelector('.pager-info');
     // ★ 分页靠 display:none 隐藏行，DOM 里仍是全量——必须数「可见行」，
@@ -63,7 +64,8 @@ try {
   // 这一组断言锁住"历史记录可翻到最早"这件事：
   // 老实现只取最近 200 条再本地分页，存储里的 500 条有 300 条不可达。
   // 页面数必须以服务端 total 计算，而不是当前页条数。
-  await sess.goto('/#/alerts', 6000);
+  await sess.goto('/#/alerts', 2000);
+  await sess.waitStableView({ selector: '#notifyJobsAllBtn' });
   const alertsPage = await sess.eval(`JSON.stringify((()=>{
     const meta = Array.from(document.querySelectorAll('.section-actions .section-meta'))
       .map(m => m.textContent.trim());
@@ -96,7 +98,8 @@ try {
     );
   }
   if (target) {
-    await sess.goto('#/nodes/' + target, 8000);
+    await sess.goto('#/nodes/' + target, 2000);
+    await sess.waitStableView({ selector: '.info-row' });
     const detail = await sess.eval(`JSON.stringify((()=>{
       const rows = Array.from(document.querySelectorAll('.info-row'));
       const vals = rows.slice(0, 12).map(r=>{
@@ -121,7 +124,8 @@ try {
   }
 
   /* ---------- 4. 公开页（无需登录） ---------- */
-  await sess.goto('/status', 8000);
+  await sess.goto('/status', 2000);
+  await sess.waitStableView({ selector: '.ep-progress, main' });
   const pub = await sess.eval(`JSON.stringify((()=>{
     return { mounted: !!document.querySelector('.ep-progress, .status-ring, .uptime-bar, main'),
              docW: document.documentElement.scrollWidth, vw: innerWidth,
