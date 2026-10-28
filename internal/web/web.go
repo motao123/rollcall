@@ -296,6 +296,11 @@ func (s *Server) routes(static http.Handler) []route {
 		// 升级脚本以它决定是否回滚。
 		{"/readyz", authPublic, http.HandlerFunc(s.handleReadyz)},
 		{"/status", authPublic, s.publicGate(http.HandlerFunc(s.handleStatusPage))},
+		// 监控面板：卡片/环形/列表三视图 + 内页详情。
+		// 与公开页同门槛（数据也来自同一个 /api/status），公开页关闭时一并 404。
+		{"/monitor", authPublic, s.publicGate(http.HandlerFunc(s.handleMonitorPage))},
+		{"/monitor.css", authPublic, s.publicGate(static)},
+		{"/monitor.js", authPublic, s.publicGate(static)},
 		// 公开页的全部静态资源都必须显式登记：启用 -auth 时 "/" 受保护，
 		// 少登记一个就会让页面卡在骨架屏或裸样式。
 		{"/status.js", authPublic, s.publicGate(static)},
