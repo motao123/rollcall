@@ -90,6 +90,34 @@ try {
   await sess.ok('v1 hasMore 与 total 一致', env.hasMore === (env.limit < env.total),
     `hasMore=${env.hasMore} limit=${env.limit} total=${env.total}`);
 
+  /* ---------- 2b. 检索必须重置分页（v1.39.3） ---------- */
+  // 曾经的缺陷：在告警页翻到第 3 页再检索，结果集变短后会被"夹到最后一页"，
+  // 看到的是最旧的那几条匹配 —— 用户会以为检索结果排序错了。
+  const pageBefore = await sess.eval(`(()=>{
+    const b = document.querySelector('[data-alert-page="1"]');
+    if (!b || b.disabled) return JSON.stringify({ skip: true });
+    b.click();
+    return JSON.stringify({ skip: false });
+  })()`);
+  if (pageBefore && !pageBefore.skip) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const onPage2 = await sess.eval(`(()=>{const p=document.querySelector('.table-pager .pager-info'); return p ? p.textContent.replace(/\\s+/g,' ').trim() : '';})()`);
+    // 输入一个只可能命中少量记录的检索词
+    await sess.eval(`(()=>{const i=document.querySelector('#searchInput'); i.value='内存'; i.dispatchEvent(new Event('input',{bubbles:true})); return 'typed';})()`);
+    await new Promise((r) => setTimeout(r, 3000));
+    const afterSearch = await sess.eval(`(()=>{
+      const p = document.querySelector('.table-pager .pager-info');
+      const txt = p ? p.textContent.replace(/\\s+/g,' ').trim() : '';
+      const m = txt.match(/第\\s*(\\d+)\\s*\\//);
+      return JSON.stringify({ info: txt, page: m ? Number(m[1]) : 0 });
+    })()`);
+    await sess.ok('检索后回到第 1 页', afterSearch.page === 1,
+      `翻页后=${onPage2} → 检索后=${afterSearch.info}`);
+    // 还原检索框，避免影响后续断言
+    await sess.eval(`(()=>{const i=document.querySelector('#searchInput'); i.value=''; i.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
   /* ---------- 3. 节点详情：系统信息可见性 ---------- */
   let target = nodeID;
   if (!target) {

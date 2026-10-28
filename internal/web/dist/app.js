@@ -15,11 +15,14 @@ const state = {
   ovRange: '24h',
   ovTopMetric: 'cpu',
   search: '',
+  // 概览「正在告警」节点分页。历史上与告警记录列表共用同一个计数器，
+  // 导致在一处翻页会影响另一处（进告警页时莫名从第 3 页开始）。
   alertPage: 1,
+  // 告警记录（历史）分页：服务端分页，与上面的节点分页完全独立。
+  alertRecPage: 1,
   auditPage: 1,
   auditFilters: { range: '7d', action: '', q: '' },
   nodeFilter: { provider: '', group: '', state: '' },
-  alertPage: 1,
   data: {},
   panelLink: '',
   timezone: '',
@@ -2136,7 +2139,7 @@ async function viewAlerts() {
   // 检索词一并交给服务端，这样 total 与翻页在"全量"上计算，
   // 而不是"先取 200 条再在本地筛"——后者会让用户以为只有几十条历史。
   const pageSize = 10;
-  const wantPage = Math.max(1, state.alertPage || 1);
+  const wantPage = Math.max(1, state.alertRecPage || 1);
   const qs = new URLSearchParams({
     limit: String(pageSize),
     offset: String((wantPage - 1) * pageSize),
@@ -2170,11 +2173,12 @@ async function viewAlerts() {
   const alertPageSize = pageSize;
   const alertPages = Math.max(1, Math.ceil(totalRecords / alertPageSize));
   const alertPage = Math.max(1, Math.min(alertPages, wantPage));
-  state.alertPage = alertPage;
-  // 页码越界（例如检索词变化后总量变少）时回到最后一页重新取，
+  state.alertRecPage = alertPage;
+  // 页码越界（例如记录过期后总量变少）时夹回最后一页重新取，
   // 否则用户会停在一个空页上，误以为记录被删了。
+  // 检索词变化不走这条路径 —— 那种情况应该回到第 1 页（见搜索框处理）。
   if (alertPage !== wantPage) {
-    state.alertPage = alertPage;
+    state.alertRecPage = alertPage;
     return viewAlerts();
   }
   const pageItems = items;
@@ -2347,7 +2351,7 @@ async function viewAlerts() {
   });
   $$('[data-alert-page]').forEach((b) => {
     b.onclick = () => {
-      state.alertPage = alertPage + Number(b.dataset.alertPage);
+      state.alertRecPage = alertPage + Number(b.dataset.alertPage);
       viewAlerts();
     };
   });
@@ -6396,7 +6400,16 @@ async function boot() {
 
   let st;
   $('#searchInput').addEventListener('input', (e) => {
-    state.search = e.target.value.trim().toLowerCase();
+    const next = e.target.value.trim().toLowerCase();
+    // 检索条件变了，分页必须回到第 1 页。否则用户会停在旧页码上，
+    // 而新结果集更短时会被"夹到最后一页"——看到的是最旧的那几条匹配，
+    // 看起来像检索结果排序错了。
+    if (next !== state.search) {
+      state.search = next;
+      state.alertPage = 1;
+      state.alertRecPage = 1;
+      state.auditPage = 1;
+    }
     clearTimeout(st);
     st = setTimeout(render, 180);
   });
