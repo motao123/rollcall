@@ -123,6 +123,42 @@ try {
     await sess.ok('取到节点 ID', false, '节点列表为空');
   }
 
+  /* ---------- 2c. CPU 分位带与分位数恒等式（v1.39.1/v1.39.2） ---------- */
+  // 数据层不变量：p50 ≤ p95 ≤ max。v1.39.0 曾在生产报出 p95 > max，
+  // 那是任何人都能一眼判断为错的值，必须长期守住。
+  const bandRes = await sess.eval(`(async()=>{
+    const m = (location.hash.match(/#\\/nodes\\/([^?/]+)/) || [])[1];
+    const nid = m || (window.__lastNodeId || '');
+    if (!nid) return JSON.stringify({ skip: true });
+    const d = await fetch('/api/nodes/' + nid + '/series?range=30d').then(r=>r.json());
+    const pts = d.points || [];
+    const withP95 = pts.filter(p => p.cpuP95 > 0);
+    const bad = withP95.filter(p => !(p.cpuP50 <= p.cpuP95 + 1e-9 && p.cpuP95 <= p.cpuMax + 1e-9));
+    return JSON.stringify({ skip: false, n: pts.length, withP95: withP95.length, bad: bad.length,
+      sample: withP95.slice(0, 1).map(p => [p.cpuP50, p.cpuP95, p.cpuMax]) });
+  })()`, 20000);
+  if (bandRes && !bandRes.skip) {
+    await sess.ok('分位数恒等式 p50≤p95≤max', bandRes.bad === 0,
+      `${bandRes.withP95}/${bandRes.n} 个桶带分位，违规 ${bandRes.bad} 个`);
+    if (bandRes.withP95 > 0) {
+      // 有分位数据时，UI 必须把带画出来（否则用户只能看到统计行的数字）
+      await sess.eval(`(()=>{const b=document.querySelector('[data-range="30d"]'); if (b) b.click();})()`);
+      // 30 天要取 2000+ 点，再加一次渲染；固定 sleep 会误判成"带没画出来"。
+      // 等到图例出现（那是 band 渲染完成的唯一信号）再读结果。
+      await sess.waitStableView({ selector: '.chart-legend', timeoutMs: 15000 });
+      const band = await sess.eval(`JSON.stringify((()=>{
+        const vis = (el) => !!el && el.offsetParent !== null;
+        const cards = Array.from(document.querySelectorAll('.chart-card')).filter(c => (c.querySelector('.chart-title')||{}).textContent?.includes('CPU'));
+        const card = cards.find(vis) || cards[0];
+        const bands = card ? Array.from(card.querySelectorAll('svg path')).filter(p => p.getAttribute('fill-opacity') === '0.13') : [];
+        return { cards: cards.length, legend: card ? !!card.querySelector('.chart-legend') : false, bands: bands.length,
+                 on: (document.querySelector('.range-tabs button.on')||{}).textContent };
+      })())`);
+      await sess.ok('30 天区间出现 p50–p95 分位带', band.legend && band.bands > 0,
+        `图例=${band.legend} 带区段=${band.bands} 区间=${band.on}`);
+    }
+  }
+
   /* ---------- 4. 公开页（无需登录） ---------- */
   await sess.goto('/status', 2000);
   await sess.waitStableView({ selector: '.ep-progress, main' });
