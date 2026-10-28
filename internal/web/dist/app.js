@@ -1868,8 +1868,11 @@ async function viewNodeDetail(id) {
       state.range = b.dataset.range;
       state.detailCache = null;
       // replaceState 不触发 hashchange，手动重渲染，避免整页闪回概览。
+      // 走 render() 而不是直接 viewNodeDetail()：render 会按 URL 重新解析
+      // 路由与区间参数，与「刷新页面 / 分享链接」走同一条路径，
+      // 不会出现"地址栏是 30d、界面是 1h"这种两套状态并存的情况。
       history.replaceState(null, '', '#/nodes/' + encodeURIComponent(id) + '?range=' + state.range);
-      viewNodeDetail(id);
+      render();
     };
   });
 }
@@ -6480,6 +6483,11 @@ async function boot() {
       markSynced();
       const sig = JSON.stringify(pair);
       if (sig === state.detailSig) return;
+      // 这轮请求发出后用户可能已切换区间（点击「30 天」时很常见）：
+      // 结果属于旧区间，一旦交给 render 就会把新区间刚画好的图表盖回去，
+      // 表现为「点了 30 天没反应，但地址栏已经变成 ?range=30d」。
+      // 直接丢弃，下一轮 tick 会按新区间重新取数。
+      if (range !== state.range) return;
       // 交给 viewNodeDetail 复用，避免重绘时再请求一次。
       state.detailCache = { key: id + '|' + range, detail: pair[0], series: pair[1], at: Date.now() };
       render();
