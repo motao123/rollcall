@@ -1628,13 +1628,16 @@ certificate_days_remaining,uptime_percent_24h}`
 |---|---|---|
 | `tools/check-contrast.mjs` | **WCAG 2.1 对比度自检**：解析 `style.css` 的深浅两套变量，正文/语义色 ≥4.5（AA 硬闸），辅助文字与强调色 ≥3（提示）。已挂 CI | `node tools/check-contrast.mjs` |
 | `tools/audit-headers.mjs` | **线上安全头与 TLS 回归**：CSP 脚本白名单、HSTS 时长、nosniff、点击劫持防护、明文跳转、证书剩余天数与链可信度 | `node tools/audit-headers.mjs [url]` |
+| `tools/health-check.mjs` | **运行状态巡检**：端点可达性、**服务端时钟偏差**（>120s 会让上报签名整批被拒）、节点在线构成、**上报新鲜度**（单台超时=节点问题，全台超时=服务端停摆）、24h 可用率、活跃告警、历史层天数。不需要凭据 | `node tools/health-check.mjs [url] [--json]` |
 | `tools/ui-session.mjs` | **管理面板校验会话**：cookie 持久化到 `.auth/cookies.json`（登录一次复用），失败自动截图，统一 `goto/eval/shot/ok` 封装；`waitStableView({selector})` 等页面稳定（SSE 会触发整页重渲染，固定 sleep 会撞上中间态造成假失败） | 作为库使用：`openSession()` / `withSession()` |
 | `tools/ui-check.mjs` | **UI 关键不变量**：分页器生效、可见行 ≤10、「自定义列」按钮、详情页系统信息是否**真的可见**、公开页渲染与无横向溢出 | `RCP_PASSWORD=... node tools/ui-check.mjs` |
 
 凭据约定：`RCP_PASSWORD` 环境变量，或 `.auth/password`（该目录已 gitignore）。
 `tools/` 与 `scripts/` 的区别：前者入库、可给 CI 与开源用户复跑；后者是个人的运维临时脚本（含真实主机与凭据，不入库）。
 
-当前基线（2026-10-27）：对比度 26/26 达标、安全头 12/12 通过、UI 不变量 11/11 通过。
+当前基线（2026-10-28）：对比度 fail=0、安全头 12/12、UI 不变量 24/24、健康巡检 10/10。
+巡检工具的分工：`health-check` 看「数据是否在动」，`audit-headers` 看「配置还对不对」，
+`ui-check` 看「界面关键不变量」——三者互补，任一为红都说明生产有问题。
 
 ## 十四、实际部署验证
 
@@ -1816,7 +1819,7 @@ v1.37.3 只改了取值来源，仍不生效——根因更深：**`serverVersio
 标注成「控制端版本」）。
 
 > 另修一处写入事故：用 `python -` heredoc 写含中文的 JS 时出现 3 字节替换字符
-> （「控」→ `���`）。此后**含中文的改动一律走编辑工具**，python 只做纯 ASCII 结构改写；
+> （「控」变成 3 个 U+FFFD 替换字符）。此后**含中文的改动一律走编辑工具**，python 只做纯 ASCII 结构改写；
 > 并在提交前用 `U+FFFD` 计数做一次断言。
 
 ### v1.37.3（2026-10-27，升级弹窗显示目标版本）
