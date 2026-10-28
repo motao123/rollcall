@@ -756,6 +756,18 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   font-weight: 600;
   color: var(--fg-2);
 }
+/* 分位带图例：只在 CPU 图有 p50–p95 阴影时出现。
+   用 --fg-3 而不是更浅的色：它要能通过对比度自检（正文级 ≥3:1），
+   否则在小屏上等于看不见。 */
+.chart-legend {
+  font-size: 11px;
+  color: var(--fg-3);
+  border: 1px dashed var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  cursor: help;
+  white-space: nowrap;
+}
 .chart-val {
   margin-left: auto;
   font-size: 15px;

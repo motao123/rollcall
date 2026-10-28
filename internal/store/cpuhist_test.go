@@ -3,6 +3,9 @@ package store
 import (
 	"encoding/json"
 	"math"
+	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/motao123/rollcall/internal/model"
@@ -11,28 +14,91 @@ import (
 // TestCPUHistPercentileAccuracy 验证分位数估算的误差在档宽一半以内。
 func TestCPUHistPercentileAccuracy(t *testing.T) {
 	var h cpuHist
-	// 0..99 均匀分布（每档 10 个样本）
+	// 0..99 均匀分布
 	for i := 0; i < 100; i++ {
 		h.observe(float64(i))
 	}
 	if got := h.total(); got != 100 {
 		t.Fatalf("样本数 = %d，期望 100", got)
 	}
-	// 容许误差 = 档宽的一半：低端 10% 档 → ±5；高端 5% 档 → ±2.5。
+	// 容许误差按新档宽给：中段 20–40 最宽，低端 0–1/1–2 很窄。
+	const upperCap = 99.0
 	cases := []struct {
 		q    float64
 		want float64
 		tol  float64
 	}{
-		{0.50, 50, 6},
-		{0.90, 90, 3},
-		{0.95, 95, 3},
-		{0.99, 99, 3},
+		{0.50, 50, 11}, // 落在 40–60 档（宽 20）
+		{0.90, 89, 11}, // 落在 80–90 档
+		{0.95, 94, 4},  // 落在 90–95 档
+		{0.99, 99, 3},  // 落在 98–100 档
 	}
 	for _, c := range cases {
-		got := h.percentile(c.q)
+		got := h.percentile(c.q, upperCap)
 		if math.Abs(got-c.want) > c.tol {
 			t.Errorf("p%.0f = %.2f，期望 %.0f±%.0f", c.q*100, got, c.want, c.tol)
+		}
+	}
+}
+
+// TestCPUHistIdleMachineNotOverstated 是 v1.39.1 的生产缺陷回归。
+//
+// 一台 CPU 长期 0.2% 的空载机器，旧档位（首档 0–10）把所有样本都塞进首档，
+// 档内均匀插值给出 p50=5.0、p95=9.5 —— 而同一桶的精确峰值只有 0.7。
+// 「p95 大于峰值」是用户一眼就能判断为错误的结果，必须被这条用例挡住。
+func TestCPUHistIdleMachineNotOverstated(t *testing.T) {
+	var h cpuHist
+	for i := 0; i < 60; i++ {
+		h.observe(0.2)
+	}
+	const exactMax = 0.7 // 同桶精确峰值（由 CPUMax 记录，与直方图无关）
+
+	p50 := h.percentile(0.50, exactMax)
+	p95 := h.percentile(0.95, exactMax)
+
+	if p95 > exactMax+1e-9 {
+		t.Errorf("p95 = %.2f 超过同桶精确峰值 %.2f —— 这就是线上看到的错误数值", p95, exactMax)
+	}
+	if p50 > p95+1e-9 {
+		t.Errorf("p50 = %.2f 大于 p95 = %.2f，分位数必须单调", p50, p95)
+	}
+	// 新档位首档是 0–1，估算值不可能再跳到 9.5
+	if p95 > 1.0 {
+		t.Errorf("p95 = %.2f，空载机器的尾部不应超过 1%%（档位细分后）", p95)
+	}
+}
+
+// TestCPUHistPercentileBoundedAndMonotonic 属性测试：
+// 任意分布下都必须满足 0 ≤ p50 ≤ p90 ≤ p95 ≤ max。
+// 这是分位数唯一能让人「一眼验证」的恒等式，破坏它的产品没人敢用。
+func TestCPUHistPercentileBoundedAndMonotonic(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261028))
+	for round := 0; round < 200; round++ {
+		var h cpuHist
+		n := 1 + rng.Intn(200)
+		maxSeen := 0.0
+		// 随机偏斜分布：大部分样本挤在低区间，少数尖峰冲到 80% 以上
+		base := rng.Float64() * 20
+		spike := 80 + rng.Float64()*20
+		spikeEvery := 3 + rng.Intn(50)
+		for i := 0; i < n; i++ {
+			v := base + rng.Float64()*2
+			if i%spikeEvery == 0 {
+				v = spike
+			}
+			if v > maxSeen {
+				maxSeen = v
+			}
+			h.observe(v)
+		}
+		p50 := h.percentile(0.50, maxSeen)
+		p90 := h.percentile(0.90, maxSeen)
+		p95 := h.percentile(0.95, maxSeen)
+		if p50 < 0 || p50 > p90+1e-9 || p90 > p95+1e-9 {
+			t.Fatalf("第 %d 轮单调性被破坏: p50=%.2f p90=%.2f p95=%.2f", round, p50, p90, p95)
+		}
+		if p95 > maxSeen+1e-9 {
+			t.Fatalf("第 %d 轮 p95=%.2f 超过峰值 %.2f", round, p95, maxSeen)
 		}
 	}
 }
@@ -56,26 +122,26 @@ func TestCPUHistCatchesTailSpike(t *testing.T) {
 	if mean > 25 {
 		t.Fatalf("测试前提错误：均值 %.2f 应接近 24.2", mean)
 	}
-	if p95 := h.percentile(0.95); p95 < 85 {
+	if p95 := h.percentile(0.95, 90); p95 < 85 {
 		t.Errorf("p95 = %.1f，应落在 90 档（≥85），均值 %.1f 会掩盖它", p95, mean)
 	}
-	if p50 := h.percentile(0.50); math.Abs(p50-20) > 6 {
-		t.Errorf("p50 = %.1f，应接近 20", p50)
+	// 94 个样本落在 20–40 档，p50 应落在档内而不是溢出到 90
+	if p50 := h.percentile(0.50, 90); math.Abs(p50-30) > 11 {
+		t.Errorf("p50 = %.1f，应接近 20–40 档的中部", p50)
 	}
-	// p99 也应在高位（第 99 个样本是 90）
-	if p99 := h.percentile(0.99); p99 < 85 {
+	if p99 := h.percentile(0.99, 90); p99 < 85 {
 		t.Errorf("p99 = %.1f，应在 90 档", p99)
 	}
 }
 
-// TestCPUHistEmpty 空直方图必须返回 0（表示"无摘要"而不是"0% 使用"）。
+// TestCPUHistEmpty 空直方图必须返回 0（表示「无摘要」而不是「0% 使用」）。
 func TestCPUHistEmpty(t *testing.T) {
 	var h cpuHist
 	if !h.empty() {
 		t.Error("零值直方图应视为空")
 	}
 	for _, q := range []float64{0.5, 0.95, 0.99} {
-		if got := h.percentile(q); got != 0 {
+		if got := h.percentile(q, 50); got != 0 {
 			t.Errorf("空直方图 p%.0f = %v，期望 0", q*100, got)
 		}
 	}
@@ -104,13 +170,13 @@ func TestCPUHistMerge(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		b.observe(80)
 	}
-	want := a.percentile(0.95)
+	want := a.percentile(0.95, 30)
 	a.merge(&b)
 	if a.total() != 100 {
 		t.Fatalf("合并后样本数 = %d，期望 100", a.total())
 	}
 	// 合并后 p95 必须落在 80 档（60% 的样本在 80）
-	if got := a.percentile(0.95); got < 75 {
+	if got := a.percentile(0.95, 80); got < 75 {
 		t.Errorf("合并后 p95 = %.1f，期望 ≥75（原 a 的 p95 是 %.1f）", got, want)
 	}
 }
@@ -176,9 +242,16 @@ func TestHistorySeriesExposesPercentiles(t *testing.T) {
 	if pts[0].CPUP95 < 85 {
 		t.Errorf("5m 桶 p95 = %.1f，应暴露 95%% 的尖峰", pts[0].CPUP95)
 	}
-	// 4×20 + 1×95：p50 是第 2.5 个样本，落在 20 档（插值上限 30）
-	if pts[0].CPUP50 < 15 || pts[0].CPUP50 > 30 {
-		t.Errorf("5m 桶 p50 = %.1f，应落在 20–30 区间", pts[0].CPUP50)
+	// p95 被精确峰值封顶后不可能超过 CPUMax —— 这是 v1.39.1 修掉的缺陷
+	if pts[0].CPUP95 > pts[0].CPUMax+1e-9 {
+		t.Errorf("p95 = %.1f 超过峰值 %.1f", pts[0].CPUP95, pts[0].CPUMax)
+	}
+	if pts[0].CPUP50 > pts[0].CPUP95+1e-9 {
+		t.Errorf("p50 = %.1f 大于 p95 = %.1f", pts[0].CPUP50, pts[0].CPUP95)
+	}
+	// 17/19 个样本落在 20–40 档
+	if pts[0].CPUP50 < 20 || pts[0].CPUP50 > 40 {
+		t.Errorf("5m 桶 p50 = %.1f，应落在 20–40 区间", pts[0].CPUP50)
 	}
 	// 均值仍然骗人 —— 这正是要补分位数的原因
 	if pts[0].CPUPct > 40 {
@@ -194,5 +267,77 @@ func TestHistorySeriesExposesPercentiles(t *testing.T) {
 		if p.CPUP95 != 0 {
 			t.Errorf("1m 桶不应带 p95（实际 %.1f）—— 该层靠前端精确计算", p.CPUP95)
 		}
+	}
+}
+
+// writeHistorySnapshot 在临时目录写一份 history.json（未压缩，loadHistory 两种都接受）。
+func writeHistorySnapshot(t *testing.T, dir string, schema int) int64 {
+	t.Helper()
+	base := int64(1_700_000_000) / 300 * 300
+	var hist cpuHist
+	for i := 0; i < 10; i++ {
+		hist.observe(90)
+	}
+	snap := historySnapshot{
+		SchemaVersion: schema,
+		SavedAt:       base + 300,
+		Nodes: map[string]*historyBucketSnapshot{
+			"n1": {M5: []historyBucket{{
+				Index: base, Count: 10, CPUAvg: 90, CPUMax: 90, CPUHist: hist,
+				MemAvg: 40, DiskAvg: 30,
+			}}},
+		},
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "history.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
+
+// TestHistorySchema4DropsLegacyHistograms 是 schema 3 → 4 的迁移回归。
+//
+// 直方图的档位边界是存储语义的一部分：schema 3 的计数按旧边界统计
+// （首档 0–10），在新边界下读数会得到 p95 大于峰值这种不可能的值。
+// 因此加载旧文件时必须丢弃直方图，但 avg/max 与用量数据必须保留 ——
+// 否则一次升级就把 30 天历史抹掉，那是更严重的倒退。
+func TestHistorySchema4DropsLegacyHistograms(t *testing.T) {
+	oldDir := t.TempDir()
+	base := writeHistorySnapshot(t, oldDir, 3)
+	stOld := New(oldDir)
+	if err := stOld.LoadErr(); err != nil {
+		t.Fatalf("加载 schema 3 历史失败: %v", err)
+	}
+	pts := stOld.HistorySeries("n1", HistoryResolution5m, base)
+	if len(pts) != 1 {
+		t.Fatalf("schema 3 桶数 = %d，期望 1（桶本身必须保留）", len(pts))
+	}
+	if pts[0].CPUP95 != 0 || pts[0].CPUP50 != 0 {
+		t.Errorf("schema 3 的直方图应被丢弃（得到 p50=%.1f p95=%.1f）",
+			pts[0].CPUP50, pts[0].CPUP95)
+	}
+	if pts[0].CPUMax != 90 || pts[0].CPUPct != 90 {
+		t.Errorf("avg/max 必须保留，得到 avg=%.1f max=%.1f", pts[0].CPUPct, pts[0].CPUMax)
+	}
+	if pts[0].MemPct != 40 {
+		t.Errorf("内存均值必须保留，得到 %.1f", pts[0].MemPct)
+	}
+
+	// 同一份数据标成 schema 4 时，直方图必须被保留（否则分位数永远拿不到）
+	newDir := t.TempDir()
+	base4 := writeHistorySnapshot(t, newDir, 4)
+	stNew := New(newDir)
+	if err := stNew.LoadErr(); err != nil {
+		t.Fatalf("加载 schema 4 历史失败: %v", err)
+	}
+	pts4 := stNew.HistorySeries("n1", HistoryResolution5m, base4)
+	if len(pts4) != 1 {
+		t.Fatalf("schema 4 桶数 = %d，期望 1", len(pts4))
+	}
+	if pts4[0].CPUP95 == 0 {
+		t.Error("schema 4 的直方图应被保留，但 p95 为 0")
 	}
 }

@@ -16,13 +16,17 @@ import (
 //	（"这个桶里 CPU 是否接近饱和"）。直方图 24 字节/桶，可 O(档数) 求任意
 //	分位，且天然可合并（未来若改成层间 rollup 也不需要换算法）。
 //
-// 档位非均匀：60% 以下每档 10%（±5% 误差够用），60% 以上每档 5–10%
-// （±2.5~5%）。容量判断关心的是"p95 落在 80 还是 92"这种高端区分，
-// 低负载区间的精细度没有价值。
+// ★ 档位在 v1.39.1 重新设计过（档数不变，内存一分没多）：
+// 旧版首档是 0–10，对空载机器太宽 —— 一台 0.2% 的机器全部样本落在首档，
+// 档内均匀插值给出 p50=5.0、p95=9.5，而它真实峰值只有 0.7，
+// 于是出现「p95 大于峰值」这种用户一眼就能看出不可能的数值。
+// 新档位两端加密、中段放宽：0–1/1–2 区分空载、2–5/5–10 轻载、
+// 10–20/20–40/40–60 正常区间、60–80 接近容量、
+// 80–90/90–95/95–98/98–100 饱和区分（这才是本功能要回答的问题）。
 const cpuHistBuckets = 12
 
 // cpuHistUpper 是各档的上界（最后一档含 100）。必须严格递增。
-var cpuHistUpper = [cpuHistBuckets]float64{10, 20, 30, 40, 50, 60, 70, 80, 85, 90, 95, 100}
+var cpuHistUpper = [cpuHistBuckets]float64{1, 2, 5, 10, 20, 40, 60, 80, 90, 95, 98, 100}
 
 // cpuHist 是 CPU 使用率的分档计数（uint16：1 小时桶在 5 秒上报下 720 个样本也不会溢出）。
 type cpuHist [cpuHistBuckets]uint16
@@ -53,13 +57,20 @@ func (h *cpuHist) empty() bool { return h.total() == 0 }
 
 // percentile 用线性插值估算分位数（q ∈ (0,1]）。空直方图返回 0。
 //
-// 精度：档内假设均匀分布，误差上界为档宽的一半（低端 ≤5%、高端 ≤2.5%）。
-// 必须与 CPUMax（精确峰值）配合读：
+// upperCap 传该桶的**精确峰值**（CPUMax）：档内插值假设"档内均匀分布"，
+// 这个假设在样本高度集中时会把结果推到档的右边缘 —— 例如整桶样本都是 0.2%
+// 时，落在 0–1 档却仍可能插值出 0.9。若不加约束，就会出现 p95 大于峰值的
+// 数值（v1.39.0 在生产的真实表现是 p50=5.0、p95=9.5、max=0.7）。
+// 用精确峰值封顶后，p50 ≤ p95 ≤ max 这条用户一眼能验证的恒等式必然成立。
+// upperCap ≤ 0（无样本或全零）时不做封顶，直接返回估算值。
+//
+// 精度：误差上界为档宽的一半（空载段 ≤0.5、饱和段 ≤1~2.5、中段 ≤10）。
+// 必须与 CPUMax 配合读：
 //   - p50 看稳态水位、p95 看"较差的 5% 样本"、max 看最坏瞬时值。
 //   - 极端偏斜分布（例如 99 个 20% + 1 个 95%）下 p95 在数学上就等于 20
 //     （第 95 个样本本来就在 20 那一档），尖峰只能由 max 或 p99 体现 ——
 //     这是分位数的定义决定的，不是直方图的误差。
-func (h *cpuHist) percentile(q float64) float64 {
+func (h *cpuHist) percentile(q float64, upperCap float64) float64 {
 	n := h.total()
 	if n == 0 {
 		return 0
@@ -91,11 +102,25 @@ func (h *cpuHist) percentile(q float64) float64 {
 			if pos > 1 {
 				pos = 1
 			}
-			return lower + (upper-lower)*pos
+			return clampPercentile(lower+(upper-lower)*pos, upperCap)
 		}
 		cum = next
 	}
-	return 100
+	// 理论上不会走到这里（target ≤ n 且累计到最后一档必达），
+	// 兜底仍要封顶，避免出现 100 > max 的异常值。
+	return clampPercentile(100, upperCap)
+}
+
+// percentileClamped 是 percentile 的内层实现：先估算再按 upperCap 封顶。
+// 单独拆出来是为了让上面的循环保持「只有一个出口」的可读性。
+func clampPercentile(est, upperCap float64) float64 {
+	if upperCap > 0 && est > upperCap {
+		return upperCap
+	}
+	if est < 0 {
+		return 0
+	}
+	return est
 }
 
 // merge 把另一份直方图并入（合并同层相邻桶时使用；当前三层各自累加，

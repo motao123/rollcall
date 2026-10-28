@@ -23,10 +23,14 @@ const (
 
 	// schema 2 起聚合桶记录 memUsed/diskUsed 总和，不再用最新总量反推平均值。
 	// schema 3 起 5m/1h 桶带 CPU 直方图（cpuHist），用于长区间 p50/p95。
+	// schema 4 起直方图改用「两端加密」的档位边界（旧版首档 0–10 会让空载机器
+	// 算出 p95 大于峰值）。**档位边界是存储语义的一部分**：schema 3 的
+	// 分档计数在新边界下毫无意义，因此加载时直接丢弃这些直方图（保留 avg/max，
+	// 它们与档位无关），分位数在 30 天内自然重新积累。
 	// ★ 改存储格式必须同时升版本：降级回旧版时旧代码会忽略 ch 字段，
 	//   但反向（新代码读旧桶）会得到空直方图 —— 必须能区分「无摘要」与
 	//   「摘要为 0」，因此升级是语义要求而非形式要求。
-	historySchemaVersion = 3
+	historySchemaVersion = 4
 
 	// HistorySaveInterval 是历史快照的落盘间隔。
 	// 崩溃最多丢失该窗口的聚合点，原始 24h 会用于重启后回填。
@@ -442,9 +446,11 @@ func (s *Store) loadHistory() error {
 		}
 		h := newNodeHistory()
 		h.lastTS = nh.LastTS
-		s.loadBuckets(h.m1, nh.M1)
-		s.loadBuckets(h.m5, nh.M5)
-		s.loadBuckets(h.h1, nh.H1)
+		// 1m 层从来不挂直方图；5m/1h 只在 schema 4 起的文件里可信。
+		keepHist := snap.SchemaVersion >= 4
+		s.loadBuckets(h.m1, nh.M1, false)
+		s.loadBuckets(h.m5, nh.M5, keepHist)
+		s.loadBuckets(h.h1, nh.H1, keepHist)
 		s.history[id] = h
 	}
 	// 补齐上次落盘之后尚未聚合的原始点。
@@ -470,12 +476,17 @@ func (s *Store) loadHistory() error {
 	return nil
 }
 
-func (s *Store) loadBuckets(r *bucketRing, buckets []historyBucket) {
+func (s *Store) loadBuckets(r *bucketRing, buckets []historyBucket, keepHist bool) {
 	if len(buckets) == 0 {
 		return
 	}
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Index < buckets[j].Index })
 	for _, b := range buckets {
+		if !keepHist {
+			// 旧 schema 的直方图按旧档位边界统计，在新边界下读数会失真
+			// （真实表现是 p95 大于峰值）。只丢直方图，avg/max/用量全部保留。
+			b.CPUHist = cpuHist{}
+		}
 		r.appendLoaded(sanitizeBucket(b))
 	}
 }
@@ -643,11 +654,13 @@ func (s *Store) HistorySeries(nodeID, resolution string, since int64) []model.Hi
 	out := make([]model.HistoryPoint, 0, len(buckets))
 	for _, b := range buckets {
 		p := model.HistoryPoint{
-			TS:         b.Index,
-			CPUPct:     float64(b.CPUAvg),
-			CPUMax:     float64(b.CPUMax),
-			CPUP50:     b.CPUHist.percentile(0.50),
-			CPUP95:     b.CPUHist.percentile(0.95),
+			TS:     b.Index,
+			CPUPct: float64(b.CPUAvg),
+			CPUMax: float64(b.CPUMax),
+			// 传精确峰值作上界：档内插值可能超过真实峰值（见 percentile 注释），
+			// 封顶后 p50 ≤ p95 ≤ max 恒成立。
+			CPUP50:     b.CPUHist.percentile(0.50, float64(b.CPUMax)),
+			CPUP95:     b.CPUHist.percentile(0.95, float64(b.CPUMax)),
 			MemPct:     float64(b.MemAvg),
 			MemTotal:   b.MemTotal,
 			DiskPct:    float64(b.DiskAvg),

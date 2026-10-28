@@ -363,7 +363,16 @@ function bindChartHover() {
     if (tip) {
       const time = c.times ? chartTipTime(c.times[idx]) : '';
       const value = c.fmt(pt.v);
-      tip.innerHTML = `${time ? `<span class="tip-time">${esc(time)}</span>` : ''}<span class="tip-val mono">${esc(c.label ? c.label + ' ' : '')}${esc(value)}</span>`;
+      // 分位带存在时补一行 p50–p95：鼠标停在某个点上就能看到
+      // "这个时刻的桶里，尾部样本到了多少"，不用回头对照统计行。
+      let bandTxt = '';
+      if (c.band) {
+        const lo = c.band.lo[idx], hi = c.band.hi[idx];
+        if (typeof lo === 'number' && typeof hi === 'number' && hi > 0) {
+          bandTxt = `<span class="tip-val mono" style="color:var(--fg-2)">p50–p95 ${esc(c.fmt(lo))}–${esc(c.fmt(hi))}</span>`;
+        }
+      }
+      tip.innerHTML = `${time ? `<span class="tip-time">${esc(time)}</span>` : ''}<span class="tip-val mono">${esc(c.label ? c.label + ' ' : '')}${esc(value)}</span>${bandTxt}`;
       tip.hidden = false;
       const px = Math.max(70, Math.min(box.width - 70, e.clientX - box.left));
       tip.style.left = px + 'px';
@@ -379,7 +388,23 @@ function areaChart(values, color, opts = {}) {
     return `<div class="empty" style="padding:34px 0">暂无数据</div>`;
   }
   const iw = w - padL - padR, ih = h - padT - padB;
-  let min = Math.min(...values), max = Math.max(...values);
+  // 分位带（可选）：opts.band = { lo, hi }，与 values 等长的两个数组。
+  // 用途是把「均值」与「较差的 5% 样本」之间的分布形态画出来 ——
+  // 一条贴着平均值的线看不出容量风险，p95 与 mean 的间距才是风险本身。
+  // 缺值用 null 表示（老桶没有直方图），不能补 0，否则会画出一条从 0 起算的假阴影。
+  const rawLo = opts.band && Array.isArray(opts.band.lo) && opts.band.lo.length === values.length ? opts.band.lo : null;
+  const rawHi = opts.band && Array.isArray(opts.band.hi) && opts.band.hi.length === values.length ? opts.band.hi : null;
+  const bandVals = [];
+  if (rawLo && rawHi) {
+    for (let i = 0; i < values.length; i++) {
+      const lo = rawLo[i], hi = rawHi[i];
+      if (typeof lo === 'number' && typeof hi === 'number' && hi > 0 && lo >= 0) {
+        bandVals.push(lo, hi);
+      }
+    }
+  }
+  const scaleVals = bandVals.length ? values.concat(bandVals) : values;
+  let min = Math.min(...scaleVals), max = Math.max(...scaleVals);
   if (max - min < 0.001) { max = min + 1; }
   // 留 10% 顶部余量，纵轴取整
   const span = max - min;
@@ -391,6 +416,32 @@ function areaChart(values, color, opts = {}) {
   const line = 'M' + pts.join(' L');
   const area = `${line} L${(padL + iw).toFixed(1)},${padT + ih} L${padL},${padT + ih} Z`;
   const id = 'a' + Math.random().toString(36).slice(2, 8);
+
+  // 分位带路径：按「连续有效区段」分段绘制。中间缺一段（例如只有最近几天
+  // 才有直方图）时不能把两端连起来，否则会跨过整个空缺画出一条错误的斜带。
+  let bandPaths = [];
+  let edgePaths = [];
+  if (rawLo && rawHi) {
+    let run = [];
+    const flush = () => {
+      if (run.length >= 2) {
+        const top = run.map((p) => `${p.x.toFixed(1)},${p.hi.toFixed(1)}`).join(' L');
+        const bottom = run.slice().reverse().map((p) => `${p.x.toFixed(1)},${p.lo.toFixed(1)}`).join(' L');
+        bandPaths.push('M' + top + ' L' + bottom + ' Z');
+        edgePaths.push('M' + top);
+      }
+      run = [];
+    };
+    for (let i = 0; i < values.length; i++) {
+      const lo = rawLo[i], hi = rawHi[i];
+      if (typeof lo === 'number' && typeof hi === 'number' && hi > 0 && lo >= 0) {
+        run.push({ x: padL + i * step, lo: y(lo), hi: y(hi) });
+      } else {
+        flush();
+      }
+    }
+    flush();
+  }
 
   // 4 条横向网格
   const fmt = opts.fmt || ((v) => v.toFixed(0));
@@ -413,6 +464,8 @@ function areaChart(values, color, opts = {}) {
   chartRegistry.set(cid, {
     padL, iw, w, label: opts.label || '', fmt, times,
     pts: values.map((v, i) => ({ x: +(padL + i * step).toFixed(1), y: +y(v).toFixed(1), v })),
+    // 悬停读数要能显示 p50–p95，因此把原始值一并存起来（不用屏幕坐标）
+    band: rawLo && rawHi ? { lo: rawLo, hi: rawHi } : null,
   });
 
   return `<div class="chart-wrap" data-chart-id="${cid}">
@@ -422,6 +475,8 @@ function areaChart(values, color, opts = {}) {
         <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient></defs>
       ${grid}
+      ${bandPaths.map((d) => `<path d="${d}" fill="${color}" fill-opacity="0.13"/>`).join('')}
+      ${edgePaths.map((d) => `<path d="${d}" fill="none" stroke="${color}" stroke-width="1" stroke-opacity="0.5" stroke-dasharray="3 3"/>`).join('')}
       <path d="${area}" fill="url(#${id})"/>
       <path d="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
       <g class="chart-cross" opacity="0" pointer-events="none">
@@ -1506,6 +1561,12 @@ async function viewNodeDetail(id) {
   // 聚合区间返回桶内平均值与增量；原始区间仍是累计计数器。
   const bucketSec = { '1m': 60, '5m': 300, '1h': 3600 }[resolution] || 0;
   const cpuVals = pts.map((p) => p.cpuPct);
+  // CPU 分位带：只有 5m/1h 层的桶带直方图摘要（服务端 cpuP50/cpuP95），
+  // 原始与 1m 层没有 —— 那时 samples 少，图上直接看真实曲线即可。
+  // 缺值的点留 null，由 areaChart 按连续区段分段绘制，不补 0。
+  const cpuBandLo = pts.map((p) => (typeof p.cpuP50 === 'number' && p.cpuP50 > 0 ? p.cpuP50 : null));
+  const cpuBandHi = pts.map((p) => (typeof p.cpuP95 === 'number' && p.cpuP95 > 0 ? p.cpuP95 : null));
+  const cpuBand = cpuBandHi.some((v) => v !== null) ? { lo: cpuBandLo, hi: cpuBandHi } : null;
   const memVals = pts.map((p) => (typeof p.memPct === 'number' ? p.memPct : pct(p.memUsed, p.memTotal)));
   const diskVals = pts.map((p) => (typeof p.diskPct === 'number' ? p.diskPct : pct(p.diskUsed, p.diskTotal)));
   // 网络用「速率」而非累计值：累计曲线在长时间窗口里几乎是一条直线，看不出波动
@@ -1627,8 +1688,9 @@ async function viewNodeDetail(id) {
       <div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">CPU 使用率</span>
+            ${cpuBand ? '<span class="chart-legend" title="阴影区间是该时段每个桶内 p50–p95 的范围：线是均值，阴影上沿是较差的 5% 样本，两者间距就是被均值抹掉的容量风险">阴影 = 桶内 p50–p95</span>' : ''}
             <span class="chart-val mono" style="color:${hasData && (last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—'}</span></div>
-          ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%' })}
+          ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%', band: cpuBand })}
           ${winStat(cpuVals, (v) => v.toFixed(1) + '%', p95FromBuckets(pts) || p95Of(cpuVals))}
         </div>
         <div class="chart-card">
