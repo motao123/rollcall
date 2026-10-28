@@ -76,3 +76,8 @@ admin-user.json
 # tools/ 是本仓库的一部分（入库）：CI 与开源用户都要能复跑。
 # 与 /scripts/ 的区别：scripts/ 是个人运维临时脚本（含真实主机与凭据），
 # tools/ 只读公开接口、凭据一律走环境变量 / .auth/。
+
+# 本地验证残留：语法检查中间文件与截图不入库
+_c.js
+/_c.js
+.prod-monitor.png
