@@ -2442,10 +2442,9 @@ async function runRefresh(manual) {
     if (!state.snap) {
       // 首次就失败：给一个可操作的错误页，而不是空白
       document.getElementById('view').innerHTML = `<div class="empty" style="margin-top:18px">
-        <strong>取数失败</strong>
+        <strong>暂时无法获取数据</strong>
         ${esc(state.lastError)}<br><br>
-        实时接口需要与面板同源部署（浏览器 CORS 限制），或用 <code>?api=https://你的面板地址</code> 指定。
-        也可以把数据源切回「模拟」查看界面效果。
+        请稍后重试；若持续失败，请联系面板管理员检查服务状态。
       </div>`;
     }
     if (manual || state.failures === 1) {
