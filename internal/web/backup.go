@@ -55,7 +55,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRestore 导入加密配置备份。监控历史与告警记录不受影响。
+// handleRestore 导入加密配置备份。v3 起备份携带聚合监控历史：
+// 存在 HistoryGz 时历史随配置一起**整体替换**（原始 24h 环形不在备份内，
+// 恢复后随上报自愈）；v2 及更早的备份仍只覆盖配置。
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -94,8 +96,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// ★ 先校验备份里的通知配置，再落库。
 	// 反过来做（先导入、失败只回 warning）会把一份非法的 notify 配置
 	// 持久化下来：运行态仍是旧配置，重启时 notify.Parse 失败，通知直接静默停摆。
+	// 历史快照的 schema 校验在 ImportConfig 内部最前面完成（同样先于任何落库）。
 	var peek struct {
-		Settings map[string]string `json:"settings"`
+		Settings  map[string]string `json:"settings"`
+		HistoryGz []byte            `json:"historyGz"`
 	}
 	if err := json.Unmarshal(raw, &peek); err == nil {
 		if nv := strings.TrimSpace(peek.Settings["notify"]); nv != "" {
@@ -114,6 +118,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// v3 备份还原成功时如实告知历史已被整体替换——管理员需要知道
+	// 曲线现在来自备份时间点，原始 24h 环形会随上报在一天内重建。
+	historyRestored := len(peek.HistoryGz) > 0
 	// 设置里包含通知配置；导入后必须**先校验**再重新装载。
 	// 校验失败不能静默：备份已经落库，运行态却还是旧配置，
 	// 管理员会看到"导入成功"但通知行为没变（直到重启才在日志里发现）。
@@ -131,10 +138,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"ok":       true,
-		"nodes":    len(s.st.Nodes()),
-		"services": len(s.st.Services()),
-		"rules":    len(s.st.Rules()),
+		"ok":              true,
+		"nodes":           len(s.st.Nodes()),
+		"services":        len(s.st.Services()),
+		"rules":           len(s.st.Rules()),
+		"historyRestored": historyRestored,
 	}
 	if warning != "" {
 		resp["warning"] = warning

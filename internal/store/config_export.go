@@ -15,10 +15,15 @@ import (
 // ConfigBackupVersion 是配置备份格式版本。
 // v2 起在独立的 tokens 表里保存节点上报令牌：Node.Token 标了 json:"-"，
 // 不单独导出的话还原后会生成新令牌，全部 Agent 立刻 401。
-const ConfigBackupVersion = 2
+// v3 起携带监控聚合历史（HistoryGz，gzip 的 historySnapshot）：
+// 控制端磁盘故障不再丢掉 365 天可用率/负载历史。历史以整体替换方式还原，
+// 原始 24h 环形不包含在内——它会在恢复后的 24 小时内随上报自愈。
+const ConfigBackupVersion = 3
 
 // ConfigBackup 是可移植的配置快照：台账、探测目标、规则、静默、续费与设置。
-// 不含监控历史与告警记录，避免备份文件随运行时间无限增长。
+// v2 及以下不含监控历史；v3 的 HistoryGz 是 encodeSnapshot(historySnapshot) 的
+// 原样字节——与 data/history.json 同一编解码路径，不做有损的投影往返。
+// 不含告警记录与通知队列，避免备份文件随运行时间无限增长。
 type ConfigBackup struct {
 	Version  int                `json:"version"`
 	SavedAt  int64              `json:"savedAt"`
@@ -30,6 +35,9 @@ type ConfigBackup struct {
 	Settings map[string]string  `json:"settings,omitempty"`
 	// Tokens 是 nodeID -> 上报令牌。整个备份在落盘/传输前会用密码加密。
 	Tokens map[string]string `json:"tokens,omitempty"`
+	// HistoryGz 是三级聚合历史的 gzip 快照（v3 起）。含节点→桶序列，
+	// 不含任何凭据；还原时按 schema 版本校验后整体替换。
+	HistoryGz []byte `json:"historyGz,omitempty"`
 }
 
 // ExportConfig 导出配置（含节点上报令牌，因此调用方必须加密后再传输/落盘）。
@@ -88,6 +96,35 @@ func (s *Store) ExportConfig() ([]byte, error) {
 	sort.Slice(out.Rules, func(i, j int) bool { return out.Rules[i].ID < out.Rules[j].ID })
 	sort.Slice(out.Silences, func(i, j int) bool { return out.Silences[i].Scope < out.Silences[j].Scope })
 	sort.Slice(out.Renewals, func(i, j int) bool { return out.Renewals[i].ID < out.Renewals[j].ID })
+	// v3：聚合历史快照。与 SaveHistory 用同一个 historySnapshot 形状，
+	// 还原时走同一条 loadBuckets 路径，不做有损投影。当前持有 RLock，
+	// 这里只做只读遍历与序列化。
+	histSnap := historySnapshot{
+		SchemaVersion: historySchemaVersion,
+		SavedAt:       out.SavedAt,
+		Nodes:         make(map[string]*historyBucketSnapshot, len(s.history)),
+	}
+	for id, h := range s.history {
+		if h == nil {
+			continue
+		}
+		histSnap.Nodes[id] = &historyBucketSnapshot{
+			LastTS: h.lastTS,
+			M1:     h.m1.slice(),
+			M5:     h.m5.slice(),
+			H1:     h.h1.slice(),
+		}
+	}
+	if len(histSnap.Nodes) > 0 {
+		if hraw, err := json.Marshal(&histSnap); err == nil {
+			if gz, gerr := encodeSnapshot(hraw); gerr == nil {
+				out.HistoryGz = gz
+			} else {
+				// 历史打包失败不阻断配置备份（配置仍是主价值），如实降级为 v2 形状。
+				out.HistoryGz = nil
+			}
+		}
+	}
 	return json.Marshal(out)
 }
 
@@ -102,6 +139,23 @@ func (s *Store) ImportConfig(raw []byte) error {
 	}
 	if in.Version <= 0 || in.Version > ConfigBackupVersion {
 		return fmt.Errorf("不支持的备份版本: %d", in.Version)
+	}
+	// v3 历史快照在改动任何状态之前先校验：schema 不兼容时整个导入失败，
+	// 而不是"配置换成了备份的、历史还是本机的"这种半还原状态。
+	var histSnap *historySnapshot
+	if len(in.HistoryGz) > 0 {
+		hraw, err := decodeSnapshot(in.HistoryGz)
+		if err != nil {
+			return fmt.Errorf("备份中的历史快照无法解码: %w", err)
+		}
+		histSnap = &historySnapshot{}
+		if err := json.Unmarshal(hraw, histSnap); err != nil {
+			return fmt.Errorf("备份中的历史快照格式错误: %w", err)
+		}
+		if histSnap.SchemaVersion > historySchemaVersion {
+			return fmt.Errorf("备份历史 schema 版本 %d 高于当前支持的 %d；请先升级服务端再还原",
+				histSnap.SchemaVersion, historySchemaVersion)
+		}
 	}
 
 	nodes := make(map[string]*model.Node, len(in.Nodes))
@@ -206,6 +260,30 @@ func (s *Store) ImportConfig(raw []byte) error {
 			continue
 		}
 		s.settings[k] = v
+	}
+	// v3：整体替换聚合历史。口径（拍板记录）：
+	//   · 还原 = 用备份里的历史**整体替换**本机聚合——不做按节点合并，
+	//     合并会让"备份时间点之后本机新聚合的桶"与"备份里的桶"交错，
+	//     可用率曲线从此无法解释；宁要一段诚实的空窗，不要一段假数据。
+	//   · 备份里没有的节点 → 历史一并清掉（与节点集合保持一致）。
+	//   · 原始 24h 环形不在备份内：恢复后 24 小时内随上报自愈，
+	//     换取备份体积不随环大小膨胀。
+	//   · 本机当前聚合被覆盖前不做合并确认——恢复走显式 Confirm + 密码，
+	//     且备份/恢复是成对的运维动作。
+	if histSnap != nil {
+		s.history = make(map[string]*nodeHistory, len(histSnap.Nodes))
+		for id, nh := range histSnap.Nodes {
+			if nh == nil {
+				continue
+			}
+			h := newNodeHistory()
+			h.lastTS = nh.LastTS
+			s.loadBuckets(h.m1, nh.M1, false)
+			s.loadBuckets(h.m5, nh.M5, true)
+			s.loadBuckets(h.h1, nh.H1, true)
+			s.history[id] = h
+		}
+		s.historyDirty = true
 	}
 	// 导入会重建节点与 series：把分片写状态整体重置，
 	// 让下一次 Save 把**全部**节点的历史重写到 data/series 下。
