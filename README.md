@@ -2083,7 +2083,7 @@ t-digest 单桶 100–200 字节会让常驻内存翻倍以上，而这里只需
   且 CSP/缓存等常规排查都指向"正常"。现在 `status.css` 的 `:root` 补齐 EP 官方色值
   （`#67c23a/#e6a23c/#f56c6c/#909399`，深色继承）。教训：**裁掉某个样式来源时，
   要 grep 它原来提供的全部变量，不能只补"正在用"的那一族**
-- **生产部署切换到 Caddy + ACME**（`https://status.endgo.top`）：Let's Encrypt 自动
+- **生产部署切换到 Caddy + ACME**（`https://status.example.com`）：Let's Encrypt 自动
   签发续期，Caddy 反代 `127.0.0.1:19080`；服务端回绑回环明文、公网 19080 关闭；
   13 台 Agent 删除 `serverCertPin`/`tlsSkipVerify` 走系统 CA **真实验证**，
   「加密但未验证服务端身份」缺口关闭，证书轮换与 Agent 解耦。运维细节见
@@ -2570,7 +2570,7 @@ Agent 接入 → 面板验证），从零到首台节点上报实测 < 3 分钟�
 | 打开强制后未签名 | 401 `已要求签名上报，但…没有发送签名（升级到 v1.16.0+…）` |
 | 机群 | 13/13 Agent v1.16.0，13/13 `signed=true`，最大时钟偏差 **2 秒**，**强制已开启** |
 | 公开页 | 匿名 `/api/status` 仍 404 |
-| 中途故障 | 腾讯云-上海首次下载被截断（6195231 / 6287544 B），哈希校验如实拒绝并回退到旧版继续上报；改用单次长超时后成功 |
+| 中途故障 | 一台上海节点首次下载被截断（6195231 / 6287544 B），哈希校验如实拒绝并回退到旧版继续上报；改用单次长超时后成功 |
 
 ### v1.15.3（2026-10-22）
 
@@ -2692,7 +2692,7 @@ API 令牌路径限定与分钟级有效期；另落地服务端发行签名、�
 | 控制端升级 | 生产机用 `deploy/rollcall-server-upgrade.sh` 从 v1.13.0 升到 v1.13.1（sha256 取自 Release 的 `SHA256SUMS`）：`.prev` 保留、`/readyz` 返回 `{"ready":true,"version":"v1.13.1"}`、服务 active + enabled；升级前数据目录已打包为 `/root/rollcall-data-before-v1.13.1.tar.gz` |
 | Agent 分发目录 | `/opt/rollcall/agent` 四个架构全部换成 v1.13.1，`/agent/download.sha256?arch=` 返回的哈希与 Release 中对应文件一致，新接入的节点不再一装就落后 |
 | 机群升级 | 13/13 节点（1 台本机 + 12 台远端）由 v1.10.4 升到 v1.13.1，面板 `agentOutdated` 为 0；升级后 13 台 online、0 stale / 0 offline / 0 noData |
-| 升级异常与处置 | 腾讯云-上海 到控制端的下载被链路反复截断（`curl: (18) end with N bytes missing`，两次分别停在 ~600KB），改为把 Release 二进制投递到节点、校验 sha256 后按脚本同样的步骤替换（保留属主、备份 `.prev`、systemd 重启失败即回滚），节点最终生效版本仍为 Release 同一哈希 |
+| 升级异常与处置 | 一台上海节点 到控制端的下载被链路反复截断（`curl: (18) end with N bytes missing`，两次分别停在 ~600KB），改为把 Release 二进制投递到节点、校验 sha256 后按脚本同样的步骤替换（保留属主、备份 `.prev`、systemd 重启失败即回滚），节点最终生效版本仍为 Release 同一哈希 |
 
 > **v1.13.1 的 Agent 侧确有变更**（NFS/CIFS/sshfs 挂载点不再调用不可中断的 `statfs(2)`，
 > 避免网络存储失联时采集协程整体挂死；另含 `readMounts` 设备去重顺序、Hyper-V 误判与日志脱敏修复），

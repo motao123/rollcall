@@ -56,7 +56,7 @@ function readPassword() {
  *   admin=true 时会确保处于已登录态（必要时用 RCP_PASSWORD 登录）。
  */
 export async function openSession(opts = {}) {
-  const base = (opts.base || 'https://status.endgo.top').replace(/\/$/, '');
+  const base = (opts.base || 'http://127.0.0.1:19080').replace(/\/$/, '');
   const width = opts.width || 1366;
   const height = opts.height || 900;
   const port = opts.port || 9333 + Math.floor(Math.random() * 200);

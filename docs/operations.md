@@ -878,7 +878,7 @@ openssl x509 -in /etc/rollcall/tls/cert.pem -noout -fingerprint -sha256   # 人�
 
 **★ v1.35.1 生产实况（2026-10-26）：已根治。** 机群切换到 Caddy + ACME 架构：
 
-- 生产入口改为 `https://status.endgo.top`（Caddy 2.6.2 监听 80/443，ACME 自动签发续期，
+- 生产入口改为 `https://status.example.com`（Caddy 2.6.2 监听 80/443，ACME 自动签发续期，
   Let's Encrypt，HTTP-01）；`/etc/caddy/Caddyfile` 仅一条 `reverse_proxy 127.0.0.1:19080`
 - 服务端回绑 `127.0.0.1:19080` **明文**（回环明文是合法形态），删 `tls.conf` 与
   `-allow-insecure`；公网不再暴露 19080。回滚：`rm zz-loopback.conf` +
@@ -889,7 +889,7 @@ openssl x509 -in /etc/rollcall/tls/cert.pem -noout -fingerprint -sha256   # 人�
 - 切换前每台备份 `agent.json.bak-acme`；IP 直连 `agent.json.http-bak` 仍在
 - clientIP/trustedProxies（web.go）默认信任回环，Caddy 同机部署零配置，
   lastIP/限速/审计经反代后仍是真实客户端 IP，已实测
-- 面板「对外地址」已设为 `https://status.endgo.top`（落盘于 settings，非启动参数）
+- 面板「对外地址」已设为 `https://status.example.com`（落盘于 settings，非启动参数）
 - ACME 注意：Caddy 证书 60 天自动续期，**Agent 走 CA 验证后与证书轮换解耦**，
   不再需要「换证书先逐台删指纹」的编排；域名解析变更或 80 端口被封才会影响续期
 

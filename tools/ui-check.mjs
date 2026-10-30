@@ -12,7 +12,7 @@
  */
 import { openSession } from './ui-session.mjs';
 
-const base = process.argv[2] || 'https://status.endgo.top';
+const base = process.argv[2] || 'http://127.0.0.1:19080';
 const nodeID = process.argv[3] || '';
 
 const sess = await openSession({ base, admin: true });

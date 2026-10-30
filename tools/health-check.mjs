@@ -12,13 +12,13 @@
 // 这几种都只能靠"数据的新鲜度"发现，不能靠 HTTP 状态码。
 //
 // 用法：
-//   node tools/health-check.mjs                      # 默认检查 https://status.endgo.top
+//   node tools/health-check.mjs                      # 默认检查本机 http://127.0.0.1:19080
 //   node tools/health-check.mjs http://127.0.0.1:19080
 //   node tools/health-check.mjs --json               # 机器可读输出（便于接监控）
 //
 // 退出码：0 全部通过 / 1 存在失败项 / 2 参数或连接错误。
 
-const DEFAULT_BASE = 'https://status.endgo.top';
+const DEFAULT_BASE = 'http://127.0.0.1:19080';
 // 上报间隔默认 30s。判定"数据陈旧"用 6 倍间隔（180s），避开秒级抖动与一次丢包；
 // 判定"全局停摆"更严格：所有节点都超过 3 倍间隔就说明服务端侧没在收。
 const REPORT_INTERVAL_SEC = 30;

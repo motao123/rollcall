@@ -81,3 +81,8 @@ admin-user.json
 _c.js
 /_c.js
 .prod-monitor.png
+
+# 内部运维/评估报告（含生产拓扑与个人部署信息，只留本地，不入库）
+/docs/*报告*.txt
+/docs/*报告*.md
+/docs/*评估*.md

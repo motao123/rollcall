@@ -21,21 +21,21 @@ func seedDemo(st *store.Store) {
 	}
 
 	specs := []spec{
-		{"n01", "腾讯云-sg", "腾讯云", "新加坡", "prod", "2030-03-07", "Debian 12", 0, "CNY", 22, 38, 58},
-		{"n02", "腾讯云-上海", "腾讯云", "上海", "prod", "2027-06-12", "Debian 13", 0, "CNY", 34, 55, 71},
-		{"n03", "阿里云-成都", "阿里云", "成都", "prod", "2027-01-20", "Ubuntu 22.04", 0, "CNY", 18, 44, 62},
-		{"n04", "华为云-香港", "华为云", "香港", "prod", "2026-12-01", "Ubuntu 22.04", 0, "CNY", 27, 41, 49},
-		{"n05", "netcup-1o", "netcup", "德国", "probe", "2027-03-15", "Debian 12", 6.5, "USD", 12, 31, 34},
-		{"n06", "netcup-RS1000", "netcup", "德国", "prod", "2027-08-02", "Debian 12", 14.0, "USD", 41, 63, 77},
-		{"n07", "racknerd-圣何塞", "racknerd", "美国", "probe", "2027-02-18", "Debian 12", 11.0, "USD", 8, 22, 28},
-		{"n08", "racknerd-纽约", "racknerd", "美国", "probe", "2026-11-09", "Debian 12", 11.0, "USD", 16, 37, 41},
-		{"n09", "racknerd-DC02", "racknerd", "美国", "test", "2026-10-28", "Debian 12", 9.5, "USD", 5, 19, 23},
-		{"n10", "DMIT-49.9", "DMIT", "美国", "prod", "2027-05-30", "Debian 12", 49.9, "USD", 33, 52, 66},
-		{"n11", "dmit-wee", "DMIT", "美国", "prod", "2027-04-11", "Debian 12", 36.9, "USD", 45, 58, 72},
-		{"n12", "棉花云-香港", "棉花云", "香港", "probe", "2026-12-25", "Debian 12", 0, "CNY", 9, 26, 31},
-		{"n13", "bestvm.cloud-tw", "bestvm", "台湾", "probe", "2027-07-19", "Debian 12", 18.0, "USD", 14, 29, 38},
-		{"n14", "hostyun-us", "hostyun", "美国", "test", "2026-11-30", "CentOS 7", 7.0, "USD", 3, 17, 21},
-		{"n15", "武汉-独服", "自建", "武汉", "prod", "2029-01-01", "Ubuntu 24.04", 0, "CNY", 52, 68, 88},
+		{"n01", "demo-sg", "云甲", "新加坡", "prod", "2030-03-07", "Debian 12", 0, "CNY", 22, 38, 58},
+		{"n02", "demo-sh", "云甲", "上海", "prod", "2027-06-12", "Debian 13", 0, "CNY", 34, 55, 71},
+		{"n03", "demo-cd", "云乙", "成都", "prod", "2027-01-20", "Ubuntu 22.04", 0, "CNY", 18, 44, 62},
+		{"n04", "demo-hk", "云丙", "香港", "prod", "2026-12-01", "Ubuntu 22.04", 0, "CNY", 27, 41, 49},
+		{"n05", "demo-de-1", "云丁", "德国", "probe", "2027-03-15", "Debian 12", 6.5, "USD", 12, 31, 34},
+		{"n06", "demo-de-2", "云丁", "德国", "prod", "2027-08-02", "Debian 12", 14.0, "USD", 41, 63, 77},
+		{"n07", "demo-us-1", "云戊", "美国", "probe", "2027-02-18", "Debian 12", 11.0, "USD", 8, 22, 28},
+		{"n08", "demo-us-2", "云戊", "美国", "probe", "2026-11-09", "Debian 12", 11.0, "USD", 16, 37, 41},
+		{"n09", "demo-us-3", "云戊", "美国", "test", "2026-10-28", "Debian 12", 9.5, "USD", 5, 19, 23},
+		{"n10", "demo-us-4", "云己", "美国", "prod", "2027-05-30", "Debian 12", 49.9, "USD", 33, 52, 66},
+		{"n11", "demo-us-5", "云己", "美国", "prod", "2027-04-11", "Debian 12", 36.9, "USD", 45, 58, 72},
+		{"n12", "demo-hk-2", "云庚", "香港", "probe", "2026-12-25", "Debian 12", 0, "CNY", 9, 26, 31},
+		{"n13", "demo-tw", "云辛", "台湾", "probe", "2027-07-19", "Debian 12", 18.0, "USD", 14, 29, 38},
+		{"n14", "demo-us-6", "云壬", "美国", "test", "2026-11-30", "CentOS 7", 7.0, "USD", 3, 17, 21},
+		{"n15", "demo-self", "自建", "华东", "prod", "2029-01-01", "Ubuntu 24.04", 0, "CNY", 52, 68, 88},
 	}
 
 	now := time.Now().Unix()
@@ -217,7 +217,7 @@ func seedDemo(st *store.Store) {
 		ID: "al_hist_1", RuleID: "r_offline", RuleName: "节点失联",
 		// 严重度与 r_offline 的 critical 保持一致；时间跨度必须是 900 秒，
 		// 才能与 Value=900 和「15 分钟」的文案对上。
-		NodeID: "n08", NodeName: "racknerd-纽约", Severity: "critical",
+		NodeID: "n08", NodeName: "demo-纽约", Severity: "critical",
 		Value: 900, Message: "演示：节点失联 15 分钟后恢复",
 		StartedAt: now - 8600, ResolvedAt: now - 7700,
 	})

@@ -28,7 +28,7 @@ func TestNormalizePanelLinkRejectsShellChars(t *testing.T) {
 		}
 	}
 	good := []string{
-		"https://status.endgo.top",
+		"https://example.com",
 		"https://panel.example.com:19080",
 		"http://127.0.0.1:19080",
 		"https://[::1]:19080",

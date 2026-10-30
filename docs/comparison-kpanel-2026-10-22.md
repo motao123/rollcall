@@ -87,7 +87,7 @@
 ### P0（安全与默认值，建议 1–2 周内做完）
 
 **P0-1 公开页加"总开关 + 访问令牌 + 逐台隐藏 + 公开备注"**
-- 现状：`GET /status` 与 `/api/status` 匿名可访问，**默认暴露全部节点名/分组/在线状态**。生产实测：`curl /status` → 200，`/api/status` 直接列出 `Hostdzire-控制端 / bestvm-de / dmit-49.9`。
+- 现状：`GET /status` 与 `/api/status` 匿名可访问，**默认暴露全部节点名/分组/在线状态**。生产实测：`curl /status` → 200，`/api/status` 直接列出全部节点名（示例：`node-a / node-b / node-c`）。
 - 理由：监控面板通常挂在公网 IP 上（我们就是 `0.0.0.0:19080` 明文 HTTP），节点名往往等于"服务商 + 地区"，等于泄露资产清单；竞品四家全都有开关，KPanel 更是**默认关闭 + 随机令牌可重置**。
 - 做法：`StatusPage` 增加 `enabled`、`token`（可选，命中才放行，支持 `?t=` 与 Cookie）、`hiddenNodes []string`、`publicNotes map[string]string`；`handleStatusPage` 与 `/api/status` 统一走同一个可见性过滤器；公开备注要过 `sanitize`，且**不得**复用内部 `Note` 字段。
 - 成本：小（1–2 天）。位置：`internal/web/statuspage.go`、`internal/web/statuspub.go`、`internal/model/model.go`。
@@ -196,5 +196,5 @@ KPanel 那一页本身就很值得偷师：**能力矩阵用 ●◐○ 三态 + 
 ## 6. 核对方法
 
 - 页面内容：上述 44 项与 F1–F17 编号均来自该页原文，未做归纳省略。
-- Rollcall 现状：逐条在仓库核对（`internal/probe`、`internal/collect`、`internal/store`、`internal/web`、`internal/notify`、`internal/schedule`），并在生产 `163.227.192.54` 上实测了公开页匿名可访问。
+- Rollcall 现状：逐条在仓库核对（`internal/probe`、`internal/collect`、`internal/store`、`internal/web`、`internal/notify`、`internal/schedule`），并在生产实例（示例 IP `203.0.113.10`）上实测了公开页匿名可访问。
 - 未核实项已标注"按需/待确认"，没有把推测写成结论。

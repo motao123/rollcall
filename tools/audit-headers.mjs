@@ -15,7 +15,7 @@
  */
 import tls from 'node:tls';
 
-const target = (process.argv[2] || 'https://status.endgo.top').replace(/\/$/, '');
+const target = (process.argv[2] || 'http://127.0.0.1:19080').replace(/\/$/, '');
 const MIN_CERT_DAYS = Number(process.env.RCP_MIN_CERT_DAYS || 14);
 const u = new URL(target);
 

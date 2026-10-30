@@ -9,7 +9,7 @@
 
 | 项 | 实测结果 |
 |---|---|
-| 产品 | 哪吒监控 **v2.3.18**（与自己那台 43.156.17.202 同版本） |
+| 产品 | 哪吒监控 **v2.3.18**（与对照实例 203.0.113.20 同版本） |
 | 站点 | 名称"陌涛的探针小鸡"，32 台节点，31 在线 / 1 离线 |
 | 主题 | `user_template=user-dist`（**nezha-dash** `cd070d5`），`admin_template=admin-dist` |
 | 登录 | `POST /api/v1/login` → JWT 走 `nz-jwt` Cookie，另发 `nz-csrf`（双 Cookie 防 CSRF） |

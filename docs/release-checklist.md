@@ -83,7 +83,7 @@ done; done
 | 5.3 | 常规节点升级 | 脚本逐台输出 `成功` |
 | 5.4 | 上海（低带宽） | SFTP 直传，`UPGRADE_OK` |
 | 5.5 | 成都 | SFTP 直传，`UPGRADE_OK` |
-| 5.6 | 绿云-jp（SSH 常不通） | 经控制端隧道 `-L 12222:...:22`，`UPGRADE_OK` |
+| 5.6 | 某台 SSH 端口非标的节点 | 经控制端隧道 `-L 12222:...:22`，`UPGRADE_OK` |
 | 5.7 | 面板本机 | `/agent/download` + sha256 断言，`active` |
 | 5.8 | 版本一致性 | `/api/admin/nodes` 全部为 `vX.Y.Z`，**`agentOutdated` 为空** |
 
