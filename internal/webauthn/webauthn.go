@@ -227,8 +227,17 @@ func validateCOSEKey(cose []byte) error {
 	if alg != -7 {
 		return fmt.Errorf("只支持 ES256（alg=%v）", alg)
 	}
-	if crv != 1 || len(x) != 32 || len(y) != 32 {
+	if crv != 1 {
 		return errors.New("只支持 P-256 曲线且坐标必须为 32 字节")
+	}
+	// 部分软件认证器 / WebCrypto 编码会把坐标的前导零剥掉（31 字节），
+	// 按大端左填充回 32 字节再验；空坐标或超长仍然拒绝。
+	var err error
+	if x, err = padCoordinate(x); err != nil {
+		return fmt.Errorf("公钥 X 坐标: %w", err)
+	}
+	if y, err = padCoordinate(y); err != nil {
+		return fmt.Errorf("公钥 Y 坐标: %w", err)
 	}
 	// 坐标必须在曲线上：拒绝随手构造的字节（负路径覆盖）
 	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: bytesToBigInt(x), Y: bytesToBigInt(y)}
@@ -236,6 +245,21 @@ func validateCOSEKey(cose []byte) error {
 		return errors.New("公钥坐标不在 P-256 曲线上")
 	}
 	return nil
+}
+
+// padCoordinate 把剥掉前导零的坐标（如 31 字节）左填充回 32 字节。
+func padCoordinate(b []byte) ([]byte, error) {
+	switch {
+	case len(b) == 0:
+		return nil, errors.New("坐标为空")
+	case len(b) > 32:
+		return nil, errors.New("坐标超过 32 字节")
+	case len(b) == 32:
+		return b, nil
+	}
+	out := make([]byte, 32)
+	copy(out[32-len(b):], b)
+	return out, nil
 }
 
 // ---------- 登录断言 ----------
@@ -318,7 +342,13 @@ func BuildAuthData(rpID string, flags byte, signCount uint32, extra []byte) []by
 // 一个诚实的虚拟认证器：凭据 ID 与 COSE 公钥由调用方的密钥对给出。
 // 认证凭据数据的形状与真实认证器一致：AAGUID(16) + ID 长度(2) + ID + COSE key。
 func BuildAttestationNone(rpID string, challenge []byte, origin string, credID []byte, priv *ecdsa.PrivateKey, signCount uint32) (attObj, clientDataJSON, coseKey []byte, err error) {
-	coseKey = MarshalCOSEKeyP256(priv.PublicKey.X.Bytes(), priv.PublicKey.Y.Bytes())
+	// 坐标定宽 32 字节（规范行为）：big.Int.Bytes() 会剥前导零，
+	// 约 1/128 的密钥会产出 31 字节坐标——那是部分软件认证器才会有的编码。
+	xb := make([]byte, 32)
+	yb := make([]byte, 32)
+	priv.PublicKey.X.FillBytes(xb)
+	priv.PublicKey.Y.FillBytes(yb)
+	coseKey = MarshalCOSEKeyP256(xb, yb)
 	if len(credID) == 0 {
 		sum := sha256.Sum256(coseKey)
 		credID = sum[:32]

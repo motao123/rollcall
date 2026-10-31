@@ -263,3 +263,54 @@ func encodeTestAttestation(authData []byte) []byte {
 	}
 	return enc
 }
+
+// smallCoordKey 生成 X 或 Y 至少一个坐标短于 32 字节的 P-256 密钥。
+// 随机密钥约 1/128 命中（坐标 < 2^248），对应部分软件认证器剥前导零的编码。
+func smallCoordKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	for i := 0; i < 4096; i++ {
+		priv := testKey(t)
+		if len(priv.PublicKey.X.Bytes()) < 32 || len(priv.PublicKey.Y.Bytes()) < 32 {
+			return priv
+		}
+	}
+	t.Fatal("4096 次未生成短坐标密钥")
+	return nil
+}
+
+// TestRegistrationAcceptsStrippedLeadingZero 坐标前导零被剥成 31 字节时，
+// 注册与断言都应放行（服务端左填充回 32 字节再验，兼容此类软件认证器）。
+func TestRegistrationAcceptsStrippedLeadingZero(t *testing.T) {
+	priv := smallCoordKey(t)
+	cred, _, _ := fullRegistration(t, testRP, priv, []byte("cred-id-short"))
+	authData, cdj, sig := fullAssertion(t, testRP, priv, cred.ID, cred.SignCount+1)
+	if _, err := ParseAssertionResponse(testRP, []byte("login-challenge-01"), cdj, authData, sig,
+		cred.ID, cred.COSEKey, cred.SignCount); err != nil {
+		t.Fatalf("短坐标凭据的断言应放行: %v", err)
+	}
+}
+
+// TestCOSEKeyRejectsEmptyAndOversizedCoords 空坐标与超长坐标必须拒绝。
+func TestCOSEKeyRejectsEmptyAndOversizedCoords(t *testing.T) {
+	priv := testKey(t)
+	mk := func(x, y []byte) []byte {
+		out, err := encodeCBOR(map[any]any{
+			int64(1):  int64(2),
+			int64(3):  int64(-7),
+			int64(-1): int64(1),
+			int64(-2): x,
+			int64(-3): y,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if err := validateCOSEKey(mk(nil, priv.PublicKey.Y.FillBytes(make([]byte, 32)))); err == nil {
+		t.Fatal("空 X 坐标应拒绝")
+	}
+	big := make([]byte, 33)
+	if err := validateCOSEKey(mk(big, priv.PublicKey.Y.FillBytes(make([]byte, 32)))); err == nil {
+		t.Fatal("33 字节 X 坐标应拒绝")
+	}
+}
