@@ -1981,7 +1981,7 @@ certificate_days_remaining,uptime_percent_24h}`
   避免把 flag 当环境变量写进 EnvironmentFile（Go 的 flag 包只读命令行，写了也不生效）。
 - **`docs/release-checklist.md`**：发版 DoD 七段 30 余项，每项给命令与期望值，
   含本地自检（gofmt / vet / test / JS 语法 / 对比度 / **U+FFFD 计数** / **CRLF 计数**）、
-  digest 一致性、签名、部署、Agent 升级（含上海/成都/绿云三种特殊通路）、
+  digest 一致性、签名、部署、Agent 升级（含上海/成都/棉花云三种特殊通路）、
   上线回归、收尾，以及六条常见失败的处置表。
 
 ### v1.37.4（2026-10-27，升级弹窗不再缺目标版本）

@@ -824,7 +824,7 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
 ```
 # 名称,服务商,地区,国家,分组（后四项可留空）
 香港-01,腾讯云,香港,CN,prod
-东京-02,绿云,东京,JP,prod
+东京-02,棉花云,东京,JP,prod
 ```
 
 - 逗号或制表符分隔都行；`#` 开头的行忽略；单次最多 200 台

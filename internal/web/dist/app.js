@@ -3906,7 +3906,7 @@ async function viewSettings() {
           <label class="field">
             <span class="field-label">节点列表</span>
             <textarea name="list" rows="5" placeholder="香港-01,腾讯云,香港,CN,prod
-东京-02,绿云,东京,JP,prod"></textarea>
+东京-02,棉花云,东京,JP,prod"></textarea>
           </label>
           <div class="form-actions"><button class="btn primary" type="submit">导入并生成接入命令</button></div>
         </form>
