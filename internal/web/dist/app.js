@@ -3614,6 +3614,27 @@ function capMatrixHTML() {
     </section>`;
 }
 
+// 切换设置页分类页签：只切换可见性，不重新拉数据（DOM 全量在册，绑定不受影响）。
+// 用 replaceState 写回 ?tab= 便于刷新/分享定位——它不触发 hashchange，不会整页重渲染。
+function activateSettingsTab(id) {
+  const VALID = ['health', 'nodes', 'monitor', 'account', 'appearance', 'storage'];
+  if (!VALID.includes(id)) id = 'health';
+  $$('#settingsTabs .settings-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
+  $$('#view .tab-page').forEach((p) => p.classList.toggle('active', p.dataset.tp === id));
+  try { localStorage.setItem('rollcall.settings.tab', id); } catch (_) { /* 隐私模式忽略 */ }
+  history.replaceState(null, '', '#/settings?tab=' + id);
+}
+
+// 页签吸顶位置 = 顶栏实际高度（顶栏 sticky 在窗口滚动之上，页签紧贴其下）。
+// CSS 里给了 58px 兜底，这里按真实布局校正；窄屏顶栏换行变高也跟得上。
+function positionSettingsTabs() {
+  const bar = document.getElementById('settingsTabs');
+  const tb = document.querySelector('.topbar');
+  if (!bar || !tb) return;
+  bar.style.top = tb.offsetHeight + 'px';
+}
+window.addEventListener('resize', positionSettingsTabs);
+
 async function viewSettings() {
   if (!state.authenticated) {
     // 与首屏登录共用同一个全屏登录层：验证通过后 render() 会回到当前路由
@@ -3791,7 +3812,24 @@ async function viewSettings() {
       <td class="num mono">${(n.points && n.points['1h']) || 0}</td>
     </tr>`).join('') || `<tr><td colspan="4"><div class="empty">暂无历史数据</div></td></tr>`;
 
+  // 页签状态：URL ?tab= 优先（可分享/刷新定位），其次记住上次所在页签，默认「实例状态」。
+  const SETTINGS_TABS = ['health', 'nodes', 'monitor', 'account', 'appearance', 'storage'];
+  let tabId = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || '';
+  if (!SETTINGS_TABS.includes(tabId)) {
+    try { tabId = localStorage.getItem('rollcall.settings.tab') || ''; } catch (_) { /* 隐私模式忽略 */ }
+  }
+  if (!SETTINGS_TABS.includes(tabId)) tabId = 'health';
+
   $('#view').innerHTML = `
+    <nav class="settings-tabs" id="settingsTabs" role="tablist" aria-label="设置分类">
+      <button type="button" class="settings-tab${tabId === 'health' ? ' active' : ''}" data-tab="health">实例状态</button>
+      <button type="button" class="settings-tab${tabId === 'nodes' ? ' active' : ''}" data-tab="nodes">节点管理</button>
+      <button type="button" class="settings-tab${tabId === 'monitor' ? ' active' : ''}" data-tab="monitor">监控告警</button>
+      <button type="button" class="settings-tab${tabId === 'account' ? ' active' : ''}" data-tab="account">账号安全</button>
+      <button type="button" class="settings-tab${tabId === 'appearance' ? ' active' : ''}" data-tab="appearance">外观主题</button>
+      <button type="button" class="settings-tab${tabId === 'storage' ? ' active' : ''}" data-tab="storage">存储备份</button>
+    </nav>
+    <div class="tab-page${tabId === 'health' ? ' active' : ''}" data-tp="health">
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">实例健康</h2>
@@ -3799,7 +3837,10 @@ async function viewSettings() {
       </div>
       <div class="panel panel-pad" id="healthBody">${healthBody(health)}</div>
     </section>
+    ${capMatrixHTML()}
+    </div>
 
+    <div class="tab-page${tabId === 'nodes' ? ' active' : ''}" data-tp="nodes">
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">节点管理</h2>
@@ -3901,13 +3942,15 @@ async function viewSettings() {
       <p class="section-note">节点升级完成后会随下一次上报写入新版本，这里按「当前版本 ≠ 创建时版本」自动标记完成。控制端当前版本 ${esc(upgrades.serverVersion || serverVersion || '—')}。</p>
       <div id="upgradeList">${upgradeCards}</div>
     </section>
+    </div>
 
+    <div class="tab-page${tabId === 'monitor' ? ' active' : ''}" data-tp="monitor">
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">服务探测</h2>
         ${sectionActions(`${services.length} 个目标 · 与「服务」页共用同一份配置`, '<button class="btn sm primary" id="settingsSvcAdd">＋ 新增探测</button>')}
       </div>
-      <div class="table-wrap"><table class="settings-services-table">
+      <div class="table-wrap"><table class="settings-services-table" data-page-size="10">
         <thead><tr><th>状态</th><th>名称</th><th>类型</th><th>目标</th><th class="num">间隔</th><th class="num">操作</th></tr></thead>
         <tbody>${services.map((s) => {
           const on = s.enabled !== false;
@@ -4023,7 +4066,9 @@ async function viewSettings() {
         更早的记录用「全部记录」分页查看，累计计数见 /metrics。
       </p>
     </section>
+    </div>
 
+    <div class="tab-page${tabId === 'account' ? ' active' : ''}" data-tp="account">
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">管理员账号</h2>
@@ -4109,7 +4154,9 @@ async function viewSettings() {
         </table></div>
       </div>
     </section>
+    </div>
 
+    <div class="tab-page${tabId === 'appearance' ? ' active' : ''}" data-tp="appearance">
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">外观主题</h2>
@@ -4160,6 +4207,9 @@ async function viewSettings() {
       </div>
     </section>
 
+    </div>
+
+    <div class="tab-page${tabId === 'storage' ? ' active' : ''}" data-tp="storage">
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">加密备份与恢复</h2>
@@ -4294,15 +4344,16 @@ async function viewSettings() {
         </p>
       </div>
     </section>
-    ${capMatrixHTML()}`;
+    </div>`;
 
   // 实例健康轮询：每次进入设置页重置定时器，避免离开后堆积多个 interval。
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(refreshHealthCard, 5000);
 
-  // 从升级清单创建流程跳转过来：滚到 Agent 升级批次并短暂高亮。
+  // 从升级清单创建流程跳转过来：切到「节点管理」页签，滚到升级批次并短暂高亮。
   if (state.scrollToAgentUpgrades) {
     state.scrollToAgentUpgrades = false;
+    activateSettingsTab('nodes');
     const sec = document.getElementById('agentUpgradesSection');
     if (sec) {
       sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -4311,6 +4362,12 @@ async function viewSettings() {
       setTimeout(() => { sec.style.backgroundColor = ''; }, 1800);
     }
   }
+
+  // 分类页签：切页签只显隐板块，不重新请求（数据在进入设置页时已一次取全）。
+  $$('#settingsTabs .settings-tab').forEach((b) => {
+    b.onclick = () => activateSettingsTab(b.dataset.tab);
+  });
+  positionSettingsTabs();
 
   // 事件绑定
   $('#logoutBtn').onclick = doLogout;
@@ -6781,12 +6838,19 @@ boot();
 
 // 图表与表格增强：都依赖 #view 内新渲染出的 DOM，
 // 用 MutationObserver 比在每个视图函数尾部手动调用更不容易漏。
+// rAF 在窗口被完全遮挡 / 后台标签页时会被浏览器暂停（visibilityState 仍是
+// visible），只挂 rAF 会让增强整段丢失——加 setTimeout 兜底通道；
+// 两个通道都跑也安全：enhanceTables 幂等，bindChartHover 有 chartBound 守卫。
 bindChartHover();
 new MutationObserver(() => {
   requestAnimationFrame(() => {
     bindChartHover();
     enhanceTables();
   });
+  setTimeout(() => {
+    bindChartHover();
+    enhanceTables();
+  }, 60);
 }).observe($('#view'), { childList: true, subtree: true });
 
 // showNezhaImport 从 Nezha 一键迁移：服务端拉取清单并批量建档，

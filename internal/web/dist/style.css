@@ -2077,3 +2077,40 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
 }
 html[data-theme="dark"] .assets-table td:first-child,
 html[data-theme="dark"] .maint-table td:first-child { background: var(--panel); }
+
+/* 设置页分类页签：后台功能按「实例状态 / 节点管理 / 监控告警 / 账号安全 /
+   外观主题 / 存储备份」六类归组，页签吸顶随滚动保持可见（国人后台习惯的页签式设置）。 */
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+  margin-bottom: 14px;
+  scrollbar-width: thin;
+  position: sticky;
+  top: 58px; /* JS 会按顶栏实际高度校正（positionSettingsTabs） */
+  z-index: 20;
+}
+.settings-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 7px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.settings-tab:hover { color: var(--fg); background: var(--panel-2); }
+.settings-tab.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.tab-page { display: none; }
+.tab-page.active { display: block; }
