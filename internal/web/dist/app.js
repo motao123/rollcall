@@ -20,6 +20,8 @@ const state = {
   alertPage: 1,
   // 告警记录（历史）分页：服务端分页，与上面的节点分页完全独立。
   alertRecPage: 1,
+  // 创建升级清单后置 true：设置页渲染时滚动到 Agent 升级批次并高亮。
+  scrollToAgentUpgrades: false,
   auditPage: 1,
   auditFilters: { range: '7d', action: '', q: '' },
   nodeFilter: { provider: '', group: '', state: '' },
@@ -3687,11 +3689,15 @@ async function viewSettings() {
     const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
     const rows = (b.targets || []).map((t) => {
       const [cls, label] = upState[t.state] || ['mute', t.state];
+      const doneRow = t.state === 'done';
       return `<tr>
         <td class="strong">${esc(t.name || t.id)}</td>
         <td class="mono">${esc(t.before || '—')}</td>
         <td class="mono">${esc(t.current || '—')}</td>
         <td><span class="badge ${cls}">${label}</span></td>
+        <td class="num">${doneRow
+          ? '<span class="text-faint" style="font-size:11px">已完成</span>'
+          : `<button class="btn tiny" data-node-agent="${esc(t.id)}">接入命令</button>`}</td>
       </tr>`;
     }).join('') || `<tr><td colspan="4"><div class="empty">清单为空</div></td></tr>`;
     return `<div class="panel panel-pad" style="margin-bottom:10px">
@@ -3707,7 +3713,7 @@ async function viewSettings() {
       <details>
         <summary class="sum">查看节点明细</summary>
         <div class="table-wrap" style="margin-top:8px"><table class="maint-table" data-page-size="10">
-          <thead><tr><th>节点</th><th>创建时版本</th><th>当前版本</th><th>状态</th></tr></thead>
+          <thead><tr><th>节点</th><th>创建时版本</th><th>当前版本</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
       </details>
@@ -3841,7 +3847,7 @@ async function viewSettings() {
       </details>
     </section>
 
-    <section class="section">
+    <section class="section" id="agentUpgradesSection">
       <div class="section-head">
         <h2 class="section-title">Agent 升级批次</h2>
         ${sectionActions('只记录清单与基线版本，不远程执行升级', '<button class="btn sm primary" id="upBatchAdd">＋ 新建升级清单</button>')}
@@ -4248,10 +4254,33 @@ async function viewSettings() {
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(refreshHealthCard, 5000);
 
+  // 从升级清单创建流程跳转过来：滚到 Agent 升级批次并短暂高亮。
+  if (state.scrollToAgentUpgrades) {
+    state.scrollToAgentUpgrades = false;
+    const sec = document.getElementById('agentUpgradesSection');
+    if (sec) {
+      sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      sec.style.transition = 'background-color 1.6s';
+      sec.style.backgroundColor = 'var(--accent-soft)';
+      setTimeout(() => { sec.style.backgroundColor = ''; }, 1800);
+    }
+  }
+
   // 事件绑定
   $('#logoutBtn').onclick = doLogout;
   $('#editAccountBtn').onclick = showAccountDialog;
   $('#changePasswordBtn').onclick = showPasswordDialog;
+
+  // 升级批次明细行的「接入命令」：与节点页同一弹窗（含该节点自己的令牌）。
+  $$('[data-node-agent]', $('#view')).forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        const n = await adminApi('/api/admin/nodes/' + encodeURIComponent(b.dataset.nodeAgent));
+        showAgentConfig(n);
+      } catch (err) { toast('读取接入信息失败：' + err.message, 'err'); }
+    };
+  });
 
   /* ---- 两步验证 ---- */
   $('#totpBtn').onclick = () => {
@@ -5780,8 +5809,23 @@ function openUpgradeBatchDialog(nodes, presetIDs, after) {
         }),
       });
       dlg.close();
-      toast('升级清单已创建（' + ids.length + ' 台）');
-      (after || viewSettings)();
+      // 创建成功必须有下一步指引：清单在设置页，这里直接弹确认 + 跳转按钮，
+      // 不让用户猜"清单去哪了、接下来干什么"。
+      const target = f.targetVersion.value.trim() || current || '—';
+      const done = openDialog('升级清单已创建', `
+        <p class="modal-sub">已为 <b>${ids.length}</b> 台节点建立升级清单，目标版本 <b class="mono">${esc(target)}</b>。</p>
+        <p class="modal-sub">清单是<b>进度跟踪器</b>：到各节点执行接入命令升级 Agent，节点上报新版本后这里会自动标记完成。
+          清单与进度在 <b>设置 → Agent 升级批次</b> 查看。</p>
+        <div class="form-actions">
+          <button class="btn" type="button" data-close>留在本页</button>
+          <button class="btn primary" type="button" id="gotoUpgrades">前往升级批次</button>
+        </div>`);
+      done.querySelector('#gotoUpgrades').onclick = () => {
+        done.close();
+        state.scrollToAgentUpgrades = true;
+        location.hash = '#/settings';
+      };
+      if (after) after();
     } catch (err) { toast('创建失败：' + err.message, 'err'); }
   };
 }
