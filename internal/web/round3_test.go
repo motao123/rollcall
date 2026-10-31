@@ -67,13 +67,13 @@ func TestAcceptsGzipRejectsAllZeroForms(t *testing.T) {
 }
 
 // TestContentDispositionHandlesNonASCII 防止中文节点名产生乱码文件名。
-// 节点名普遍是中文（腾讯云-sg、武汉-独服），而 filename= 只允许 ASCII。
+// 节点名普遍含非 ASCII 字符（中文昵称最常见），而 filename= 只允许 ASCII。
 func TestContentDispositionHandlesNonASCII(t *testing.T) {
-	got := contentDisposition("rollcall-metrics-武汉-独服-20261018-2230.csv")
+	got := contentDisposition("rollcall-metrics-演示节点-20261018-2230.csv")
 	if !strings.Contains(got, "filename*=UTF-8''") {
 		t.Fatalf("缺少 RFC 5987 形式: %q", got)
 	}
-	if !strings.Contains(got, "%E6%AD%A6%E6%B1%89") { // 武汉
+	if !strings.Contains(got, "%E6%BC%94%E7%A4%BA") { // 演示
 		t.Fatalf("中文未被百分号编码: %q", got)
 	}
 	// ASCII 回退段必须不含非 ASCII 字节

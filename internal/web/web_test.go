@@ -126,7 +126,7 @@ func TestCSVSafeBlocksFormulaInjection(t *testing.T) {
 		{"\t=1+1", "'\t=1+1"},
 		{"\r=1+1", "'\r=1+1"},
 		// 正常数据零影响
-		{"腾讯云-sg", "腾讯云-sg"},
+		{"演示-sg", "演示-sg"},
 		{"node-01", "node-01"},
 		{"Ubuntu 22.04", "Ubuntu 22.04"},
 		{"", ""},

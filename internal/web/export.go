@@ -88,7 +88,7 @@ func flushCSV(w http.ResponseWriter, filename string, buf *bytes.Buffer, cw *csv
 
 // contentDisposition 生成兼容非 ASCII 文件名的下载头。
 //
-// 节点名普遍是中文（腾讯云-sg、武汉-独服），而 `filename="..."` 只允许
+// 节点名普遍含非 ASCII 字符（中文昵称最常见），而 `filename="..."` 只允许
 // ASCII 可见字符：直接塞 UTF-8 会被部分浏览器截断成乱码或空文件名。
 // 按 RFC 6266/5987 同时给出 ASCII 回退名与 filename*=UTF-8” 形式。
 func contentDisposition(name string) string {
