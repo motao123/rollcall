@@ -1196,7 +1196,7 @@ async function viewNodes() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">全部节点</h2>
-        ${sectionActions(`<span id="nodesCountMeta">${list.length}/${nodes.length} 台</span>`, '<button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
+        ${sectionActions(`<span id="nodesCountMeta">${list.length}/${nodes.length} 台</span>`, '<button class="btn sm" id="nezhaBtn" type="button">⇩ 从 Nezha 迁移</button><button class="btn sm primary" id="wizBtn2">＋ 接入节点</button>')}
       </div>
       <div class="filter-bar">
         <select id="filterProvider" aria-label="按服务商筛选">${opt('', '全部服务商', f.provider)}${providers.map((p) => opt(p, p, f.provider)).join('')}</select>
@@ -1250,6 +1250,8 @@ async function viewNodes() {
   bindNodeClicks();
   const wiz2 = document.getElementById('wizBtn2');
   if (wiz2) wiz2.onclick = showAgentWizard;
+  const nzBtn = document.getElementById('nezhaBtn');
+  if (nzBtn) nzBtn.onclick = showNezhaImport;
   // 筛选变化后把条件写回 URL（replaceState 不产生多余历史记录）。
   const syncNodesHash = () => {
     const ff = state.nodeFilter;
@@ -6599,6 +6601,55 @@ new MutationObserver(() => {
     enhanceTables();
   });
 }).observe($('#view'), { childList: true, subtree: true });
+
+// showNezhaImport 从 Nezha 一键迁移：服务端拉取清单并批量建档，
+// 结果弹窗复用批量导入的展示（每台的接入命令 + 跳过原因）。
+// Nezha 令牌只在本次请求中使用，不落盘也不回显。
+function showNezhaImport() {
+  if (!state.authenticated) { showLoginGate(); return; }
+  const d = document.createElement('div');
+  d.className = 'modal-mask';
+  d.innerHTML = `<div class="modal" style="max-width:560px">
+    <div class="modal-title">从 Nezha 迁移</div>
+    <p class="modal-sub">填写 Nezha 主控地址与管理令牌（Nezha 后台「设置 → API 调用」里生成），
+      面板会拉取服务器清单并批量建档。重名的节点自动跳过；监控数据由 Rollcall Agent 重新采集。</p>
+    <form id="nezhaImportForm">
+      <label class="field"><span class="field-label">Nezha 主控地址</span>
+        <input name="url" type="text" placeholder="https://nezha.example.com" required></label>
+      <label class="field"><span class="field-label">管理令牌</span>
+        <input name="token" type="password" placeholder="Nezha 管理 API 令牌" required></label>
+      <p class="field-hint">令牌只用于本次拉取，不会被保存或写入日志。导入完成后到节点列表逐台点「接入」执行安装命令。</p>
+      <div class="form-actions">
+        <button class="btn" type="button" id="nezhaCancel">取消</button>
+        <button class="btn primary" type="submit" id="nezhaGo">拉取并导入</button>
+      </div>
+    </form>
+  </div>`;
+  document.body.appendChild(d);
+  const close = () => d.remove();
+  d.querySelector('#nezhaCancel').onclick = close;
+  d.onclick = (e) => { if (e.target === d) close(); };
+  d.querySelector('#nezhaImportForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = d.querySelector('#nezhaGo');
+    btn.disabled = true;
+    btn.textContent = '拉取中…';
+    try {
+      const r = await adminApi('/api/admin/nodes/import/nezha', {
+        method: 'POST',
+        body: JSON.stringify({ url: e.target.url.value.trim(), token: e.target.token.value }),
+      });
+      close();
+      toast(`已导入 ${r.created.length} 台（跳过 ${r.skipped.length}）`);
+      showImportResult(r);
+      viewNodes();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = '拉取并导入';
+      toast('导入失败：' + err.message, 'err');
+    }
+  };
+}
 
 // showAgentWizard 一站式接入向导：填台账 → 创建节点 → 直接给出安装命令。
 // 以前要「设置页建节点 → 复制 JSON → 手拼 systemd」，现在三步并一步。

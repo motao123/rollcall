@@ -730,7 +730,10 @@ func (s *Server) agentInstallCommand(base, nodeID, token string) string {
 	if strings.HasPrefix(base, "http://") && !isLoopbackBase(base) {
 		flag = "--allow-insecure "
 	}
-	return fmt.Sprintf("curl -fsSL %s/agent/install.sh | sh -s -- %s%s %s %s",
+	// ★ 路径只在第一个参数里出现一次：曾把 /agent/install.sh 同时写进
+	//   格式串与参数，curl 会去请求 install.sh/agent/install.sh（404），
+	//   批量导入生成的每条命令都无法安装。
+	return fmt.Sprintf("curl -fsSL %s | sh -s -- %s%s %s %s",
 		shellSingleQuote(base+"/agent/install.sh"), flag, shellSingleQuote(base),
 		shellSingleQuote(nodeID), shellSingleQuote(token))
 }

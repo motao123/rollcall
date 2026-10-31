@@ -53,39 +53,21 @@ type skippedNodeView struct {
 	Reason string `json:"reason"`
 }
 
-// handleAdminNodesImport 批量创建节点并返回每台的接入命令。
-func (s *Server) handleAdminNodesImport(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		fail(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+// applyNodeImport 把一批节点规格落成台账：逐条校验、重名跳过、整批一次落盘。
+// 粘贴导入与 Nezha 迁移两条路径共用这里——去重、令牌生成与接入命令的
+// 口径只维护一份，不会出现"两种导入行为不一致"。
+func (s *Server) applyNodeImport(r *http.Request, reqNodes []importNodeSpec) ([]importedNodeView, []skippedNodeView) {
+	if len(reqNodes) > maxImportNodes {
+		reqNodes = reqNodes[:maxImportNodes]
 	}
-	body := http.MaxBytesReader(w, r.Body, 256<<10)
-	var req struct {
-		Nodes []importNodeSpec `json:"nodes"`
-	}
-	dec := json.NewDecoder(body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, "bad json: "+err.Error())
-		return
-	}
-	if len(req.Nodes) == 0 {
-		fail(w, http.StatusBadRequest, "nodes 不能为空")
-		return
-	}
-	if len(req.Nodes) > maxImportNodes {
-		fail(w, http.StatusBadRequest, "单次最多导入 200 个节点")
-		return
-	}
-
 	// 已存在的名字（大小写与首尾空格不敏感）：迁移时重名几乎必然出现。
 	taken := map[string]struct{}{}
 	for _, n := range s.st.Nodes() {
 		taken[strings.ToLower(strings.TrimSpace(n.Name))] = struct{}{}
 	}
 
-	created := make([]*model.Node, 0, len(req.Nodes))
-	views := make([]importedNodeView, 0, len(req.Nodes))
+	created := make([]*model.Node, 0, len(reqNodes))
+	views := make([]importedNodeView, 0, len(reqNodes))
 	skipped := make([]skippedNodeView, 0)
 	// 地址优先用「面板对外地址」：面板可能经反代/隧道访问，请求里的 Host
 	// 未必是别人能连上的地址（例如从回环地址调 API 时拿到 127.0.0.1）。
@@ -95,7 +77,7 @@ func (s *Server) handleAdminNodesImport(w http.ResponseWriter, r *http.Request) 
 		base = requestBaseURL(r)
 	}
 
-	for i, spec := range req.Nodes {
+	for i, spec := range reqNodes {
 		n := &model.Node{
 			Name:           spec.Name,
 			Provider:       spec.Provider,
@@ -136,8 +118,36 @@ func (s *Server) handleAdminNodesImport(w http.ResponseWriter, r *http.Request) 
 	if len(created) > 0 {
 		s.events.Publish()
 	}
+	return views, skipped
+}
+
+// handleAdminNodesImport 批量创建节点并返回每台的接入命令。
+func (s *Server) handleAdminNodesImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, 256<<10)
+	var req struct {
+		Nodes []importNodeSpec `json:"nodes"`
+	}
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if len(req.Nodes) == 0 {
+		fail(w, http.StatusBadRequest, "nodes 不能为空")
+		return
+	}
+	if len(req.Nodes) > maxImportNodes {
+		fail(w, http.StatusBadRequest, "单次最多导入 200 个节点")
+		return
+	}
+	created, skipped := s.applyNodeImport(r, req.Nodes)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"created": views,
+		"created": created,
 		"skipped": skipped,
 	})
 }

@@ -62,6 +62,14 @@ func TestAgentInstallCommandQuotesArgs(t *testing.T) {
 			t.Errorf("命令缺少带引号的参数 %s\n实际: %s", want, cmd)
 		}
 	}
+	// 路径必须恰好出现一次：曾把 /agent/install.sh 同时写进格式串与参数，
+	// curl 会请求 install.sh/agent/install.sh（404），安装必败。
+	if got := strings.Count(cmd, "/agent/install.sh"); got != 1 {
+		t.Errorf("install.sh 路径应恰好出现 1 次，实际 %d 次\n实际: %s", got, cmd)
+	}
+	if !strings.HasPrefix(cmd, "curl -fsSL 'https://a.com$(evil)/agent/install.sh' | sh -s -- ") {
+		t.Errorf("命令前缀形状不对\n实际: %s", cmd)
+	}
 }
 
 // TestPublicTokenRateLimit 是 L1 回归：

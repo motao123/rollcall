@@ -151,6 +151,8 @@ func auditAction(method, p string) string {
 		return "nodes.batch"
 	case p == "/api/admin/nodes/import":
 		return "nodes.import"
+	case strings.HasPrefix(p, "/api/admin/nodes/import/nezha"):
+		return "nezha.import"
 	case strings.HasPrefix(p, "/api/admin/nodes"):
 		resource = "nodes"
 	case strings.HasPrefix(p, "/api/admin/agent-upgrades"):

@@ -2,7 +2,7 @@
 
 > 曾用名 **Probe**（2026-10-18 改名）。`docs/` 下的两份历史报告仍使用旧名，为当时事实记录，保留原貌。
 
-当前版本 **v1.42.0**（`./rollcall-server -version` 可查）。
+当前版本 **v1.43.0**（`./rollcall-server -version` 可查）。
 
 > **最短路径（5 步，约 3 分钟）**——细节见下文「五、快速开始」：
 >
@@ -1675,6 +1675,25 @@ certificate_days_remaining,uptime_percent_24h}`
 `ui-check` 看「界面关键不变量」——三者互补，任一为红都说明生产有问题。
 
 ## 十四、实际部署验证
+
+### v1.43.0（2026-10-31，Nezha 一键迁移 + 接入命令修复）
+
+**从 Nezha 一键迁移**（替代 Nezha 的第一步）：
+
+- 新端点 `POST /api/admin/nodes/import/nezha`：填 Nezha 主控地址与管理令牌，服务端拉取
+  `/api/v1/server` 清单，映射成批量导入规格（name / country_code→country / note）后
+  走与粘贴导入**完全相同**的落库路径（applyNodeImport：校验、重名跳过、整批落盘、
+  接入命令生成）——两条迁移路径的口径只维护一份
+- 节点页新增「⇩ 从 Nezha 迁移」弹窗，结果复用批量导入的结果弹窗（每台的接入命令 +
+  跳过原因）；Nezha 令牌只在本次请求内存中使用，不落盘、不进审计、不回显到响应
+- 宽松映射：Nezha 各版本 host JSON 键大小写不统一（CountryCode / country_code），
+  按不区分大小写查找；重名/空名跳过且不覆盖既有台账
+- 不导入 Nezha 的任何监控数据——指标由 Rollcall Agent 重新采集
+
+**修复一个存量接入命令 bug**（b1419b1 起，影响批量导入/Nezha 导入的全部命令）：
+`agentInstallCommand` 的格式串多写了一段路径，生成的命令 curl 请求
+`install.sh/agent/install.sh`（404，安装必败）。E2E 验证弹窗时抓到；修复后路径恰好
+出现一次并有测试断言锁定。面板「节点接入」单台命令不受影响（前端另行拼接）。
 
 ### v1.42.0（2026-10-30，隐私脱敏 + 备份含监控历史）
 

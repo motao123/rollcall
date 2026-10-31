@@ -361,6 +361,8 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/nodes/batch", authAdmin, http.HandlerFunc(s.handleAdminNodesBatch)},
 		// 批量建节点（迁移用）：单条失败不打断整批，响应带每台的接入命令。
 		{"/api/admin/nodes/import", authAdmin, http.HandlerFunc(s.handleAdminNodesImport)},
+		// Nezha 一键迁移：服务端拉取 Nezha 清单映射成节点（令牌只在本请求内存中使用）
+		{"/api/admin/nodes/import/nezha", authAdmin, http.HandlerFunc(s.handleNezhaImport)},
 		{"/api/admin/nodes/", authAdmin, http.HandlerFunc(s.handleAdminNodeByID)},
 		{"/api/admin/agent-upgrades", authAdmin, http.HandlerFunc(s.handleAdminAgentUpgrades)},
 		{"/api/admin/agent-upgrades/", authAdmin, http.HandlerFunc(s.handleAdminAgentUpgradeByID)},
