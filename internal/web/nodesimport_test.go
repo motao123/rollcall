@@ -46,7 +46,7 @@ type importResp struct {
 func TestNodesImportCreatesAndReturnsCommands(t *testing.T) {
 	st, h := importEnv(t)
 	body := `{"nodes":[
-		{"name":"迁移-01","provider":"racknerd","region":"圣何塞","country":"US","group":"prod","price":29.9,"expireAt":"2027-06-01"},
+		{"name":"迁移-01","provider":"棉花云","region":"圣何塞","country":"US","group":"prod","price":29.9,"expireAt":"2027-06-01"},
 		{"name":"迁移-02","region":"东京","country":"JP"}
 	]}`
 	w := importPost(h, body)

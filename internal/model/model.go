@@ -12,7 +12,7 @@ import (
 type Node struct {
 	ID       string  `json:"id"`
 	Name     string  `json:"name"`
-	Provider string  `json:"provider"` // 服务商：racknerd / netcup / 棉花云…
+	Provider string  `json:"provider"` // 服务商：棉花云 / 腾讯云…
 	Region   string  `json:"region"`   // 地区
 	Group    string  `json:"group"`    // 分组：prod / test / probe
 	Note     string  `json:"note"`

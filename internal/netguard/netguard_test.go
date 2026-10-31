@@ -34,7 +34,7 @@ func TestCheckIPPolicy(t *testing.T) {
 		{"100.64.0.1", false, true},
 		{"100.64.0.1", true, false}, // Tailscale 等 CGNAT 组网
 		// 落在 CGNAT / ULA 段内的云元数据地址，即使允许私网也必须拒绝
-		{"100.100.100.200", true, true}, // 阿里云 metadata
+		{"100.100.100.200", true, true}, // 云厂商 metadata
 		{"fd00:ec2::254", true, true},   // AWS IPv6 metadata
 		// 不可路由的保留网段：即使允许私网也应拒绝
 		{"203.0.113.9", true, true}, // TEST-NET-3

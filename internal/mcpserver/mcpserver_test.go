@@ -24,7 +24,7 @@ func newTestBackend(t *testing.T, gotAuth *string) *httptest.Server {
 			w.WriteHeader(401)
 			return
 		}
-		io.WriteString(w, `{"id":"n1","name":"racknerd-dc02"}`)
+		io.WriteString(w, `{"id":"n1","name":"demo-dc02"}`)
 	})
 	mux.HandleFunc("/api/nodes/n1/series", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"range":"`+r.URL.Query().Get("range")+`","points":2}`)

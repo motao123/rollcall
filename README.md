@@ -762,7 +762,7 @@ sudo systemctl start rollcall-server
 TOKEN=$(sudo cat /opt/rollcall/data/admin.token)
 curl -s -X POST http://127.0.0.1:19080/api/admin/nodes \
   -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"节点名","provider":"racknerd","region":"美国","group":"prod"}'
+  -d '{"name":"节点名","provider":"腾讯云","region":"美国","group":"prod"}'
 ```
 
 把 `rollcall-agent` 和 `deploy/rollcall-agent.service` 上传到目标节点后执行：

@@ -823,7 +823,7 @@ ExecStart=/opt/rollcall/rollcall-server -addr 127.0.0.1:19080 -data /opt/rollcal
 
 ```
 # 名称,服务商,地区,国家,分组（后四项可留空）
-香港-01,racknerd,圣何塞,US,prod
+香港-01,腾讯云,香港,CN,prod
 东京-02,绿云,东京,JP,prod
 ```
 

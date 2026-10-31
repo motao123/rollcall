@@ -1367,7 +1367,7 @@ function bindBatchOps(list) {
   const reload = () => { state.data.nodes = null; viewNodes(); };
   const PROMPTS = {
     group: { label: '新分组名', ph: '例如：prod', def: '' },
-    provider: { label: '服务商', ph: '例如：racknerd', def: '' },
+    provider: { label: '服务商', ph: '例如：棉花云', def: '' },
     region: { label: '地区', ph: '例如：香港', def: '' },
     expire: { label: '到期日（YYYY-MM-DD，留空清除）', ph: '2027-01-31', def: '' },
     currency: { label: '币种（USD / CNY）', ph: 'USD', def: 'USD' },
@@ -3905,7 +3905,7 @@ async function viewSettings() {
         <form id="nodeImportForm">
           <label class="field">
             <span class="field-label">节点列表</span>
-            <textarea name="list" rows="5" placeholder="香港-01,racknerd,圣何塞,US,prod
+            <textarea name="list" rows="5" placeholder="香港-01,腾讯云,香港,CN,prod
 东京-02,绿云,东京,JP,prod"></textarea>
           </label>
           <div class="form-actions"><button class="btn primary" type="submit">导入并生成接入命令</button></div>
@@ -3915,7 +3915,7 @@ async function viewSettings() {
         <summary class="sum">＋ 新增节点</summary>
         <form id="nodeForm" class="form-grid">
           ${field('名称', 'name', '', { required: true, placeholder: '例如 prod-01', hint: '会显示在公开状态页，勿填主机名/IP' })}
-          ${field('服务商', 'provider', '', { placeholder: 'racknerd / 腾讯云 …' })}
+          ${field('服务商', 'provider', '', { placeholder: '棉花云 / 腾讯云 …' })}
           ${field('位置', 'region', '', { placeholder: '美国 / 香港 …' })}
           ${field('国家代码', 'country', '', { placeholder: 'US / JP / DE', hint: '两位 ISO 代码，用于公开页分布图' })}
           ${field('分组', 'group', '', { placeholder: 'prod / test' })}
@@ -5953,7 +5953,7 @@ function showNodeEdit(n, after) {
     <p class="modal-sub">节点名称会显示在公开状态页，请勿填写主机名、IP 或可识别信息。</p>
     <form id="editNodeForm" class="form-grid">
       ${field('名称', 'name', n.name, { required: true, placeholder: '例如 prod-01' })}
-      ${field('服务商', 'provider', n.provider, { placeholder: 'racknerd / 腾讯云 …' })}
+      ${field('服务商', 'provider', n.provider, { placeholder: '棉花云 / 腾讯云 …' })}
       ${field('位置', 'region', n.region, { placeholder: '美国 / 香港 …' })}
       ${field('国家代码', 'country', n.country, { placeholder: 'US / JP / DE', hint: '两位 ISO 代码，公开页分布图使用' })}
       ${field('分组', 'group', n.group, { placeholder: 'prod / test' })}
@@ -7024,8 +7024,8 @@ function showAgentWizard() {
     <div class="modal-title">接入新节点</div>
     <p class="modal-sub">填写台账信息并创建，随后会生成一条在目标服务器上执行的安装命令。</p>
     <form id="wizardForm" class="form-grid">
-      ${field('名称', 'name', '', { required: true, placeholder: '例如 racknerd-纽约' })}
-      ${field('服务商', 'provider', '', { placeholder: 'racknerd / 腾讯云 …' })}
+      ${field('名称', 'name', '', { required: true, placeholder: '例如 腾讯云-上海' })}
+      ${field('服务商', 'provider', '', { placeholder: '棉花云 / 腾讯云 …' })}
       ${field('位置', 'region', '', { placeholder: '美国 / 香港 …' })}
       ${field('分组', 'group', 'prod', { placeholder: 'prod / test / probe' })}
       ${field('到期日', 'expireAt', '', { placeholder: '2027-06-01' })}

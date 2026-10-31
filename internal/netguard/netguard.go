@@ -42,7 +42,7 @@ var reservedIPv4 = []*net.IPNet{
 //
 // 169.254.169.254 等链路本地地址已由 IsLinkLocalUnicast 覆盖；
 // 以下两个落在 CGNAT / ULA 段内，会被 AllowPrivate 放行，故单独列出：
-//   - 100.100.100.200  阿里云（100.64/10 CGNAT）
+//   - 100.100.100.200  云厂商（100.64/10 CGNAT）
 //   - fd00:ec2::254    AWS IPv6（fc00::/7 ULA）
 //
 // 元数据服务永远不是合法的「自建内网服务」目标；一旦放行，
