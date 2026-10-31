@@ -2057,3 +2057,23 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
 }
 .login-passkey-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .login-passkey-btn:disabled { opacity: .6; }
+
+/* 宽表首列冻结：横向滚动后行标识（节点名/分组名）保持可见。
+   只对首列即行标识的表启用；node-table 的标识列在第 3 列且前两列宽度不定，
+   CSS sticky 偏移不可靠，暂不处理（卡片视图已是窄屏的替代方案）。 */
+.assets-table th:first-child,
+.assets-table td:first-child,
+.maint-table th:first-child,
+.maint-table td:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+.assets-table thead th:first-child,
+.maint-table thead th:first-child {
+  background: var(--panel-2);
+  z-index: 2;
+}
+html[data-theme="dark"] .assets-table td:first-child,
+html[data-theme="dark"] .maint-table td:first-child { background: var(--panel); }

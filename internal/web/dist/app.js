@@ -409,6 +409,14 @@ function areaChart(values, color, opts = {}) {
     }
   }
   const scaleVals = bandVals.length ? values.concat(bandVals) : values;
+  // 机群均值参考线（可选）：opts.ref 与 values 等长，null 表示该点无机群数据。
+  // 参考值计入纵轴缩放，否则虚线可能画出可视区外。
+  const ref = Array.isArray(opts.ref) && opts.ref.length === values.length ? opts.ref : null;
+  if (ref) {
+    for (const v of ref) {
+      if (typeof v === 'number' && isFinite(v)) scaleVals.push(v);
+    }
+  }
   let min = Math.min(...scaleVals), max = Math.max(...scaleVals);
   if (max - min < 0.001) { max = min + 1; }
   // 留 10% 顶部余量，纵轴取整
@@ -466,6 +474,24 @@ function areaChart(values, color, opts = {}) {
     xAxis = `<div class="chart-x">${picks.map((i) => `<span>${esc(chartAxisTime(times[i], spanSec))}</span>`).join('')}</div>`;
   }
   const cid = 'c' + (++chartSeq);
+  // 机群均值虚线路径：连续非空区段分段绘制（机群数据可能有缺口）。
+  let refPath = '';
+  if (ref) {
+    let run = [];
+    const flushRef = () => {
+      if (run.length >= 2) refPath += 'M' + run.join(' L');
+      run = [];
+    };
+    for (let i = 0; i < values.length; i++) {
+      const v = ref[i];
+      if (typeof v === 'number' && isFinite(v)) {
+        run.push(`${(padL + i * step).toFixed(1)},${y(v).toFixed(1)}`);
+      } else {
+        flushRef();
+      }
+    }
+    flushRef();
+  }
   chartRegistry.set(cid, {
     padL, iw, w, label: opts.label || '', fmt, times,
     pts: values.map((v, i) => ({ x: +(padL + i * step).toFixed(1), y: +y(v).toFixed(1), v })),
@@ -483,6 +509,7 @@ function areaChart(values, color, opts = {}) {
       ${bandPaths.map((d) => `<path d="${d}" fill="${color}" fill-opacity="0.13"/>`).join('')}
       ${edgePaths.map((d) => `<path d="${d}" fill="none" stroke="${color}" stroke-width="1" stroke-opacity="0.5" stroke-dasharray="3 3"/>`).join('')}
       <path d="${area}" fill="url(#${id})"/>
+      ${refPath ? `<path d="${refPath}" fill="none" stroke="var(--fg-3)" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.85"/>` : ''}
       <path d="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
       <g class="chart-cross" opacity="0" pointer-events="none">
         <line x1="0" y1="${padT}" x2="0" y2="${padT + ih}" stroke="var(--fg-3)" stroke-width="1" stroke-dasharray="3 3"/>
@@ -1631,6 +1658,17 @@ async function viewNodeDetail(id) {
   const times = pts.map((p) => p.ts);
   const netTimes = bucketSec > 0 ? times : times.slice(1);
   const loadVals = pts.map((p) => p.load1);
+  // 机群均值参考线：服务端按同粒度返回全节点平均（fleet.ts 与本机点对齐——
+  // 聚合区间精确同桶；原始区间取所属 1 分钟桶）。缺桶 → null → 虚线分段。
+  const fleet = series.fleet || [];
+  const fleetMap = new Map(fleet.map((f) => [f.ts, f]));
+  const fleetAt = (ts, metric) => {
+    const f = fleetMap.get(ts) || (bucketSec === 0 ? fleetMap.get(ts - ts % 60) : null);
+    return f ? f[metric] : null;
+  };
+  const fleetCPU = pts.map((p) => fleetAt(p.ts, 'cpu'));
+  const fleetMem = pts.map((p) => fleetAt(p.ts, 'mem'));
+  const fleetDisk = pts.map((p) => fleetAt(p.ts, 'disk'));
   // 图表脚注：窗口内均值与峰值。点太少不算，避免 1 个样本冒充"均值"。
   // p95Of：对原始样本做精确分位（线性插值），与后端 cpuhist 的语义一致。
   // raw/1m 区间样本量小（≤2880），排序成本可忽略。
@@ -1649,9 +1687,17 @@ async function viewNodeDetail(id) {
     const vs = (list || []).map((p) => p && p.cpuP95).filter((v) => typeof v === 'number' && v > 0);
     return vs.length ? Math.max(...vs) : 0;
   };
-  const winStat = (vals, fmt, p95) => (vals && vals.length >= 2
-    ? `<div class="chart-foot mono"${p95 ? ' title="p95 取区间内最差时段的桶内 95% 分位（直方图近似，误差 ≤ 档宽一半）"' : ''}>均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)} · 峰值 ${fmt(Math.max(...vals))}${p95 ? ` · <span style="color:var(--fg-2)">p95 ${fmt(p95)}</span>` : ''}</div>`
-    : '');
+  const winStat = (vals, fmt, p95, fleetVals) => {
+    if (!vals || vals.length < 2) return '';
+    let out = `<div class="chart-foot mono"${p95 ? ' title="p95 取区间内最差时段的桶内 95% 分位（直方图近似，误差 ≤ 档宽一半）"' : ''}>均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)} · 峰值 ${fmt(Math.max(...vals))}`;
+    if (p95) out += ` · <span style="color:var(--fg-2)">p95 ${fmt(p95)}</span>`;
+    // 机群均值（窗口内有数据的部分）：回答"是不是只有这台异常"。
+    if (Array.isArray(fleetVals)) {
+      const fv = fleetVals.filter((v) => typeof v === 'number' && isFinite(v));
+      if (fv.length) out += ` · <span style="color:var(--fg-2)">机群均值 ${fmt(fv.reduce((a, b) => a + b, 0) / fv.length)}</span>`;
+    }
+    return out + '</div>';
+  };
   const last = detail.latest || {};
   const traffic = detail.traffic || {};
   // 服务端已按节点配置的计费口径合成了 used（收发合计 / 只计单边 / 取较大者），
@@ -1712,20 +1758,20 @@ async function viewNodeDetail(id) {
           <div class="chart-head"><span class="chart-title">CPU 使用率</span>
             ${cpuBand ? '<span class="chart-legend" title="阴影区间是该时段每个桶内 p50–p95 的范围：线是均值，阴影上沿是较差的 5% 样本，两者间距就是被均值抹掉的容量风险">阴影 = 桶内 p50–p95</span>' : ''}
             <span class="chart-val mono" style="color:${hasData && (last.cpuPct || 0) > 85 ? 'var(--crit)' : 'var(--fg)'}">${hasData ? (last.cpuPct || 0).toFixed(1) + '%' : '—'}</span></div>
-          ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%', band: cpuBand })}
-          ${winStat(cpuVals, (v) => v.toFixed(1) + '%', p95FromBuckets(pts) || p95Of(cpuVals))}
+          ${areaChart(cpuVals, 'var(--accent)', { times, label: 'CPU', fmt: (v) => v.toFixed(1) + '%', band: cpuBand, ref: fleetCPU })}
+          ${winStat(cpuVals, (v) => v.toFixed(1) + '%', p95FromBuckets(pts) || p95Of(cpuVals), fleetCPU)}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">内存使用率</span>
             <span class="chart-val mono">${hasData ? `${pct(memUsed, memTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(memUsed)} / ${bytes(memTotal)}</span>` : '—'}</span></div>
-          ${areaChart(memVals, 'var(--accent-2)', { times, label: '内存', fmt: (v) => v.toFixed(1) + '%' })}
-          ${winStat(memVals, (v) => v.toFixed(1) + '%')}
+          ${areaChart(memVals, 'var(--accent-2)', { times, label: '内存', fmt: (v) => v.toFixed(1) + '%', ref: fleetMem })}
+          ${winStat(memVals, (v) => v.toFixed(1) + '%', null, fleetMem)}
         </div>
         <div class="chart-card">
           <div class="chart-head"><span class="chart-title">磁盘使用率</span>
             <span class="chart-val mono">${hasData ? `${pct(diskUsed, diskTotal).toFixed(1)}%<span style="font-size:11px;color:var(--fg-3);font-weight:400"> · ${bytes(diskUsed)} / ${bytes(diskTotal)}</span>` : '—'}</span></div>
-          ${areaChart(diskVals, 'var(--warn)', { times, label: '磁盘', fmt: (v) => v.toFixed(1) + '%' })}
-          ${winStat(diskVals, (v) => v.toFixed(1) + '%')}
+          ${areaChart(diskVals, 'var(--warn)', { times, label: '磁盘', fmt: (v) => v.toFixed(1) + '%', ref: fleetDisk })}
+          ${winStat(diskVals, (v) => v.toFixed(1) + '%', null, fleetDisk)}
         </div>
         ${hasTemp ? `<div class="chart-card">
           <div class="chart-head"><span class="chart-title">温度（hwmon 最高）</span>

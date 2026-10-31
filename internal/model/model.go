@@ -889,6 +889,14 @@ type Point struct {
 
 // HistoryPoint 是降采样后的历史点，用于 7 天/30 天/365 天查询。
 // 聚合只保留平均值、CPU 峰值、样本数与网络增量，不复制完整 Metrics。
+// FleetPoint 是机群平均序列的一个点（供节点详情的机群均值参考线）。
+type FleetPoint struct {
+	TS   int64   `json:"ts"`
+	CPU  float64 `json:"cpu"`
+	Mem  float64 `json:"mem"`
+	Disk float64 `json:"disk"`
+}
+
 type HistoryPoint struct {
 	TS     int64   `json:"ts"`
 	CPUPct float64 `json:"cpuPct"` // 桶内平均

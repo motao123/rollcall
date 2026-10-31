@@ -1087,8 +1087,11 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		} else {
 			pts = s.st.HistorySeries(id, resolution, since)
 		}
+		// 机群均值参考线：同区间、同粒度的全节点平均（概览 KPI 同口径）。
+		fleet := s.st.FleetSeries(resolution, since)
 		writeJSON(w, 200, map[string]any{
 			"node": n, "range": rng, "resolution": resolution, "points": pts,
+			"fleet": fleet,
 		})
 		return
 	}
