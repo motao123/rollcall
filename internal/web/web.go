@@ -83,6 +83,11 @@ type Server struct {
 	// 避免两个并发修改各自基于旧账号互相覆盖。
 	accountMu sync.Mutex
 
+	// passkeyChallenges 存放 WebAuthn 挑战（begin 签发、finish 单次消费）。
+	// 只在内存：挑战 5 分钟过期，重启后客户端重试一次即可。
+	passkeyMu         sync.Mutex
+	passkeyChallenges map[string]passkeyChallenge
+
 	// trustedProxies 是允许提交 X-Forwarded-For 的反向代理网段。
 	// 为空时只信任回环（见 defaultTrustedProxies）。
 	trustedProxies []*net.IPNet
@@ -329,6 +334,8 @@ func (s *Server) routes(static http.Handler) []route {
 
 		// 面板登录：登录失败按独立 scope 限速，不会拖累公开页。
 		{"/api/auth/login", authLogin, http.HandlerFunc(s.handleAuthLogin)},
+		{"/api/auth/passkey/begin", authLogin, http.HandlerFunc(s.handlePasskeyLoginBegin)},
+		{"/api/auth/passkey/login", authLogin, http.HandlerFunc(s.handlePasskeyLoginFinish)},
 		{"/api/auth/session", authLogin, http.HandlerFunc(s.handleAuthSession)},
 		{"/api/auth/logout", authLogin, http.HandlerFunc(s.handleAuthLogout)},
 
@@ -379,6 +386,10 @@ func (s *Server) routes(static http.Handler) []route {
 		{"/api/admin/account", authAdmin, http.HandlerFunc(s.handleAdminAccount)},
 		{"/api/admin/account/password", authAdmin, http.HandlerFunc(s.handleAdminAccountPassword)},
 		{"/api/admin/account/totp", authAdmin, http.HandlerFunc(s.handleAdminAccountTOTP)},
+		{"/api/admin/account/passkeys", authAdmin, http.HandlerFunc(s.handlePasskeyList)},
+		{"/api/admin/account/passkey/register/begin", authAdmin, http.HandlerFunc(s.handlePasskeyRegisterBegin)},
+		{"/api/admin/account/passkey/register/finish", authAdmin, http.HandlerFunc(s.handlePasskeyRegisterFinish)},
+		{"/api/admin/account/passkey/remove", authAdmin, http.HandlerFunc(s.handlePasskeyRemove)},
 		{"/api/admin/tokens", authAdmin, http.HandlerFunc(s.handleAdminTokens)},
 		{"/api/admin/tokens/", authAdmin, http.HandlerFunc(s.handleAdminTokenByID)},
 		{"/api/admin/backup", authAdmin, http.HandlerFunc(s.handleBackup)},

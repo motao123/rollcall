@@ -2043,3 +2043,17 @@ thead th[data-sort="desc"]::after { content: " ↓"; color: var(--accent); }
   border-radius: 999px; background: var(--accent-soft); color: var(--accent);
   font-size: 10.5px; font-weight: 600; letter-spacing: .02em; vertical-align: 1px;
 }
+
+/* 登录层 Passkey 按钮：与主登录按钮同宽度的次级样式 */
+.login-passkey-btn {
+  margin-top: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.login-passkey-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.login-passkey-btn:disabled { opacity: .6; }

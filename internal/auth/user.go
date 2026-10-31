@@ -48,6 +48,23 @@ type User struct {
 	// 肩窥、钓鱼代理、或明文 HTTP 下的中间人都能捕获一次码后再用一次。
 	// RFC 6238 §5.2 要求服务端拒绝重放的时间步。
 	LastTOTPStep int64 `json:"lastTotpStep,omitempty"`
+	// Passkeys 是 WebAuthn 凭据（公钥凭据，无任何私密材料）。
+	// 注册/登录的协议校验在 internal/webauthn；这里只存已验证通过的结果。
+	// 空列表表示未注册 Passkey——密码登录不受影响。
+	Passkeys []PasskeyCredential `json:"passkeys,omitempty"`
+}
+
+// PasskeyCredential 是一把已注册的 WebAuthn 公钥凭据。
+// PublicKey 保存 COSE Key 的 CBOR 原始字节（验证时原样解析），
+// 签名计数用于拒绝凭据克隆（计数回滚 = 克隆的强信号）。
+type PasskeyCredential struct {
+	ID           []byte `json:"id"` // 原始凭据 ID（authenticator 生成，至多 1023 字节）
+	PublicKey    []byte `json:"publicKey"`
+	SignCount    uint32 `json:"signCount"`
+	Name         string `json:"name,omitempty"` // 用户可见别名（如 "MacBook 触控 ID"）
+	CreatedAt    int64  `json:"createdAt"`
+	LastUsedAt   int64  `json:"lastUsedAt,omitempty"`
+	UserVerified bool   `json:"userVerified,omitempty"` // 最近一次登录是否通过用户校验（生物识别/PIN）
 }
 
 // ValidateUsername 校验登录用户名。

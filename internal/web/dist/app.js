@@ -3652,6 +3652,12 @@ async function viewSettings() {
   const serverVersion = state.serverVersion || '';
   const panelBase = (state.panelLink || location.origin).replace(/\/+$/, '');
   const totpOn = String(account.totpEnabled) === 'true';
+  // Passkey 清单：与 TOTP 一样在进入设置页时拉取，失败按空处理（不阻塞设置页）。
+  let passkeys = [];
+  try {
+    const pkResp = await adminApi('/api/admin/account/passkeys');
+    passkeys = pkResp.passkeys || [];
+  } catch (ex) { /* 列表失败不阻塞设置页 */ }
   const tokenRows = tokens.map((tk) => `<tr>
     <td class="strong">${esc(tk.name)}</td>
     <td class="mono" style="font-size:11.5px">${esc(tk.prefix)}…</td>
@@ -4000,6 +4006,20 @@ async function viewSettings() {
         <span class="section-meta">登录时在密码之外额外校验身份验证器动态码（TOTP，30 秒轮换）。</span>
         <button class="btn ${totpOn ? 'danger' : 'primary'}" id="totpBtn" type="button">${totpOn ? '停用两步验证' : '启用两步验证'}</button>
       </div>
+      <div class="panel panel-pad" id="passkeyPanel">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="badge ${passkeys.length ? 'ok' : 'mute'}">${passkeys.length ? `已注册 ${passkeys.length} 把 Passkey` : '未注册 Passkey'}</span>
+          <span class="section-meta">Passkey（设备指纹/PIN）可替代密码登录——注册后登录层会出现「使用 Passkey 登录」。凭据只保存在本机账号文件，随加密备份一起走。</span>
+          <button class="btn primary" id="passkeyAddBtn" type="button">添加 Passkey</button>
+        </div>
+        ${passkeys.length ? `<div style="margin-top:10px">${passkeys.map((p, i) => `
+          <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--line)">
+            <span class="strong">${esc(p.name || 'Passkey')}</span>
+            <span class="section-meta">添加于 ${p.createdAt ? new Date(p.createdAt * 1000).toLocaleDateString('zh-CN') : '—'}${p.lastUsedAt ? ' · 上次使用 ' + new Date(p.lastUsedAt * 1000).toLocaleString('zh-CN') : ' · 未使用过'}</span>
+            <span style="flex:1"></span>
+            <button class="btn tiny danger" data-passkey-revoke="${esc(p.id)}" data-passkey-name="${esc(p.name)}" type="button">吊销</button>
+          </div>`).join('')}</div>` : ''}
+      </div>
       <div class="panel panel-pad inline-panel">
         <span class="badge ${repSec && repSec.requireSignature ? 'ok' : 'mute'}">${repSec && repSec.requireSignature ? '已要求签名上报' : '未强制签名上报'}</span>
         <span class="section-meta">
@@ -4238,6 +4258,12 @@ async function viewSettings() {
     if (String((state.user || {}).totpEnabled) === 'true') showTOTPDisableDialog();
     else showTOTPSetupDialog();
   };
+
+  /* ---- Passkey 管理（注册需浏览器 WebAuthn API + 当前密码确认） ---- */
+  $('#passkeyAddBtn').onclick = () => showPasskeyRegisterDialog();
+  $$('[data-passkey-revoke]').forEach((b) => {
+    b.onclick = () => showPasskeyRevokeDialog(b.dataset.passkeyRevoke, b.dataset.passkeyName);
+  });
 
   /* ---- 上报签名策略 ---- */
   const repSigBtn = $('#repSigBtn');
@@ -6061,6 +6087,11 @@ function showLoginGate() {
           </span>
         </label>
         <button class="login-btn" id="gateSubmit" type="submit">登 录</button>
+        <button class="login-btn login-passkey-btn" id="gatePasskey" type="button" hidden
+                title="使用已注册的 Passkey（设备指纹/PIN）登录">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="9" r="3.2"/><path d="M4.5 19c.8-2.8 2.5-4.2 4.5-4.2s3.7 1.4 4.5 4.2"/><path d="M15 9h2.2M15.6 12h2.6M16.8 15h2.4M18.2 6.5h1.6" opacity=".55"/></svg>
+          使用 Passkey 登录
+        </button>
       </form>
       <div class="login-foot">
         <a href="/status" target="_blank" rel="noopener">公开状态页 ↗</a>
@@ -6083,6 +6114,72 @@ function showLoginGate() {
     passInp.type = passInp.type === 'password' ? 'text' : 'password';
     passInp.focus();
   };
+  // Passkey 登录：仅当账号上注册过凭据时显示按钮（登录层先探测一次）。
+  const pkBtn = layer.querySelector('#gatePasskey');
+  if (pkBtn) {
+    // base64url（无填充）↔ 字节：WebAuthn JSON 交换的标准编码
+    const b64urlToBytes = (s) => {
+      const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+      const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    };
+    const bytesToB64url = (b) => {
+      let bin = '';
+      for (const c of b) bin += String.fromCharCode(c);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    };
+    pkBtn.hidden = true;
+    fetch('/api/auth/passkey/begin', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: '{}',
+    }).then((r) => { if (r.ok) pkBtn.hidden = false; }).catch(() => {});
+    pkBtn.onclick = async () => {
+      err.classList.remove('show');
+      pkBtn.disabled = true;
+      try {
+        const begin = await fetch('/api/auth/passkey/begin', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const options = await begin.json();
+        if (!begin.ok) throw new Error(options.error || '无法开始 Passkey 登录');
+        const cred = await navigator.credentials.get({
+          publicKey: {
+            challenge: b64urlToBytes(options.challenge),
+            rpId: options.rpId,
+            timeout: options.timeout || 120000,
+            userVerification: options.userVerification || 'preferred',
+          },
+        });
+        const finishBody = {
+          challengeId: options.challengeId,
+          id: cred.id,
+          type: cred.type,
+          response: {
+            clientDataJSON: bytesToB64url(new Uint8Array(cred.response.clientDataJSON)),
+            authenticatorData: bytesToB64url(new Uint8Array(cred.response.authenticatorData)),
+            signature: bytesToB64url(new Uint8Array(cred.response.signature)),
+          },
+        };
+        const fin = await fetch('/api/auth/passkey/login', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(finishBody),
+        });
+        const finData = await fin.json().catch(() => null);
+        if (!fin.ok) throw new Error((finData && finData.error) || 'Passkey 验证失败');
+        window.__closeStream && window.__closeStream();
+        location.reload();
+      } catch (ex) {
+        pkBtn.disabled = false;
+        showErr('Passkey 登录失败：' + (ex.message || '浏览器取消或凭据无效'));
+      }
+    };
+  }
   layer.querySelector('#loginTheme').onclick = () => {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
   };
@@ -6647,6 +6744,118 @@ function showNezhaImport() {
       btn.disabled = false;
       btn.textContent = '拉取并导入';
       toast('导入失败：' + err.message, 'err');
+    }
+  };
+}
+
+// Passkey 注册：WebAuthn create ceremony + 当前密码确认。
+// base64url 转换与登录层同一套逻辑（各处独立定义，避免跨弹窗共享状态）。
+function showPasskeyRegisterDialog() {
+  const b64urlToBytes = (s) => {
+    const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  };
+  const bytesToB64url = (b) => {
+    let bin = '';
+    for (const c of b) bin += String.fromCharCode(c);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+  const d = openDialog('添加 Passkey', `
+    <p class="modal-sub">浏览器会弹出认证器（设备指纹 / 安全密钥 / PIN）。注册成功后，
+      这台设备可以直接登录面板，无需输入密码。</p>
+    <label class="field"><span class="field-label">设备别名（可选）</span>
+      <input name="pkName" type="text" maxlength="64" placeholder="例如：MacBook 触控 ID"></label>
+    <label class="field"><span class="field-label">当前密码</span>
+      <input name="pkPassword" type="password" autocomplete="current-password" required></label>
+    <p class="field-hint">Passkey 绑定当前访问的域名（RP ID），换域名后需重新注册。</p>
+    <div class="form-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn primary" type="button" id="pkRegisterGo">开始注册</button>
+    </div>`);
+  d.querySelector('#pkRegisterGo').onclick = async () => {
+    const name = d.querySelector('[name=pkName]').value.trim();
+    const password = d.querySelector('[name=pkPassword]').value;
+    const btn = d.querySelector('#pkRegisterGo');
+    btn.disabled = true;
+    btn.textContent = '等待认证器…';
+    try {
+      const begin = await adminApi('/api/admin/account/passkey/register/begin', {
+        method: 'POST', body: JSON.stringify({ name }),
+      });
+      const cred = await navigator.credentials.create({
+        publicKey: {
+          challenge: b64urlToBytes(begin.challenge),
+          rp: { id: begin.rpId, name: 'Rollcall' },
+          user: {
+            id: b64urlToBytes(begin.userId),
+            name: begin.userName,
+            displayName: begin.userName,
+          },
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+          timeout: begin.timeout || 120000,
+          excludeCredentials: (begin.excludeCredentials || []).map((c) => ({
+            id: b64urlToBytes(c.id), type: c.type,
+          })),
+          authenticatorSelection: {
+            residentKey: 'required',
+            userVerification: 'preferred',
+          },
+          attestation: 'none',
+        },
+      });
+      const finishBody = {
+        challengeId: begin.challengeId,
+        name: name || (cred.id.slice(-8)),
+        id: cred.id,
+        type: cred.type,
+        currentPassword: password,
+        response: {
+          clientDataJSON: bytesToB64url(new Uint8Array(cred.response.clientDataJSON)),
+          attestationObject: bytesToB64url(new Uint8Array(cred.response.attestationObject)),
+        },
+      };
+      const fin = await adminApi('/api/admin/account/passkey/register/finish', {
+        method: 'POST', body: JSON.stringify(finishBody),
+      });
+      d.close();
+      toast(`Passkey 已注册（共 ${fin.passkeys} 把）`);
+      viewSettings();
+    } catch (ex) {
+      btn.disabled = false;
+      btn.textContent = '开始注册';
+      if (ex && /NotAllowedError/.test(ex.message || String(ex))) {
+        toast('认证器操作被取消或超时', 'err');
+      } else {
+        toast('注册失败：' + (ex.message || ex), 'err');
+      }
+    }
+  };
+}
+
+function showPasskeyRevokeDialog(credID, name) {
+  const d = openDialog('吊销 Passkey', `
+    <p class="modal-sub">吊销「${esc(name || '该凭据')}」后，对应设备将无法再用 Passkey 登录。此操作需当前密码确认。</p>
+    <label class="field"><span class="field-label">当前密码</span>
+      <input name="pkPassword" type="password" autocomplete="current-password" required></label>
+    <div class="form-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn danger" type="button" id="pkRevokeGo">吊销</button>
+    </div>`);
+  d.querySelector('#pkRevokeGo').onclick = async () => {
+    const password = d.querySelector('[name=pkPassword]').value;
+    try {
+      const r = await adminApi('/api/admin/account/passkey/remove', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: password, id: credID }),
+      });
+      d.close();
+      toast(`已吊销（剩余 ${r.passkeys} 把）`);
+      viewSettings();
+    } catch (ex) {
+      toast('吊销失败：' + (ex.message || ex), 'err');
     }
   };
 }
